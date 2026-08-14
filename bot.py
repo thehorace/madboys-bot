@@ -48,6 +48,10 @@ async def ping(interaction: discord.Interaction):
 async def load_cogs():
     await bot.load_extension("cogs.stats")
     log.info("Loaded cog: stats")
+    await bot.load_extension("cogs.lineup")
+    log.info("Loaded cog: lineup")
+    await bot.load_extension("cogs.rotation")
+    log.info("Loaded cog: rotation")
 
 
 async def main():
