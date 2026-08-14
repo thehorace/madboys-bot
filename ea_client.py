@@ -17,7 +17,9 @@ log = logging.getLogger("madboys-bot.ea")
 
 BASE_URL = "https://proclubs.ea.com/api/fc"
 
-# Akamai will block plain aiohttp user-agents — spoof a real browser
+# Akamai fingerprints requests heavily — we need to mimic a real Chrome browser
+# session as closely as possible, including accept-language, sec-fetch headers,
+# and a realistic cookie consent value.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -27,6 +29,18 @@ HEADERS = {
     "Referer": "https://proclubs.ea.com/",
     "Origin": "https://proclubs.ea.com",
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "DNT": "1",
+    # Basic cookie consent — EA requires this to be set or it bounces requests
+    "Cookie": "AKA_A2=A; notice_behavior=implied; notice_gdpr_prefs=0|1|2:1|2:1",
 }
 
 # Simple in-memory cache: {cache_key: (timestamp, data)}
@@ -60,7 +74,8 @@ async def _get(session: aiohttp.ClientSession, url: str, params: dict) -> Option
                 _store(cache_key, data)
                 return data
             else:
-                log.warning(f"EA API returned {resp.status} for {url} {params}")
+                body = await resp.text()
+                log.warning(f"EA API returned {resp.status} for {url} {params} — body: {body[:200]}")
                 return None
     except asyncio.TimeoutError:
         log.warning(f"EA API timed out: {url}")
@@ -77,7 +92,12 @@ class EAClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            # keepalive + limit connections like a real browser would
+            connector = aiohttp.TCPConnector(limit=5, ttl_dns_cache=300)
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                headers={"User-Agent": HEADERS["User-Agent"]},
+            )
         return self._session
 
     async def close(self):
