@@ -39,17 +39,28 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"Pong! {round(bot.latency * 1000)}ms")
 
 
-# --- placeholder for future features ---
-# /clubstats, /lastgame  -> EA Pro Clubs data (polled + cached, see ea_client.py)
+# --- placeholders for future features ---
 # /lineup set            -> formation + position select menus
 # /rotation check        -> position rotation suggestions
 # /build <position>      -> curated build/tips embeds
 
 
-def main():
+async def load_cogs():
+    await bot.load_extension("cogs.stats")
+    log.info("Loaded cog: stats")
+
+
+async def main():
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN is not set. Check your .env file.")
-    bot.run(TOKEN)
+    async with bot:
+        await load_cogs()
+        await bot.start(TOKEN)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
