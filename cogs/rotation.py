@@ -123,60 +123,7 @@ class RotationCog(commands.Cog):
         self.bot = bot
         init_db()
 
-    lineup_group = app_commands.Group(name="lineup", description="Lineup management")
     rotation_group = app_commands.Group(name="rotation", description="Rotation tracking")
-
-    # ------------------------------------------------------------------ #
-    #  /lineup confirm
-    # ------------------------------------------------------------------ #
-    @lineup_group.command(name="confirm", description="Confirm and log the current lineup to rotation history")
-    @app_commands.describe(club="Which club")
-    @app_commands.choices(club=[
-        app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-        app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-    ])
-    async def lineup_confirm(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
-        if not interaction.user.guild_permissions.manage_channels:
-            if not any(r.name.lower() in ("manager", "admin", "coach") for r in interaction.user.roles):
-                await interaction.response.send_message(
-                    "You need the Manager/Admin role to confirm a lineup.", ephemeral=True
-                )
-                return
-
-        guild_id = str(interaction.guild_id)
-
-        # Import here to avoid circular — lineup DB functions are in the lineup cog module
-        from cogs.lineup import get_slots, get_formation
-        formation = get_formation(guild_id, club.value)
-        if not formation:
-            await interaction.response.send_message(
-                f"No formation set for {club.value}.", ephemeral=True
-            )
-            return
-
-        slots = get_slots(guild_id, club.value)
-        filled = {pos: did for pos, did in slots.items() if did}
-        if not filled:
-            await interaction.response.send_message(
-                "No players assigned yet. Use `/lineup suggest` or `/lineup assign` first.", ephemeral=True
-            )
-            return
-
-        log_lineup(guild_id, club.value, slots)
-
-        lines = []
-        for pos, discord_id in filled.items():
-            member = interaction.guild.get_member(int(discord_id))
-            name = member.display_name if member else f"<{discord_id}>"
-            lines.append(f"**{pos}**: {name}")
-
-        embed = discord.Embed(
-            title=f"✅ {club.value} Lineup Confirmed — {formation}",
-            description="\n".join(lines),
-            colour=0x1E90FF if club.value == "MADBOYS" else 0x2ECC71,
-        )
-        embed.set_footer(text=f"Logged {len(filled)} players • {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}")
-        await interaction.response.send_message(embed=embed)
 
     # ------------------------------------------------------------------ #
     #  /rotation check
