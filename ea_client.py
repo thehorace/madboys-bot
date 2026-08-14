@@ -4,10 +4,14 @@ EA Pro Clubs API client.
 EA's endpoints are unofficial and sit behind Akamai — requests must look like
 browser traffic from proclubs.ea.com or they get blocked. We also cache
 responses locally so we don't hammer EA and survive short outages.
+
+If PROXY_URL is set in env, all requests are routed through it (residential
+proxy recommended to bypass Akamai's cloud IP blocking).
 """
 
 import asyncio
 import logging
+import os
 import time
 from typing import Optional
 
@@ -17,9 +21,6 @@ log = logging.getLogger("madboys-bot.ea")
 
 BASE_URL = "https://proclubs.ea.com/api/fc"
 
-# Akamai fingerprints requests heavily — we need to mimic a real Chrome browser
-# session as closely as possible, including accept-language, sec-fetch headers,
-# and a realistic cookie consent value.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -39,13 +40,12 @@ HEADERS = {
     "Sec-CH-UA-Mobile": "?0",
     "Sec-CH-UA-Platform": '"Windows"',
     "DNT": "1",
-    # Basic cookie consent — EA requires this to be set or it bounces requests
     "Cookie": "AKA_A2=A; notice_behavior=implied; notice_gdpr_prefs=0|1|2:1|2:1",
 }
 
 # Simple in-memory cache: {cache_key: (timestamp, data)}
 _cache: dict[str, tuple[float, any]] = {}
-CACHE_TTL = 600  # seconds (10 min) — don't hammer EA
+CACHE_TTL = 600  # seconds (10 min)
 
 
 def _cached(key: str) -> Optional[any]:
@@ -60,7 +60,7 @@ def _store(key: str, data: any) -> None:
     _cache[key] = (time.time(), data)
 
 
-async def _get(session: aiohttp.ClientSession, url: str, params: dict) -> Optional[dict]:
+async def _get(session: aiohttp.ClientSession, url: str, params: dict, proxy: Optional[str] = None) -> Optional[dict]:
     cache_key = url + str(sorted(params.items()))
     cached = _cached(cache_key)
     if cached is not None:
@@ -68,14 +68,20 @@ async def _get(session: aiohttp.ClientSession, url: str, params: dict) -> Option
         return cached
 
     try:
-        async with session.get(url, params=params, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(
+            url,
+            params=params,
+            headers=HEADERS,
+            proxy=proxy,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 _store(cache_key, data)
                 return data
             else:
                 body = await resp.text()
-                log.warning(f"EA API returned {resp.status} for {url} {params} — body: {body[:200]}")
+                log.warning(f"EA API returned {resp.status} for {url} {params} — body: {body[:300]}")
                 return None
     except asyncio.TimeoutError:
         log.warning(f"EA API timed out: {url}")
@@ -89,15 +95,17 @@ class EAClient:
     def __init__(self, platform: str = "common-gen5"):
         self.platform = platform
         self._session: Optional[aiohttp.ClientSession] = None
+        self._proxy: Optional[str] = os.getenv("PROXY_URL") or None
+
+        if self._proxy:
+            log.info("EA requests will route through proxy")
+        else:
+            log.info("No PROXY_URL set — hitting EA directly (may 403 from cloud IPs)")
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            # keepalive + limit connections like a real browser would
             connector = aiohttp.TCPConnector(limit=5, ttl_dns_cache=300)
-            self._session = aiohttp.ClientSession(
-                connector=connector,
-                headers={"User-Agent": HEADERS["User-Agent"]},
-            )
+            self._session = aiohttp.ClientSession(connector=connector)
         return self._session
 
     async def close(self):
@@ -110,10 +118,9 @@ class EAClient:
         data = await _get(session, f"{BASE_URL}/clubs/info", {
             "platform": self.platform,
             "clubIds": str(club_id),
-        })
+        }, self._proxy)
         if data and str(club_id) in data:
             return data[str(club_id)]
-        # Some responses return a list
         if isinstance(data, list) and data:
             return data[0]
         return None
@@ -129,7 +136,7 @@ class EAClient:
             "clubIds": str(club_id),
             "matchType": match_type,
             "maxResultCount": str(count),
-        })
+        }, self._proxy)
         if isinstance(data, list):
             return data
         return None
@@ -140,7 +147,7 @@ class EAClient:
         data = await _get(session, f"{BASE_URL}/members/stats", {
             "platform": self.platform,
             "clubId": str(club_id),
-        })
+        }, self._proxy)
         if data and "members" in data:
             return data["members"]
         if isinstance(data, list):
@@ -153,7 +160,7 @@ class EAClient:
         data = await _get(session, f"{BASE_URL}/clubs/overallStats", {
             "platform": self.platform,
             "clubIds": str(club_id),
-        })
+        }, self._proxy)
         if isinstance(data, list) and data:
             return data[0]
         if data and str(club_id) in data:
