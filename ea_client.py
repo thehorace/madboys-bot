@@ -1,12 +1,12 @@
 """
 EA Pro Clubs API client.
 
-EA's endpoints are unofficial and sit behind Akamai — requests must look like
-browser traffic from proclubs.ea.com or they get blocked. We also cache
-responses locally so we don't hammer EA and survive short outages.
+Calls the home middleware (madboys-middleware) which fetches from EA
+using curl-cffi with Chrome TLS impersonation, bypassing Akamai's
+cloud IP blocking that affects Railway directly.
 
-If PROXY_URL is set in env, all requests are routed through it (residential
-proxy recommended to bypass Akamai's cloud IP blocking).
+Set MIDDLEWARE_URL in Railway env vars to your Cloudflare tunnel URL.
+Optionally set MIDDLEWARE_API_KEY if you configured one on the middleware.
 """
 
 import asyncio
@@ -19,33 +19,9 @@ import aiohttp
 
 log = logging.getLogger("madboys-bot.ea")
 
-BASE_URL = "https://proclubs.ea.com/api/fc"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://proclubs.ea.com/",
-    "Origin": "https://proclubs.ea.com",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "Sec-CH-UA-Mobile": "?0",
-    "Sec-CH-UA-Platform": '"Windows"',
-    "DNT": "1",
-    "Cookie": "AKA_A2=A; notice_behavior=implied; notice_gdpr_prefs=0|1|2:1|2:1",
-}
-
-# Simple in-memory cache: {cache_key: (timestamp, data)}
+# Simple in-memory cache
 _cache: dict[str, tuple[float, any]] = {}
-CACHE_TTL = 600  # seconds (10 min)
+CACHE_TTL = 600  # 10 minutes
 
 
 def _cached(key: str) -> Optional[any]:
@@ -60,65 +36,71 @@ def _store(key: str, data: any) -> None:
     _cache[key] = (time.time(), data)
 
 
-async def _get(session: aiohttp.ClientSession, url: str, params: dict, proxy: Optional[str] = None) -> Optional[dict]:
-    cache_key = url + str(sorted(params.items()))
-    cached = _cached(cache_key)
-    if cached is not None:
-        log.debug(f"Cache hit: {cache_key}")
-        return cached
-
-    try:
-        async with session.get(
-            url,
-            params=params,
-            headers=HEADERS,
-            proxy=proxy,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json(content_type=None)
-                _store(cache_key, data)
-                return data
-            else:
-                body = await resp.text()
-                log.warning(f"EA API returned {resp.status} for {url} {params} — body: {body[:300]}")
-                return None
-    except asyncio.TimeoutError:
-        log.warning(f"EA API timed out: {url}")
-        return None
-    except Exception as e:
-        log.error(f"EA API error: {e}")
-        return None
-
-
 class EAClient:
     def __init__(self, platform: str = "common-gen5"):
         self.platform = platform
         self._session: Optional[aiohttp.ClientSession] = None
-        self._proxy: Optional[str] = os.getenv("PROXY_URL") or None
 
-        if self._proxy:
-            log.info("EA requests will route through proxy")
+        self._base = os.getenv("MIDDLEWARE_URL", "").rstrip("/")
+        self._api_key = os.getenv("MIDDLEWARE_API_KEY", "")
+
+        if self._base:
+            log.info(f"EA requests via middleware: {self._base}")
         else:
-            log.info("No PROXY_URL set — hitting EA directly (may 403 from cloud IPs)")
+            log.warning("MIDDLEWARE_URL not set — EA commands will not work")
+
+    def _headers(self) -> dict:
+        h = {}
+        if self._api_key:
+            h["X-API-Key"] = self._api_key
+        return h
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(limit=5, ttl_dns_cache=300)
-            self._session = aiohttp.ClientSession(connector=connector)
+            self._session = aiohttp.ClientSession()
         return self._session
 
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def get_club_info(self, club_id: int) -> Optional[dict]:
-        """Basic club info: name, members, skill rating, wins/losses/draws."""
+    async def _get(self, path: str, params: dict) -> Optional[any]:
+        if not self._base:
+            return None
+
+        cache_key = path + str(sorted(params.items()))
+        cached = _cached(cache_key)
+        if cached is not None:
+            log.debug(f"Cache hit: {cache_key}")
+            return cached
+
+        url = f"{self._base}{path}"
         session = await self._get_session()
-        data = await _get(session, f"{BASE_URL}/clubs/info", {
-            "platform": self.platform,
-            "clubIds": str(club_id),
-        }, self._proxy)
+
+        try:
+            async with session.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    _store(cache_key, data)
+                    return data
+                else:
+                    body = await resp.text()
+                    log.warning(f"Middleware returned {resp.status} for {url} — {body[:200]}")
+                    return None
+        except asyncio.TimeoutError:
+            log.warning(f"Middleware timed out: {url}")
+            return None
+        except Exception as e:
+            log.error(f"Middleware error: {e}")
+            return None
+
+    async def get_club_info(self, club_id: int) -> Optional[dict]:
+        data = await self._get("/clubinfo", {"clubId": str(club_id), "platform": self.platform})
         if data and str(club_id) in data:
             return data[str(club_id)]
         if isinstance(data, list) and data:
@@ -126,28 +108,18 @@ class EAClient:
         return None
 
     async def get_recent_matches(self, club_id: int, match_type: str = "leagueMatch", count: int = 5) -> Optional[list]:
-        """
-        Recent matches for a club.
-        match_type: leagueMatch | friendlyMatch | playoffMatch
-        """
-        session = await self._get_session()
-        data = await _get(session, f"{BASE_URL}/clubs/matches", {
-            "platform": self.platform,
-            "clubIds": str(club_id),
+        data = await self._get("/matches", {
+            "clubId": str(club_id),
             "matchType": match_type,
-            "maxResultCount": str(count),
-        }, self._proxy)
+            "count": str(count),
+            "platform": self.platform,
+        })
         if isinstance(data, list):
             return data
         return None
 
     async def get_member_stats(self, club_id: int) -> Optional[list]:
-        """Per-player stats for everyone in the club."""
-        session = await self._get_session()
-        data = await _get(session, f"{BASE_URL}/members/stats", {
-            "platform": self.platform,
-            "clubId": str(club_id),
-        }, self._proxy)
+        data = await self._get("/members", {"clubId": str(club_id), "platform": self.platform})
         if data and "members" in data:
             return data["members"]
         if isinstance(data, list):
@@ -155,12 +127,7 @@ class EAClient:
         return None
 
     async def get_overall_stats(self, club_id: int) -> Optional[dict]:
-        """Season overall stats for the club."""
-        session = await self._get_session()
-        data = await _get(session, f"{BASE_URL}/clubs/overallStats", {
-            "platform": self.platform,
-            "clubIds": str(club_id),
-        }, self._proxy)
+        data = await self._get("/overallstats", {"clubId": str(club_id), "platform": self.platform})
         if isinstance(data, list) and data:
             return data[0]
         if data and str(club_id) in data:
