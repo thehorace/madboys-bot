@@ -82,7 +82,7 @@ class EAClient:
                 url,
                 params=params,
                 headers=self._headers(),
-                timeout=aiohttp.ClientTimeout(total=20),
+                timeout=aiohttp.ClientTimeout(total=35),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
@@ -118,8 +118,14 @@ class EAClient:
             return data
         return None
 
-    async def get_member_stats(self, club_id: int) -> Optional[list]:
-        data = await self._get("/members", {"clubId": str(club_id), "platform": self.platform})
+    async def get_member_stats(self, club_id: int, career: bool = False) -> Optional[list]:
+        """
+        career=False -> EA's members/stats (current season figures)
+        career=True  -> EA's members/career/stats (all-time totals)
+        The middleware needs a route for each; see /members and /members/career.
+        """
+        path = "/members/career" if career else "/members"
+        data = await self._get(path, {"clubId": str(club_id), "platform": self.platform})
         if data and "members" in data:
             return data["members"]
         if isinstance(data, list):

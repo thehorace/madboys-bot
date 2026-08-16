@@ -63,12 +63,38 @@ def get_db() -> sqlite3.Connection:
 
 def init_db():
     with get_db() as conn:
+        # Migrate any already-deployed DB where active_formation only has
+        # guild_id as its primary key (the bug: set_formation()'s
+        # ON CONFLICT(guild_id, club) needs a real (guild_id, club) unique
+        # constraint, which never existed, hence the OperationalError).
+        cols = conn.execute("PRAGMA table_info(active_formation)").fetchall()
+        if cols:
+            pk_cols = [c["name"] for c in cols if c["pk"] > 0]
+            if pk_cols != ["guild_id", "club"]:
+                log.warning("Migrating active_formation to a composite (guild_id, club) primary key")
+                conn.execute("ALTER TABLE active_formation RENAME TO active_formation_old")
+                conn.execute("""
+                    CREATE TABLE active_formation (
+                        guild_id   TEXT NOT NULL,
+                        club       TEXT NOT NULL,
+                        formation  TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (guild_id, club)
+                    )
+                """)
+                conn.execute("""
+                    INSERT OR IGNORE INTO active_formation (guild_id, club, formation, updated_at)
+                    SELECT guild_id, club, formation, updated_at FROM active_formation_old
+                """)
+                conn.execute("DROP TABLE active_formation_old")
+
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS active_formation (
-                guild_id TEXT PRIMARY KEY,
-                club     TEXT NOT NULL,
-                formation TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                guild_id   TEXT NOT NULL,
+                club       TEXT NOT NULL,
+                formation  TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, club)
             );
 
             CREATE TABLE IF NOT EXISTS lineup_slots (
