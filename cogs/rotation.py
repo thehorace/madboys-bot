@@ -19,6 +19,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import resolve_name
+
 log = logging.getLogger("madboys-bot.rotation")
 
 DB_PATH = os.getenv("DB_PATH", "madboys.db")
@@ -42,26 +44,57 @@ def init_db():
                 club       TEXT NOT NULL,
                 discord_id TEXT NOT NULL,
                 position   TEXT NOT NULL,
-                logged_at  TEXT NOT NULL
+                logged_at  TEXT NOT NULL,
+                source     TEXT NOT NULL DEFAULT 'manual'
             );
 
             CREATE INDEX IF NOT EXISTS idx_rotation_guild_club
                 ON rotation_log (guild_id, club, discord_id, logged_at);
+
+            CREATE TABLE IF NOT EXISTS processed_matches (
+                guild_id   TEXT NOT NULL,
+                club       TEXT NOT NULL,
+                match_id   TEXT NOT NULL,
+                processed_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, club, match_id)
+            );
         """)
+        # Backfill 'source' column for DBs created before this change
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(rotation_log)").fetchall()]
+        if "source" not in cols:
+            conn.execute("ALTER TABLE rotation_log ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
 
 
-def log_lineup(guild_id: str, club: str, slots: dict[str, str | None]):
+def log_lineup(guild_id: str, club: str, slots: dict[str, str | None], source: str = "manual"):
     """Write current confirmed lineup to rotation history."""
     now = datetime.now(timezone.utc).isoformat()
     rows = [
-        (guild_id, club, discord_id, position, now)
+        (guild_id, club, discord_id, position, now, source)
         for position, discord_id in slots.items()
         if discord_id
     ]
     with get_db() as conn:
         conn.executemany(
-            "INSERT INTO rotation_log (guild_id, club, discord_id, position, logged_at) VALUES (?,?,?,?,?)",
+            "INSERT INTO rotation_log (guild_id, club, discord_id, position, logged_at, source) VALUES (?,?,?,?,?,?)",
             rows,
+        )
+
+
+def is_match_processed(guild_id: str, club: str, match_id: str) -> bool:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM processed_matches WHERE guild_id=? AND club=? AND match_id=?",
+            (guild_id, club, match_id),
+        ).fetchone()
+        return row is not None
+
+
+def mark_match_processed(guild_id: str, club: str, match_id: str):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO processed_matches (guild_id, club, match_id, processed_at) VALUES (?,?,?,?)",
+            (guild_id, club, match_id, now),
         )
 
 
@@ -145,20 +178,19 @@ class RotationCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer()
+
         flagged = []
         healthy = []
 
         for discord_id, positions in history.items():
+            name = await resolve_name(interaction.guild, discord_id)
             if len(positions) < ROTATION_THRESHOLD:
                 continue
             last_n = [strip_number(p) for p in positions[:ROTATION_THRESHOLD]]
             if len(set(last_n)) == 1:
-                member = interaction.guild.get_member(int(discord_id))
-                name = member.display_name if member else f"<{discord_id}>"
                 flagged.append(f"⚠️ **{name}** — {last_n[0]} for last {ROTATION_THRESHOLD} games")
             else:
-                member = interaction.guild.get_member(int(discord_id))
-                name = member.display_name if member else f"<{discord_id}>"
                 healthy.append(f"✅ {name} — {' → '.join(strip_number(p) for p in positions[:3])}")
 
         embed = discord.Embed(
@@ -183,7 +215,7 @@ class RotationCog(commands.Cog):
             )
 
         embed.set_footer(text=f"Flagging players in same position for {ROTATION_THRESHOLD}+ consecutive games")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------ #
     #  /rotation history
@@ -242,10 +274,11 @@ class RotationCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer()
+
         lines = []
         for discord_id, pos_counts in sorted(counts.items()):
-            member = interaction.guild.get_member(int(discord_id))
-            name = member.display_name if member else f"<{discord_id}>"
+            name = await resolve_name(interaction.guild, discord_id)
             breakdown = ", ".join(
                 f"{strip_number(p)} ×{c}"
                 for p, c in sorted(pos_counts.items(), key=lambda x: -x[1])
@@ -257,7 +290,7 @@ class RotationCog(commands.Cog):
             description="\n".join(lines) if lines else "No data yet.",
             colour=0x1E90FF if club.value == "MADBOYS" else 0x2ECC71,
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

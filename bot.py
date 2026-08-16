@@ -39,19 +39,18 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"Pong! {round(bot.latency * 1000)}ms")
 
 
-# --- placeholders for future features ---
-# /lineup set            -> formation + position select menus
-# /rotation check        -> position rotation suggestions
-# /build <position>      -> curated build/tips embeds
-
-
 async def load_cogs():
+    # stats must load first — rotation_poller reuses its EAClient instance
     await bot.load_extension("cogs.stats")
     log.info("Loaded cog: stats")
     await bot.load_extension("cogs.lineup")
     log.info("Loaded cog: lineup")
     await bot.load_extension("cogs.rotation")
     log.info("Loaded cog: rotation")
+    await bot.load_extension("cogs.link")
+    log.info("Loaded cog: link")
+    await bot.load_extension("cogs.rotation_poller")
+    log.info("Loaded cog: rotation_poller")
 
 
 async def main():
@@ -65,7 +64,3 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
-
-
-if __name__ == "__main__":
-    main()

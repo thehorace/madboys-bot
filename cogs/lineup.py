@@ -21,6 +21,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils import resolve_name
+
 log = logging.getLogger("madboys-bot.lineup")
 
 DB_PATH = os.getenv("DB_PATH", "madboys.db")
@@ -63,38 +65,12 @@ def get_db() -> sqlite3.Connection:
 
 def init_db():
     with get_db() as conn:
-        # Migrate any already-deployed DB where active_formation only has
-        # guild_id as its primary key (the bug: set_formation()'s
-        # ON CONFLICT(guild_id, club) needs a real (guild_id, club) unique
-        # constraint, which never existed, hence the OperationalError).
-        cols = conn.execute("PRAGMA table_info(active_formation)").fetchall()
-        if cols:
-            pk_cols = [c["name"] for c in cols if c["pk"] > 0]
-            if pk_cols != ["guild_id", "club"]:
-                log.warning("Migrating active_formation to a composite (guild_id, club) primary key")
-                conn.execute("ALTER TABLE active_formation RENAME TO active_formation_old")
-                conn.execute("""
-                    CREATE TABLE active_formation (
-                        guild_id   TEXT NOT NULL,
-                        club       TEXT NOT NULL,
-                        formation  TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        PRIMARY KEY (guild_id, club)
-                    )
-                """)
-                conn.execute("""
-                    INSERT OR IGNORE INTO active_formation (guild_id, club, formation, updated_at)
-                    SELECT guild_id, club, formation, updated_at FROM active_formation_old
-                """)
-                conn.execute("DROP TABLE active_formation_old")
-
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS active_formation (
-                guild_id   TEXT NOT NULL,
-                club       TEXT NOT NULL,
-                formation  TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (guild_id, club)
+                guild_id TEXT PRIMARY KEY,
+                club     TEXT NOT NULL,
+                formation TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS lineup_slots (
@@ -254,8 +230,7 @@ class AssignSlotView(discord.ui.View):
     async def on_select(self, interaction: discord.Interaction):
         player_id = interaction.data["values"][0]
         set_slot(self.guild_id, self.club, self.position, player_id)
-        member = interaction.guild.get_member(int(player_id))
-        name = member.display_name if member else player_id
+        name = await resolve_name(interaction.guild, player_id)
         await interaction.response.edit_message(
             content=f"✅ **{name}** assigned to **{self.position}**",
             view=None,
@@ -328,13 +303,14 @@ class LineupCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer()
+
         slots = get_slots(guild_id, club.value)
         lines = []
         for pos, discord_id in slots.items():
             label = POSITION_LABELS.get(pos, pos)
             if discord_id:
-                member = interaction.guild.get_member(int(discord_id))
-                name = member.display_name if member else f"<{discord_id}>"
+                name = await resolve_name(interaction.guild, discord_id)
             else:
                 name = "*empty*"
             lines.append(f"{label}: {name}")
@@ -346,7 +322,7 @@ class LineupCog(commands.Cog):
         )
         filled = sum(1 for v in slots.values() if v)
         embed.set_footer(text=f"{filled}/{len(slots)} positions filled")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------ #
     #  /position prefer
@@ -378,6 +354,8 @@ class LineupCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer()
+
         all_prefs = get_all_prefs(guild_id)
         slots = {pos: None for pos in FORMATIONS[formation]}
         assigned = set()
@@ -399,8 +377,7 @@ class LineupCog(commands.Cog):
         for pos, discord_id in slots.items():
             label = POSITION_LABELS.get(pos, pos)
             if discord_id:
-                member = interaction.guild.get_member(int(discord_id))
-                name = member.display_name if member else f"<{discord_id}>"
+                name = await resolve_name(interaction.guild, discord_id)
             else:
                 name = "*no preference match — assign manually*"
             lines.append(f"{label}: {name}")
@@ -412,7 +389,7 @@ class LineupCog(commands.Cog):
         )
         filled = sum(1 for v in slots.values() if v)
         embed.set_footer(text=f"{filled}/{len(slots)} filled from preferences • Use /lineup assign to adjust")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------ #
     #  /lineup confirm
@@ -447,14 +424,15 @@ class LineupCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer()
+
         # Log to rotation history via rotation module
         from cogs.rotation import log_lineup
-        log_lineup(guild_id, club.value, slots)
+        log_lineup(guild_id, club.value, slots, source="manual")
 
         lines = []
         for pos, discord_id in filled.items():
-            member = interaction.guild.get_member(int(discord_id))
-            name = member.display_name if member else f"<{discord_id}>"
+            name = await resolve_name(interaction.guild, discord_id)
             lines.append(f"**{pos}**: {name}")
 
         embed = discord.Embed(
@@ -463,7 +441,7 @@ class LineupCog(commands.Cog):
             colour=0x1E90FF if club.value == "MADBOYS" else 0x2ECC71,
         )
         embed.set_footer(text=f"Logged {len(filled)} players • {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}")
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------ #
     #  /lineup assign
