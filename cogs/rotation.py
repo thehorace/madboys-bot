@@ -66,12 +66,37 @@ def init_db():
 
 
 def log_lineup(guild_id: str, club: str, slots: dict[str, str | None], source: str = "manual"):
-    """Write current confirmed lineup to rotation history."""
+    """Write current confirmed lineup to rotation history.
+
+    Use this for /lineup confirm, where each formation slot (CB1, CB2, ST1...)
+    is unique per position, so a dict of {position: discord_id} is safe.
+    """
     now = datetime.now(timezone.utc).isoformat()
     rows = [
         (guild_id, club, discord_id, position, now, source)
         for position, discord_id in slots.items()
         if discord_id
+    ]
+    with get_db() as conn:
+        conn.executemany(
+            "INSERT INTO rotation_log (guild_id, club, discord_id, position, logged_at, source) VALUES (?,?,?,?,?,?)",
+            rows,
+        )
+
+
+def log_positions(guild_id: str, club: str, entries: list[tuple[str, str]], source: str = "manual"):
+    """Write a list of (discord_id, position) pairs to rotation history.
+
+    Use this for the auto-poller, where EA only gives a broad position
+    bucket (GK/DEF/MID/FWD) per player — multiple players can legitimately
+    share the same position in one match, so a dict keyed by position
+    (like log_lineup uses) would silently drop all but one of them.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        (guild_id, club, discord_id, position, now, source)
+        for discord_id, position in entries
+        if discord_id and position
     ]
     with get_db() as conn:
         conn.executemany(

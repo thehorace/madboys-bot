@@ -7,17 +7,16 @@ second event loop inside the same process; requirements.txt already has
 apscheduler if you'd rather switch to it later, but it's not needed here).
 
 Uses cogs.link to map an EA persona name -> discord_id, and cogs.rotation's
-log_lineup()/processed_matches table to avoid double-logging a match.
+log_positions()/processed_matches table to avoid double-logging a match.
 
-*** STUB WARNING ***
-extract_position() below is NOT finished. I don't have a confirmed sample
-of what EA's /matches response puts in each player's position field (it
-may be a role code like "0"-"10", a string like "midfielder", or something
-else). Paste a sample player block from a real /lastgame or middleware
-response and I'll fill this in to map onto your GK/CB/RB/... slot labels
-correctly. Until then this poller will log matches as "processed" but
-SKIP writing any positions, so it's safe to enable — it just won't do
-anything useful yet.
+Position data note:
+EA's /matches response only gives a broad bucket per player, in
+players.<clubId>.<personaId>.pos — confirmed values are "goalkeeper",
+"defender", "midfielder", "forward". There's no finer field (e.g. no
+distinction between CB/RB/LB or CDM/CM/CAM) anywhere in the payload, so
+extract_position() maps onto GK/DEF/MID/FWD rather than the specific
+formation slot labels used in lineup.py. Good enough for "is this player
+stuck playing the same broad role every game", not for exact slot rotation.
 """
 
 import logging
@@ -26,7 +25,7 @@ import os
 import discord
 from discord.ext import commands, tasks
 
-from cogs.rotation import log_lineup, is_match_processed, mark_match_processed
+from cogs.rotation import log_positions, is_match_processed, mark_match_processed
 from cogs.link import find_discord_id_by_ea_name
 
 log = logging.getLogger("madboys-bot.rotation_poller")
@@ -39,22 +38,19 @@ CLUBS = {
     "GRASBOYS": int(os.getenv("GRASBOYS_CLUB_ID", "4137103")),
 }
 
+# EA's raw "pos" string -> our broad rotation category
+POSITION_MAP = {
+    "goalkeeper": "GK",
+    "defender": "DEF",
+    "midfielder": "MID",
+    "forward": "FWD",
+}
+
 
 def extract_position(player_data: dict) -> str | None:
-    """
-    TODO: map EA's raw per-player position field to one of the formation
-    slot labels used elsewhere in the bot (GK, CB, RB, LB, CDM, CM, CAM,
-    RM, LM, RW, LW, ST — see lineup.py's POSITION_GROUPS).
-
-    Once we have a sample match JSON this will probably look like:
-
-        code = player_data.get("position")
-        return POSITION_CODE_MAP.get(code)
-
-    Returning None means "unknown / skip this player" — log_lineup()
-    already ignores falsy values, so it's safe to leave as-is for now.
-    """
-    return None
+    """Map EA's raw per-player 'pos' field to a broad rotation category."""
+    raw = (player_data.get("pos") or "").strip().lower()
+    return POSITION_MAP.get(raw)
 
 
 class RotationPollerCog(commands.Cog):
@@ -100,10 +96,14 @@ class RotationPollerCog(commands.Cog):
                 continue
 
             players = match.get("players", {}).get(str(club_id), {})
-            slots: dict[str, str | None] = {}
+            entries: list[tuple[str, str]] = []
             unmatched = []
 
-            for ea_name, pdata in players.items():
+            for _persona_id, pdata in players.items():
+                ea_name = pdata.get("playername")
+                if not ea_name:
+                    continue
+
                 discord_id = find_discord_id_by_ea_name(guild_id, ea_name)
                 if not discord_id:
                     unmatched.append(ea_name)
@@ -111,11 +111,11 @@ class RotationPollerCog(commands.Cog):
 
                 position = extract_position(pdata)
                 if position:
-                    slots[position] = discord_id
+                    entries.append((discord_id, position))
 
-            if slots:
-                log_lineup(guild_id, club_name, slots, source="auto")
-                log.info(f"[{club_name}] Auto-logged {len(slots)} positions for match {match_id}")
+            if entries:
+                log_positions(guild_id, club_name, entries, source="auto")
+                log.info(f"[{club_name}] Auto-logged {len(entries)} positions for match {match_id}")
 
             if unmatched:
                 log.info(
