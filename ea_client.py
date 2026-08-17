@@ -64,16 +64,15 @@ class EAClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _get(self, path: str, params: dict, bypass_cache: bool = False) -> Optional[any]:
+    async def _get(self, path: str, params: dict) -> Optional[any]:
         if not self._base:
             return None
 
         cache_key = path + str(sorted(params.items()))
-        if not bypass_cache:
-            cached = _cached(cache_key)
-            if cached is not None:
-                log.debug(f"Cache hit: {cache_key}")
-                return cached
+        cached = _cached(cache_key)
+        if cached is not None:
+            log.debug(f"Cache hit: {cache_key}")
+            return cached
 
         url = f"{self._base}{path}"
         session = await self._get_session()
@@ -108,29 +107,20 @@ class EAClient:
             return data[0]
         return None
 
-    async def get_recent_matches(
-        self,
-        club_id: int,
-        match_type: str = "leagueMatch",
-        count: int = 5,
-        bypass_cache: bool = False,
-    ) -> Optional[list]:
-        data = await self._get(
-            "/matches",
-            {
-                "clubId": str(club_id),
-                "matchType": match_type,
-                "count": str(count),
-                "platform": self.platform,
-            },
-            bypass_cache=bypass_cache,
-        )
+    async def get_recent_matches(self, club_id: int, match_type: str = "leagueMatch", count: int = 5) -> Optional[list]:
+        data = await self._get("/matches", {
+            "clubId": str(club_id),
+            "matchType": match_type,
+            "count": str(count),
+            "platform": self.platform,
+        })
         if isinstance(data, list):
             return data
         return None
 
-    async def get_member_stats(self, club_id: int) -> Optional[list]:
-        data = await self._get("/members", {"clubId": str(club_id), "platform": self.platform})
+    async def get_member_stats(self, club_id: int, career: bool = False) -> Optional[list]:
+        path = "/members/career" if career else "/members"
+        data = await self._get(path, {"clubId": str(club_id), "platform": self.platform})
         if data and "members" in data:
             return data["members"]
         if isinstance(data, list):
