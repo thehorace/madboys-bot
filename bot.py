@@ -16,6 +16,7 @@ log = logging.getLogger("madboys-bot")
 
 intents = discord.Intents.default()
 intents.message_content = True  # needed if you add prefix commands later
+intents.members = True  # needed for guild.members (used by /lineup assign's select menu)
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 

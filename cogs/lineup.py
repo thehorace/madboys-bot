@@ -509,6 +509,14 @@ class LineupCog(commands.Cog):
             return
 
         members = [m for m in interaction.guild.members if not m.bot]
+        if not members:
+            await interaction.response.send_message(
+                "Couldn't load the member list for this server (member cache is empty). "
+                "This usually means the bot's Members intent isn't enabled yet, or the cache "
+                "hasn't finished populating since the last restart — try again in a moment.",
+                ephemeral=True,
+            )
+            return
         view = AssignSlotView(guild_id, club.value, position, members)
         await interaction.response.send_message(
             f"Assigning player to **{position}** in {club.value} ({formation}):",
