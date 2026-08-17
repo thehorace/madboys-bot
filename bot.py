@@ -56,6 +56,8 @@ async def load_cogs():
     log.info("Loaded cog: link")
     await bot.load_extension("cogs.rotation_poller")
     log.info("Loaded cog: rotation_poller")
+    await bot.load_extension("cogs.matchday")
+    log.info("Loaded cog: matchday")
 
 
 async def main():

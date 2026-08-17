@@ -175,9 +175,12 @@ class MatchdayCog(commands.Cog):
         opp_name = opp_data.get("details", {}).get("name", "Unknown")
         result = format_result(our_score, opp_score)
 
+        # NOTE: EA keys this dict by numeric player ID, not name — the
+        # actual display name lives in each player's "playername" field.
         players = match.get("players", {}).get(str(club_id), {})
         scorers = []
-        for pname, pdata in players.items():
+        for pid, pdata in players.items():
+            pname = pdata.get("playername") or f"<{pid}>"
             goals = int(pdata.get("goals", 0))
             assists = int(pdata.get("assists", 0))
             if goals > 0 or assists > 0:
@@ -194,9 +197,10 @@ class MatchdayCog(commands.Cog):
         )
 
         man_ratings = []
-        for pname, pdata in players.items():
+        for pid, pdata in players.items():
             rating = pdata.get("rating")
             if rating:
+                pname = pdata.get("playername") or f"<{pid}>"
                 man_ratings.append((pname, float(rating)))
         if man_ratings:
             man_ratings.sort(key=lambda x: x[1], reverse=True)

@@ -64,15 +64,16 @@ class EAClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _get(self, path: str, params: dict) -> Optional[any]:
+    async def _get(self, path: str, params: dict, bypass_cache: bool = False) -> Optional[any]:
         if not self._base:
             return None
 
         cache_key = path + str(sorted(params.items()))
-        cached = _cached(cache_key)
-        if cached is not None:
-            log.debug(f"Cache hit: {cache_key}")
-            return cached
+        if not bypass_cache:
+            cached = _cached(cache_key)
+            if cached is not None:
+                log.debug(f"Cache hit: {cache_key}")
+                return cached
 
         url = f"{self._base}{path}"
         session = await self._get_session()
@@ -86,7 +87,8 @@ class EAClient:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
-                    _store(cache_key, data)
+                    if not bypass_cache:
+                        _store(cache_key, data)
                     return data
                 else:
                     body = await resp.text()
@@ -107,13 +109,19 @@ class EAClient:
             return data[0]
         return None
 
-    async def get_recent_matches(self, club_id: int, match_type: str = "leagueMatch", count: int = 5) -> Optional[list]:
-        data = await self._get("/matches", {
-            "clubId": str(club_id),
-            "matchType": match_type,
-            "count": str(count),
-            "platform": self.platform,
-        })
+    async def get_recent_matches(
+        self, club_id: int, match_type: str = "leagueMatch", count: int = 5, bypass_cache: bool = False
+    ) -> Optional[list]:
+        data = await self._get(
+            "/matches",
+            {
+                "clubId": str(club_id),
+                "matchType": match_type,
+                "count": str(count),
+                "platform": self.platform,
+            },
+            bypass_cache=bypass_cache,
+        )
         if isinstance(data, list):
             return data
         return None
