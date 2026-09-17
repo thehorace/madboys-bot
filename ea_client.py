@@ -126,6 +126,63 @@ class EAClient:
             return data
         return None
 
+    async def get_recent_matches_multi(
+        self,
+        club_id: int,
+        match_types: Optional[list[str]] = None,
+        count: int = 5,
+        bypass_cache: bool = False,
+    ) -> Optional[list]:
+        """
+        Fetch recent matches across multiple match types and merge them.
+
+        EA's /matches endpoint partitions match history by matchType —
+        querying "leagueMatch" alone misses a club's playoff games entirely
+        (and vice versa), so a club that just finished a playoff run would
+        show up as having "no recent matches" even though they played
+        yesterday. This fetches each type separately, dedupes by match
+        identifier, sorts the combined set newest-first by timestamp, and
+        returns the top `count` overall.
+
+        Defaults to league + playoff, which covers Pro Clubs' two
+        competitive match types. Friendlies/other types can be added here
+        later if needed.
+        """
+        if match_types is None:
+            match_types = ["leagueMatch", "playoffMatch"]
+
+        all_matches: list[dict] = []
+        for mt in match_types:
+            matches = await self.get_recent_matches(
+                club_id, match_type=mt, count=count, bypass_cache=bypass_cache
+            )
+            if matches:
+                all_matches.extend(matches)
+
+        if not all_matches:
+            return None
+
+        # Dedupe (in case EA ever double-reports across types) then sort
+        # newest first. Fall back to matchId if timestamp is missing so a
+        # bad/missing value doesn't crash the sort.
+        seen = set()
+        deduped = []
+        for m in all_matches:
+            match_id = str(m.get("matchId") or m.get("timestamp") or id(m))
+            if match_id in seen:
+                continue
+            seen.add(match_id)
+            deduped.append(m)
+
+        def sort_key(m: dict) -> int:
+            try:
+                return int(m.get("timestamp", 0))
+            except (TypeError, ValueError):
+                return 0
+
+        deduped.sort(key=sort_key, reverse=True)
+        return deduped[:count]
+
     async def get_member_stats(self, club_id: int, career: bool = False) -> Optional[list]:
         path = "/members/career" if career else "/members"
         data = await self._get(path, {"clubId": str(club_id), "platform": self.platform})

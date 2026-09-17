@@ -11,6 +11,9 @@ Design notes:
   - EA's Pro Clubs API only exposes *completed* matches (match-history based),
     so this can't show live goal-by-goal updates. Instead it polls for the
     newest completed match and posts it the first time it's seen.
+  - EA partitions match history by matchType, so the poll checks both
+    "leagueMatch" and "playoffMatch" and posts whichever is newest — polling
+    leagueMatch alone would silently miss a club's playoff games entirely.
   - "Newest match already posted" state is persisted in SQLite so a bot
     restart won't cause a re-post of an old result. The polling loop itself
     is in-memory only, so a restart does stop active polling — /matchday start
@@ -132,8 +135,10 @@ class MatchdayCog(commands.Cog):
     # ------------------------------------------------------------------ #
     async def _check_and_post(self, guild_id: str, club: str, channel_id: str):
         club_id = CLUBS[club]
-        matches = await self.ea.get_recent_matches(
-            club_id, match_type="leagueMatch", count=1, bypass_cache=True
+        # Checks league + playoff matches and posts whichever is newest —
+        # see module docstring for why both types are needed.
+        matches = await self.ea.get_recent_matches_multi(
+            club_id, count=1, bypass_cache=True
         )
         if not matches:
             return

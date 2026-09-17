@@ -9,6 +9,11 @@ apscheduler if you'd rather switch to it later, but it's not needed here).
 Uses cogs.link to map an EA persona name -> discord_id, and cogs.rotation's
 log_positions()/processed_matches table to avoid double-logging a match.
 
+Match type note:
+EA partitions match history by matchType, so this checks both
+"leagueMatch" and "playoffMatch" — checking leagueMatch alone would
+silently skip rotation logging for any playoff games played.
+
 Position data note:
 EA's /matches response only gives a broad bucket per player, in
 players.<clubId>.<personaId>.pos — confirmed values are "goalkeeper",
@@ -81,7 +86,8 @@ class RotationPollerCog(commands.Cog):
                 log.exception(f"Error polling {club_name} for new matches")
 
     async def _poll_club(self, guild: discord.Guild, club_name: str, club_id: int):
-        matches = await self.ea.get_recent_matches(club_id, match_type="leagueMatch", count=5)
+        # Checks league + playoff matches — see module docstring.
+        matches = await self.ea.get_recent_matches_multi(club_id, count=5)
         if not matches:
             return
 
