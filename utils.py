@@ -1,32 +1,49 @@
 """
-Shared helpers used across cogs.
+Shared helpers used across cogs (previously copy-pasted into several files).
 """
 
 import logging
+from typing import Optional
 
 import discord
 
 log = logging.getLogger("madboys-bot.utils")
 
+MANAGER_ROLE_NAMES = ("manager", "admin", "coach")
+
+RESULT_LABEL = {"W": "✅ WIN", "L": "❌ LOSS", "D": "🟡 DRAW"}
+RESULT_EMOJI = {"W": "✅", "L": "❌", "D": "🟡"}
+RESULT_COLOUR = {"W": 0x2ECC71, "L": 0xE74C3C, "D": 0xF1C40F}
+
+
+def result_letter(ours: int, theirs: int) -> str:
+    if ours > theirs:
+        return "W"
+    if ours < theirs:
+        return "L"
+    return "D"
+
+
+def format_result(ours: int, theirs: int) -> str:
+    return RESULT_LABEL[result_letter(ours, theirs)]
+
+
+def is_manager(member: discord.abc.User) -> bool:
+    """Manage Channels permission, or a role called Manager / Admin / Coach."""
+    perms = getattr(member, "guild_permissions", None)
+    if perms and perms.manage_channels:
+        return True
+    return any(r.name.lower() in MANAGER_ROLE_NAMES for r in getattr(member, "roles", []))
+
 
 async def resolve_name(guild: discord.Guild, discord_id: str) -> str:
     """
-    Resolve a discord_id to a display name.
-
-    Tries the local member cache first (fast, no API call). If that misses
-    (common cause: bot started before the member sent any recent activity,
-    or the member cache just doesn't have them yet), falls back to a direct
-    REST fetch. fetch_member() does NOT require the privileged "Server
-    Members Intent" — it's a normal API call — so this is safe to use
-    without flipping that toggle in the dev portal.
-
-    Falls back to a placeholder only if the member has actually left the
-    server or the ID is otherwise unresolvable.
+    discord_id -> display name. Member cache first (free), then a REST fetch,
+    then a placeholder if they've left the server.
     """
     member = guild.get_member(int(discord_id))
     if member:
         return member.display_name
-
     try:
         member = await guild.fetch_member(int(discord_id))
         return member.display_name
@@ -35,3 +52,26 @@ async def resolve_name(guild: discord.Guild, discord_id: str) -> str:
     except discord.HTTPException as e:
         log.warning(f"fetch_member failed for {discord_id}: {e}")
         return f"<{discord_id}>"
+
+
+def to_int(v, default: int = 0) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def to_float(v, default: Optional[float] = None) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def pct(made: int, attempts: int) -> Optional[float]:
+    return (100.0 * made / attempts) if attempts else None
+
+
+def clip(text: str, limit: int = 1024) -> str:
+    """Embed field values max out at 1024 chars; trim instead of crashing."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"

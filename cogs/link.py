@@ -1,173 +1,154 @@
 """
-Links a Discord member to their EA Pro Clubs persona name, so match data
-pulled from EA can be matched back to a discord_id for auto-logging
-rotation history.
+Links a Discord member to their EA Pro Clubs persona name, so match data from
+EA can be matched back to a Discord account (auto rotation logging, /me,
+milestone pings, lineup suggestions).
 
 Commands:
-  /link me <ea_name>              - Self-serve: link your own EA name
-  /link set <member> <ea_name>    - Manager override: link on someone's behalf
-  /link show [member]             - Show the current link for yourself or someone else
-  /link list                      - Manager: list all links for the server
+  /link me <ea_name>            - Link your own EA name (autocompletes from the club roster)
+  /link set <member> <ea_name>  - Manager: link on someone's behalf
+  /link remove [member]         - Remove a link (yourself, or anyone if manager)
+  /link show [member]           - Show a link
+  /link list                    - Manager: list all links
 """
 
 import logging
-import os
-import sqlite3
-from datetime import datetime, timezone
+from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import resolve_name
+from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
+from db import connect, now_iso
+from utils import clip, is_manager, resolve_name
 
 log = logging.getLogger("madboys-bot.link")
 
-DB_PATH = os.getenv("DB_PATH", "madboys.db")
-
-
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    with get_db() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS ea_links (
-                guild_id   TEXT NOT NULL,
-                discord_id TEXT NOT NULL,
-                ea_name    TEXT NOT NULL,
-                linked_by  TEXT NOT NULL,   -- 'self' or the discord_id of the manager who set it
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (guild_id, discord_id)
-            );
-
-            -- lets us go the other direction: EA name -> discord_id, case-insensitively
-            CREATE INDEX IF NOT EXISTS idx_ea_links_name
-                ON ea_links (guild_id, ea_name COLLATE NOCASE);
-        """)
-
 
 def set_link(guild_id: str, discord_id: str, ea_name: str, linked_by: str):
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
+    with connect() as conn:
         conn.execute("""
-            INSERT INTO ea_links (guild_id, discord_id, ea_name, linked_by, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO ea_links (guild_id, discord_id, ea_name, linked_by, updated_at) VALUES (?,?,?,?,?)
             ON CONFLICT(guild_id, discord_id) DO UPDATE SET
                 ea_name=excluded.ea_name, linked_by=excluded.linked_by, updated_at=excluded.updated_at
-        """, (guild_id, discord_id, ea_name, linked_by, now))
+        """, (guild_id, discord_id, ea_name, linked_by, now_iso()))
 
 
-def get_link(guild_id: str, discord_id: str) -> str | None:
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT ea_name FROM ea_links WHERE guild_id=? AND discord_id=?",
-            (guild_id, discord_id),
-        ).fetchone()
-        return row["ea_name"] if row else None
+def remove_link(guild_id: str, discord_id: str) -> bool:
+    with connect() as conn:
+        return conn.execute("DELETE FROM ea_links WHERE guild_id=? AND discord_id=?",
+                            (guild_id, discord_id)).rowcount > 0
+
+
+def get_link(guild_id: str, discord_id: str) -> Optional[str]:
+    with connect() as conn:
+        row = conn.execute("SELECT ea_name FROM ea_links WHERE guild_id=? AND discord_id=?",
+                           (guild_id, discord_id)).fetchone()
+    return row["ea_name"] if row else None
 
 
 def get_all_links(guild_id: str) -> dict[str, str]:
-    """Returns {discord_id: ea_name} for the whole server."""
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT discord_id, ea_name FROM ea_links WHERE guild_id=?",
-            (guild_id,),
-        ).fetchall()
-        return {row["discord_id"]: row["ea_name"] for row in rows}
+    """{discord_id: ea_name}"""
+    with connect() as conn:
+        rows = conn.execute("SELECT discord_id, ea_name FROM ea_links WHERE guild_id=?", (guild_id,)).fetchall()
+    return {r["discord_id"]: r["ea_name"] for r in rows}
 
 
-def find_discord_id_by_ea_name(guild_id: str, ea_name: str) -> str | None:
-    """Case-insensitive lookup, EA name -> discord_id. Used by the auto-poller."""
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT discord_id FROM ea_links WHERE guild_id=? AND ea_name = ? COLLATE NOCASE",
-            (guild_id, ea_name),
-        ).fetchone()
-        return row["discord_id"] if row else None
+def find_discord_id_by_ea_name(guild_id: str, ea_name: str) -> Optional[str]:
+    with connect() as conn:
+        row = conn.execute("SELECT discord_id FROM ea_links WHERE guild_id=? AND ea_name=? COLLATE NOCASE",
+                           (guild_id, ea_name)).fetchone()
+    return row["discord_id"] if row else None
 
 
-def _is_manager(member: discord.Member) -> bool:
-    if member.guild_permissions.manage_channels:
-        return True
-    return any(r.name.lower() in ("manager", "admin", "coach") for r in member.roles)
+async def roster_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Suggest EA persona names from the club's member list (cached, so this is cheap)."""
+    ea = getattr(interaction.client, "ea", None)
+    names: list[str] = []
+    if ea is not None:
+        members = await ea.get_member_stats(CLUB_ID) or []
+        names = [m.get("name") for m in members if m.get("name")]
+    cur = current.lower()
+    return [app_commands.Choice(name=n, value=n) for n in sorted(names, key=str.lower) if cur in n.lower()][:25]
 
 
 class LinkCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        init_db()
 
     link_group = app_commands.Group(name="link", description="Link Discord accounts to EA Pro Clubs personas")
 
+    async def _roster_note(self, ea_name: str) -> str:
+        ea = getattr(self.bot, "ea", None)
+        members = await ea.get_member_stats(CLUB_ID) if ea else None
+        if members and not any((m.get("name") or "").lower() == ea_name.lower() for m in members):
+            return (f"\n⚠️ **{ea_name}** isn't in {CLUB_NAME}'s current EA roster — double-check the spelling, "
+                    f"or ignore this if they just joined.")
+        return ""
+
     @link_group.command(name="me", description="Link your own EA Pro Clubs persona name")
-    @app_commands.describe(ea_name="Your exact EA persona name (case doesn't matter)")
+    @app_commands.describe(ea_name="Your EA persona name — start typing to pick from the club roster")
+    @app_commands.autocomplete(ea_name=roster_autocomplete)
     async def link_me(self, interaction: discord.Interaction, ea_name: str):
+        await interaction.response.defer(ephemeral=True)
         set_link(str(interaction.guild_id), str(interaction.user.id), ea_name, linked_by="self")
-        await interaction.response.send_message(
-            f"✅ Linked your Discord account to EA persona **{ea_name}**.\n"
-            f"Once you're in a logged league match, `/rotation` will start tracking your position automatically.",
-            ephemeral=True,
-        )
+        await interaction.followup.send(
+            f"✅ Linked you to EA persona **{ea_name}**. Your positions will be tracked automatically "
+            f"after each match, and `/me` now shows your stats." + await self._roster_note(ea_name),
+            ephemeral=True)
 
-    @link_group.command(name="set", description="Manager: link a member to an EA persona on their behalf")
-    @app_commands.describe(member="The Discord member", ea_name="Their exact EA persona name")
+    @link_group.command(name="set", description="Manager: link a member to an EA persona")
+    @app_commands.describe(member="The Discord member", ea_name="Their EA persona name")
+    @app_commands.autocomplete(ea_name=roster_autocomplete)
     async def link_set(self, interaction: discord.Interaction, member: discord.Member, ea_name: str):
-        if not _is_manager(interaction.user):
+        if not is_manager(interaction.user):
             await interaction.response.send_message(
-                "You need the Manager/Admin role to link on someone else's behalf. "
-                "They can do it themselves with `/link me`.",
-                ephemeral=True,
-            )
+                "You need the Manager/Admin role to link someone else. They can use `/link me`.", ephemeral=True)
             return
-
+        await interaction.response.defer()
         set_link(str(interaction.guild_id), str(member.id), ea_name, linked_by=str(interaction.user.id))
+        await interaction.followup.send(f"✅ Linked **{member.display_name}** to EA persona **{ea_name}**."
+                                        + await self._roster_note(ea_name))
+
+    @link_group.command(name="remove", description="Remove an EA link (yours, or anyone's if you're a manager)")
+    @app_commands.describe(member="Leave blank for yourself")
+    async def link_remove(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        target = member or interaction.user
+        if target.id != interaction.user.id and not is_manager(interaction.user):
+            await interaction.response.send_message("Only managers can remove someone else's link.", ephemeral=True)
+            return
+        ok = remove_link(str(interaction.guild_id), str(target.id))
         await interaction.response.send_message(
-            f"✅ Linked **{member.display_name}** to EA persona **{ea_name}**."
-        )
+            f"🗑️ Removed link for **{target.display_name}**." if ok else f"**{target.display_name}** wasn't linked.",
+            ephemeral=True)
 
     @link_group.command(name="show", description="Show the linked EA persona for yourself or someone else")
     @app_commands.describe(member="Leave blank to check yourself")
-    async def link_show(self, interaction: discord.Interaction, member: discord.Member = None):
+    async def link_show(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
         target = member or interaction.user
         ea_name = get_link(str(interaction.guild_id), str(target.id))
-        if not ea_name:
-            await interaction.response.send_message(
-                f"**{target.display_name}** isn't linked yet. Use `/link me` to set it.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            f"**{target.display_name}** → EA persona **{ea_name}**", ephemeral=True
-        )
+        msg = (f"**{target.display_name}** → EA persona **{ea_name}**" if ea_name
+               else f"**{target.display_name}** isn't linked yet. Use `/link me` to set it.")
+        await interaction.response.send_message(msg, ephemeral=True)
 
-    @link_group.command(name="list", description="Manager: list all EA persona links for this server")
+    @link_group.command(name="list", description="Manager: list all EA persona links, and who in the roster isn't linked")
     async def link_list(self, interaction: discord.Interaction):
-        if not _is_manager(interaction.user):
-            await interaction.response.send_message(
-                "You need the Manager/Admin role for this.", ephemeral=True
-            )
+        if not is_manager(interaction.user):
+            await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
-
         await interaction.response.defer(ephemeral=True)
         links = get_all_links(str(interaction.guild_id))
-        if not links:
-            await interaction.followup.send("No links set up yet.", ephemeral=True)
-            return
+        lines = [f"**{await resolve_name(interaction.guild, did)}** → {name}" for did, name in links.items()]
+        embed = discord.Embed(title="🔗 EA Persona Links", description=clip("\n".join(lines) or "No links yet.", 4096),
+                              colour=CLUB_COLOUR)
 
-        lines = []
-        for discord_id, ea_name in links.items():
-            name = await resolve_name(interaction.guild, discord_id)
-            lines.append(f"**{name}** → {ea_name}")
-
-        embed = discord.Embed(
-            title="🔗 EA Persona Links",
-            description="\n".join(lines),
-            colour=0x1E90FF,
-        )
+        members = await self.bot.ea.get_member_stats(CLUB_ID) if getattr(self.bot, "ea", None) else None
+        if members:
+            linked = {n.lower() for n in links.values()}
+            missing = [m["name"] for m in members if m.get("name") and m["name"].lower() not in linked]
+            if missing:
+                embed.add_field(name=f"In the EA roster but not linked ({len(missing)})",
+                                value=clip(", ".join(sorted(missing, key=str.lower))), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 

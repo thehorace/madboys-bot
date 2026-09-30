@@ -1,12 +1,55 @@
-# MADBOYS / GRASBOYS Pro Clubs Bot
+# MADBOYS FC Pro Clubs Bot
 
-Discord bot for the MADBOYS (and GRASBOYS) EA FC Pro Clubs squads.
+Discord bot for the MADBOYS FC EA FC 27 Pro Clubs squad: automatic match
+results, stats, lineups, rotation tracking and session sign-ups.
 
-Planned features:
-- EA Pro Clubs stats integration (latest games, player stats)
-- Formation setting + interactive position-preference menus
-- Position rotation tracking so people don't get stuck in one spot
-- Pro Club build/tips reference commands
+## What it does
+
+**Automatic match tracking (always on).** While the bot is running it checks
+EA for new league and playoff results: every 2 min while you're playing,
+every 10 min otherwise. Each new match is:
+
+- saved permanently (so `/form`, `/h2h`, `/recap` work beyond EA's short history)
+- posted to the matchday channel with a full ratings table
+- used to log each linked player's role for `/rotation`
+- checked for career milestones ("🎉 @Fauzan just hit 100 career goals!")
+
+A weekly recap posts on Sunday evening. Set the channel once with
+`/matchday start`; it survives restarts and redeploys.
+
+EA only publishes *finished* matches, so results appear a few minutes after
+full time. There is no live score feed.
+
+## Buttons instead of commands
+
+Not everyone likes typing slash commands, so there's a menu too:
+
+- **`/stats`** opens a private menu (only you see it) with buttons and dropdowns
+  for everything: last game, club stats, form, recap, any player, leaderboards,
+  compare, head-to-head. First-timers link their EA name by picking it from a
+  dropdown. **📢 Share** posts whatever you're looking at to the channel.
+- **`/panel`** (managers) posts a pinned message with big buttons. Anyone can
+  click it anytime, even after restarts, and never has to type anything.
+
+## Commands
+
+| | |
+|---|---|
+| **Stats** | `/lastgame` `/clubstats` `/me` `/playerstats` `/leaderboard` `/compare` `/form` `/h2h` `/recap` |
+| **Setup** | `/link me` (connect your EA name — do this first) `/prefer` (positions you're happy to play) |
+| **Sessions** | `/session create` (who's on tonight? ✅/🤔/❌ buttons + 30-min reminder) `/session list` `/session cancel` |
+| **Lineups** | `/formation set` `/formation show` (drawn on a pitch) `/lineup suggest` `/lineup assign` `/lineup clear` `/lineup confirm` |
+| **Rotation** | `/rotation check` `/rotation history` `/rotation stats` |
+| **Tracker** | `/matchday start` `/matchday stop` `/matchday status` `/matchday check` |
+| **Menus** | `/stats` (button menu) `/panel` (pinned button panel) |
+| **Misc** | `/help` `/status` `/build` `/ping` `/debug` (managers: raw EA JSON) |
+
+`/lineup suggest` uses only the players who clicked ✅ for today's session (if
+there is one), respects `/prefer`, and spreads roles around using rotation
+history. It finds the best overall assignment instead of filling slots
+first-come-first-served.
+
+"Manager" commands need Manage Channels, or a role named Manager, Admin or Coach.
 
 ## Local setup
 
@@ -18,7 +61,34 @@ cp .env.example .env       # then fill in your real values
 python bot.py
 ```
 
-## Deployment
+All settings are documented in `.env.example` and `config.py`.
 
-Hosted on Railway. Push to `main` to deploy — see repo settings in the
-Railway dashboard for env vars (set the same keys as `.env.example`).
+## Deployment (Railway)
+
+Push to `main` to deploy. Set the same keys as `.env.example` in Railway's
+variables. Two important ones:
+
+- **`DB_PATH` must point into a Railway Volume** (e.g. mount a volume at
+  `/data` and set `DB_PATH=/data/madboys.db`). Without a volume the database
+  (links, match history, rotation, sessions) is wiped on every deploy.
+- **`GUILD_ID`** makes slash commands update instantly and tells the tracker
+  which server to post in.
+
+## Files
+
+```
+bot.py            startup, cog loading, command sync, global error handler
+config.py         all settings (env vars)
+db.py             SQLite connection, schema, migrations
+ea_client.py      EA relay client: shared cache, stale-data fallback, health
+match_data.py     parsing / storing matches, match embeds, history queries
+pitch.py          lineup image rendering
+cogs/matchday.py  always-on tracker, milestones, weekly recap, /recap
+cogs/stats.py     stats commands
+cogs/lineup.py    formations, prefs, lineup suggest (Hungarian assignment)
+cogs/rotation.py  rotation history + checks
+cogs/sessions.py  session sign-ups + reminders
+cogs/link.py      Discord <-> EA name links
+cogs/hub.py       /stats button menu + /panel pinned panel
+cogs/misc.py      /help /build /ping
+```
