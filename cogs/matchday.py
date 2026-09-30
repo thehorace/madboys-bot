@@ -270,7 +270,7 @@ class MatchdayCog(commands.Cog):
             cid = self.channel_id_for(guild_id)
             channel = await self._channel(cid) if cid else None
             if channel:
-                await self._post_results(channel, new)
+                await self._post_results(channel, new, guild_id)
 
         await self.check_milestones(guild, announce=True)
         return len(new)
@@ -292,7 +292,8 @@ class MatchdayCog(commands.Cog):
         if unmatched:
             log.info(f"Match {pm.match_id}: not linked — {', '.join(unmatched)}")
 
-    async def _post_results(self, channel: discord.abc.Messageable, new: list[md.ParsedMatch]):
+    async def _post_results(self, channel: discord.abc.Messageable, new: list[md.ParsedMatch],
+                            guild_id: Optional[str] = None):
         recent = md.recent_results(CLUB_ID, 5)
         footer = f"Form {md.form_string(recent)} • Streak {md.streak([r['result'] for r in recent])}"
         to_post = new[-MAX_POSTS_PER_POLL:]
@@ -303,10 +304,16 @@ class MatchdayCog(commands.Cog):
                                     for p in skipped)
                 await channel.send(f"📡 Caught up on {len(skipped)} earlier result(s): {clip(summary, 1800)}")
             for i, pm in enumerate(to_post):
-                embed = md.match_embed(pm, footer_extra=footer if i == len(to_post) - 1 else "")
-                await channel.send(content="📡 **Full time!**", embed=embed)
+                embed, file = await md.match_post(pm, footer_extra=footer if i == len(to_post) - 1 else "")
+                await channel.send(content="📡 **Full time!**", embed=embed, **({"file": file} if file else {}))
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
+            return
+
+        # squad MOTM vote for the newest match only (no vote spam after a catch-up)
+        motm = self.bot.get_cog("MotmCog")
+        if motm and guild_id and to_post:
+            await motm.open_poll(channel, guild_id, to_post[-1])
 
     async def check_milestones(self, guild: Optional[discord.Guild], announce: bool):
         members = await self.ea.get_member_stats(CLUB_ID, career=True, bypass_cache=True)

@@ -12,6 +12,10 @@ every 10 min otherwise. Each new match is:
 - saved permanently (so `/form`, `/h2h`, `/recap` work beyond EA's short history)
 - posted to the matchday channel with a full ratings table
 - used to log each linked player's role for `/rotation`
+- posted with a **result card image** (score, scorers, colour-coded ratings)
+- followed by a **squad MOTM vote**: everyone picks their man of the match from
+  a dropdown, results are revealed when it closes (12h), and `/motm table`
+  tracks the season's awards
 - checked for career milestones ("🎉 @Fauzan just hit 100 career goals!")
 
 A weekly recap posts on Sunday evening. Set the channel once with
@@ -41,6 +45,7 @@ Not everyone likes typing slash commands, so there's a menu too:
 | **Lineups** | `/formation set` `/formation show` (drawn on a pitch) `/lineup suggest` `/lineup assign` `/lineup clear` `/lineup confirm` |
 | **Rotation** | `/rotation check` `/rotation history` `/rotation stats` |
 | **Tracker** | `/matchday start` `/matchday stop` `/matchday status` `/matchday check` |
+| **MOTM** | `/motm table` `/motm close` |
 | **Menus** | `/stats` (button menu) `/panel` (pinned button panel) |
 | **Misc** | `/help` `/status` `/build` `/ping` `/debug` (managers: raw EA JSON) |
 
@@ -83,12 +88,15 @@ db.py             SQLite connection, schema, migrations
 ea_client.py      EA relay client: shared cache, stale-data fallback, health
 match_data.py     parsing / storing matches, match embeds, history queries
 pitch.py          lineup image rendering
+match_card.py     result card image
+fonts.py          bundled fonts (assets/fonts) so images look the same on Railway
 cogs/matchday.py  always-on tracker, milestones, weekly recap, /recap
 cogs/stats.py     stats commands
 cogs/lineup.py    formations, prefs, lineup suggest (Hungarian assignment)
 cogs/rotation.py  rotation history + checks
 cogs/sessions.py  session sign-ups + reminders
 cogs/link.py      Discord <-> EA name links
+cogs/motm.py      squad MOTM vote + awards table
 cogs/hub.py       /stats button menu + /panel pinned panel
 cogs/misc.py      /help /build /ping
 ```

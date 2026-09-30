@@ -22,6 +22,7 @@ HELP_SECTIONS = [
         ("/form", "Recent results"),
         ("/h2h", "Record vs a specific club"),
         ("/recap", "Summary of the last N days"),
+        ("/motm table", "Squad MOTM awards (voted after every game)"),
     ]),
     ("🔗 Setup", [
         ("/link me", "Connect your Discord to your EA name — do this first!"),

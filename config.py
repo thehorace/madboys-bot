@@ -25,6 +25,9 @@ Weekly recap + sessions
   RECAP_WEEKDAY          0=Mon ... 6=Sun                              (default 6)
   RECAP_HOUR             Hour of day, in BOT_TZ                       (default 21)
 
+Squad MOTM vote
+  MOTM_VOTE_HOURS        How long the post-match vote stays open     (default 12)
+
 Misc
   ROTATION_THRESHOLD     Games in the same role before /rotation check flags it (default 3)
   BUILDS_URL             Link used by /build (e.g. an FC 27 Clubs Builder site)
@@ -52,6 +55,8 @@ ACTIVE_WINDOW_MINUTES = int(os.getenv("ACTIVE_WINDOW_MINUTES", "90"))
 BOT_TZ = os.getenv("BOT_TZ", "Asia/Singapore")
 RECAP_WEEKDAY = int(os.getenv("RECAP_WEEKDAY", "6"))
 RECAP_HOUR = int(os.getenv("RECAP_HOUR", "21"))
+
+MOTM_VOTE_HOURS = float(os.getenv("MOTM_VOTE_HOURS", "12"))
 
 ROTATION_THRESHOLD = int(os.getenv("ROTATION_THRESHOLD", "3"))
 BUILDS_URL = os.getenv("BUILDS_URL", "")

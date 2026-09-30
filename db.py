@@ -156,6 +156,29 @@ CREATE TABLE IF NOT EXISTS stat_snapshots (
     PRIMARY KEY (club_id, player_name, stat)
 );
 
+-- ---------- squad MOTM votes ----------
+CREATE TABLE IF NOT EXISTS motm_polls (
+    match_id   TEXT PRIMARY KEY,
+    guild_id   TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT,
+    title      TEXT NOT NULL,             -- e.g. "3–1 vs Rival FC"
+    candidates TEXT NOT NULL,             -- JSON list of EA names
+    ea_motm    TEXT,
+    closes_at  INTEGER NOT NULL,
+    closed     INTEGER NOT NULL DEFAULT 0,
+    winners    TEXT                       -- JSON list (ties share the award)
+);
+CREATE INDEX IF NOT EXISTS idx_motm_polls_msg ON motm_polls (message_id);
+
+CREATE TABLE IF NOT EXISTS motm_votes (
+    match_id  TEXT NOT NULL,
+    voter_id  TEXT NOT NULL,
+    candidate TEXT NOT NULL,
+    voted_at  TEXT NOT NULL,
+    PRIMARY KEY (match_id, voter_id)
+);
+
 -- ---------- new: play sessions + RSVPs ----------
 CREATE TABLE IF NOT EXISTS sessions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

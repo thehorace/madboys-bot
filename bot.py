@@ -25,6 +25,7 @@ COGS = [
     "cogs.stats",
     "cogs.lineup",
     "cogs.sessions",
+    "cogs.motm",
     "cogs.matchday",
     "cogs.hub",
     "cogs.misc",

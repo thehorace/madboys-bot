@@ -38,7 +38,7 @@ log = logging.getLogger("madboys-bot.hub")
 MENU_TIMEOUT = 14 * 60  # Discord lets us edit an interaction's reply for 15 min
 
 # pages where the Season/Career toggle means something
-CAREER_PAGES = {"player", "compare", "leaderboard", "me"}
+CAREER_PAGES = {"player", "compare", "leaderboard", "me"}  # (not the squad MOTM table — see render)
 
 
 def error_embed(msg: str) -> discord.Embed:
@@ -59,6 +59,7 @@ class StatsMenu(discord.ui.View):
         self.opponent: Optional[str] = None
         self.career = False
         self.embed: discord.Embed = discord.Embed()
+        self.png: Optional[bytes] = None   # result card, when the page has one
         self.message_interaction: Optional[discord.Interaction] = None
 
     # ------------------------------------------------------------------ #
@@ -70,7 +71,8 @@ class StatsMenu(discord.ui.View):
         menu = cls(bot, interaction.user, str(interaction.guild_id), roster, md.opponents(CLUB_ID, limit=25))
         await menu.go(page)
         menu.message_interaction = interaction
-        await interaction.followup.send(embed=menu.embed, view=menu, ephemeral=True)
+        extra = {"file": S.card_file(menu.png)} if menu.png else {}
+        await interaction.followup.send(embed=menu.embed, view=menu, ephemeral=True, **extra)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user.id:
@@ -138,10 +140,16 @@ class StatsMenu(discord.ui.View):
             screen = await S.build_player(self.ea, self.player, self.career, with_recent=True)
         elif page == "compare":
             screen = await S.build_compare(self.ea, self.player, self.compare_with, self.career)
+        elif page == "leaderboard" and self.stat == "squad_motm":
+            from cogs.motm import build_table_embed
+            screen = build_table_embed()
         elif page == "leaderboard":
             screen = await S.build_leaderboard(self.ea, self.stat, self.career)
         elif page == "h2h":
             screen = S.build_h2h(self.opponent)
+        self.png = None
+        if isinstance(screen, tuple):
+            screen, self.png = screen
         self.embed = error_embed(screen) if isinstance(screen, str) else screen
         self.render()
 
@@ -170,7 +178,9 @@ class StatsMenu(discord.ui.View):
         lb = discord.ui.Select(placeholder="🏆 Leaderboards…", row=2, options=[
             discord.SelectOption(label=label, value=key, emoji=S.LEADERBOARD_EMOJI.get(key),
                                  default=self.page == "leaderboard" and key == self.stat)
-            for key, (label, _) in S.LEADERBOARD_STATS.items()])
+            for key, (label, _) in S.LEADERBOARD_STATS.items()]
+            + [discord.SelectOption(label="Squad MOTM awards", value="squad_motm", emoji="🗳️",
+                                    default=self.page == "leaderboard" and self.stat == "squad_motm")])
         lb.callback = self._pick_stat
         self.add_item(lb)
 
@@ -196,7 +206,8 @@ class StatsMenu(discord.ui.View):
 
         toggle = discord.ui.Button(label="Career" if self.career else "This season",
                                    emoji="🕰️" if self.career else "📅", row=4,
-                                   style=discord.ButtonStyle.success, disabled=self.page not in CAREER_PAGES)
+                                   style=discord.ButtonStyle.success,
+                                   disabled=self.page not in CAREER_PAGES or (self.page == "leaderboard" and self.stat == "squad_motm"))
         toggle.callback = self._toggle_career
         self.add_item(toggle)
 
@@ -214,7 +225,8 @@ class StatsMenu(discord.ui.View):
         await interaction.response.defer()  # EA can take a few seconds; Discord wants an answer within 3
         await self.go(page)
         self.message_interaction = interaction
-        await interaction.edit_original_response(embed=self.embed, view=self)
+        await interaction.edit_original_response(
+            embed=self.embed, view=self, attachments=[S.card_file(self.png)] if self.png else [])
 
     def _nav(self, page: str):
         async def cb(interaction: discord.Interaction):
@@ -247,8 +259,9 @@ class StatsMenu(discord.ui.View):
 
     async def _share(self, interaction: discord.Interaction):
         try:
+            extra = {"file": S.card_file(self.png)} if self.png else {}
             await interaction.channel.send(content=f"📢 Shared by {interaction.user.mention}", embed=self.embed,
-                                           allowed_mentions=discord.AllowedMentions.none())
+                                           allowed_mentions=discord.AllowedMentions.none(), **extra)
             await interaction.response.send_message("Posted to the channel ✅", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("I'm not allowed to post in this channel.", ephemeral=True)

@@ -9,7 +9,9 @@ x=1 right; y=0 the opponent's goal line (top), y=1 our goal line (bottom).
 import io
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
+
+from fonts import font
 
 W, H = 720, 960
 MARGIN = 40
@@ -39,15 +41,7 @@ DOT_FILLED, DOT_EMPTY = (30, 144, 255), (120, 120, 120)
 
 
 def _font(size: int, bold: bool = False):
-    for name in (("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"), "arial.ttf"):
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:  # Pillow < 10.1
-        return ImageFont.load_default()
+    return font(size, bold)
 
 
 def _px(x: float, y: float) -> tuple[int, int]:

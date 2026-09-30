@@ -35,7 +35,9 @@ from utils import clip, is_manager, to_float, to_int
 
 log = logging.getLogger("madboys-bot.stats")
 
-Screen = Union[discord.Embed, str]   # an embed to show, or an error message
+# What a builder returns: an embed, an error message, or an embed plus a PNG
+# (the result card) that the embed shows as attachment://result.png
+Screen = Union[discord.Embed, str, tuple[discord.Embed, bytes]]
 
 SCOPES = [
     app_commands.Choice(name="This Season", value="season"),
@@ -130,7 +132,8 @@ async def build_lastgame(ea) -> Screen:
     if not raw:
         return "Couldn't fetch the last game — EA or the relay may be down."
     try:
-        embed = md.match_embed(md.parse_match(raw, CLUB_ID))
+        pm = md.parse_match(raw, CLUB_ID)
+        embed, file = await md.match_post(pm)
     except Exception:
         log.exception("Error building last-game embed")
         return ("Got data from EA but couldn't read it — the format may have changed "
@@ -139,6 +142,8 @@ async def build_lastgame(ea) -> Screen:
         embed.set_footer(text=f"{CLUB_NAME} • ⚠️ EA unreachable — from the bot's saved history")
     elif ea.stale_note():
         embed.set_footer(text=f"{CLUB_NAME} • {ea.stale_note()}")
+    if file:
+        return embed, file.fp.read()
     return embed
 
 
@@ -305,10 +310,16 @@ async def opponent_autocomplete(interaction: discord.Interaction, current: str) 
     return [app_commands.Choice(name=n[:100], value=n[:100]) for n in md.opponents(CLUB_ID, current)]
 
 
+def card_file(png: bytes) -> discord.File:
+    return discord.File(io.BytesIO(png), "result.png")
+
+
 async def send_screen(interaction: discord.Interaction, screen: Screen):
     """Send a builder's result as a reply to a (deferred) slash command."""
     if isinstance(screen, str):
         await interaction.followup.send(screen, ephemeral=True)
+    elif isinstance(screen, tuple):
+        await interaction.followup.send(embed=screen[0], file=card_file(screen[1]))
     else:
         await interaction.followup.send(embed=screen)
 

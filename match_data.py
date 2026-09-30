@@ -233,7 +233,7 @@ def streak(results: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 #  Embeds
 # --------------------------------------------------------------------------- #
-def match_embed(pm: ParsedMatch, footer_extra: str = "") -> discord.Embed:
+def match_embed(pm: ParsedMatch, footer_extra: str = "", with_table: bool = True) -> discord.Embed:
     r = pm.result
     type_label = MATCH_TYPE_LABEL.get(pm.match_type, pm.match_type)
     embed = discord.Embed(
@@ -251,8 +251,8 @@ def match_embed(pm: ParsedMatch, footer_extra: str = "") -> discord.Embed:
     if motm:
         embed.add_field(name="⭐ MOTM", value=f"{motm.name}" + (f" ({motm.rating:.1f})" if motm.rating else ""), inline=True)
 
-    # Full ratings table, as a code block so columns line up.
-    if pm.players:
+    # Full ratings table, as a code block so columns line up (skipped when the card image shows it).
+    if pm.players and with_table:
         rows = []
         for p in sorted(pm.players, key=lambda p: -(p.rating or 0)):
             pa = pct(p.passes_made, p.pass_attempts)
@@ -265,6 +265,20 @@ def match_embed(pm: ParsedMatch, footer_extra: str = "") -> discord.Embed:
 
     embed.set_footer(text=f"{CLUB_NAME} • EA FC Pro Clubs" + (f" • {footer_extra}" if footer_extra else ""))
     return embed
+
+
+async def match_post(pm: ParsedMatch, footer_extra: str = "") -> tuple[discord.Embed, Optional[discord.File]]:
+    """Embed + result card image. Falls back to the text table if the image fails for any reason."""
+    import asyncio
+    try:
+        from match_card import render_match_card
+        png = await asyncio.to_thread(render_match_card, pm)
+    except Exception:
+        log.exception("Result card render failed; posting text only")
+        return match_embed(pm, footer_extra), None
+    embed = match_embed(pm, footer_extra, with_table=False)
+    embed.set_image(url="attachment://result.png")
+    return embed, discord.File(png, "result.png")
 
 
 def form_string(rows: list[dict]) -> str:
