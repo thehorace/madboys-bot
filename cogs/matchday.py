@@ -1,19 +1,16 @@
 """
-Matchday polling cog.
+Matchday polling cog (single club: MADBOYS FC).
 
 Commands:
-  /matchday start <club>   - Begin polling every 5 min for a new completed match,
-                              posting results to the channel this was run in.
-  /matchday stop <club>    - Stop polling for that club in this server.
-  /matchday status         - Show which polls are currently active in this server.
+  /matchday start   - Begin polling every 5 min for a new completed match,
+                      posting results to the channel this was run in.
+  /matchday stop    - Stop polling in this server.
+  /matchday status  - Show whether polling is currently active in this server.
 
 Design notes:
   - EA's Pro Clubs API only exposes *completed* matches (match-history based),
     so this can't show live goal-by-goal updates. Instead it polls for the
     newest completed match and posts it the first time it's seen.
-  - EA partitions match history by matchType, so the poll checks both
-    "leagueMatch" and "playoffMatch" and posts whichever is newest — polling
-    leagueMatch alone would silently miss a club's playoff games entirely.
   - "Newest match already posted" state is persisted in SQLite so a bot
     restart won't cause a re-post of an old result. The polling loop itself
     is in-memory only, so a restart does stop active polling — /matchday start
@@ -29,30 +26,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME, PLATFORM, migrate_legacy_club
 from ea_client import EAClient
 
 log = logging.getLogger("madboys-bot.matchday")
 
 DB_PATH = os.getenv("DB_PATH", "madboys.db")
-PLATFORM = os.getenv("EA_PLATFORM", "common-gen5")
 POLL_MINUTES = int(os.getenv("MATCHDAY_POLL_MINUTES", "5"))
-
-CLUBS = {
-    "MADBOYS": int(os.getenv("MADBOYS_CLUB_ID", "85077")),
-    "GRASBOYS": int(os.getenv("GRASBOYS_CLUB_ID", "4137103")),
-}
-
-CLUB_COLOURS = {
-    "MADBOYS": 0x1E90FF,
-    "GRASBOYS": 0x2ECC71,
-}
-
-
-def club_choices():
-    return [
-        app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-        app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-    ]
 
 
 def format_result(club_score: int, opp_score: int) -> str:
@@ -86,6 +66,7 @@ def init_db():
                 PRIMARY KEY (guild_id, club)
             );
         """)
+        migrate_legacy_club(conn, "matchday_poll")
 
 
 def start_poll_state(guild_id: str, club: str, channel_id: str):
@@ -121,8 +102,8 @@ class MatchdayCog(commands.Cog):
         self.bot = bot
         self.ea = ea
         init_db()
-        # key: (guild_id, club) -> tasks.Loop
-        self.active_loops: dict[tuple[str, str], tasks.Loop] = {}
+        # key: guild_id -> tasks.Loop
+        self.active_loops: dict[str, tasks.Loop] = {}
 
     def cog_unload(self):
         for loop in self.active_loops.values():
@@ -133,12 +114,9 @@ class MatchdayCog(commands.Cog):
     # ------------------------------------------------------------------ #
     #  Core poll logic
     # ------------------------------------------------------------------ #
-    async def _check_and_post(self, guild_id: str, club: str, channel_id: str):
-        club_id = CLUBS[club]
-        # Checks league + playoff matches and posts whichever is newest —
-        # see module docstring for why both types are needed.
-        matches = await self.ea.get_recent_matches_multi(
-            club_id, count=1, bypass_cache=True
+    async def _check_and_post(self, guild_id: str, channel_id: str):
+        matches = await self.ea.get_recent_matches(
+            CLUB_ID, match_type="leagueMatch", count=1, bypass_cache=True
         )
         if not matches:
             return
@@ -148,7 +126,7 @@ class MatchdayCog(commands.Cog):
         if not match_id:
             return
 
-        last_posted = get_last_match_id(guild_id, club)
+        last_posted = get_last_match_id(guild_id, CLUB_NAME)
         if match_id == last_posted:
             return  # already posted this one
 
@@ -161,15 +139,16 @@ class MatchdayCog(commands.Cog):
                 return
 
         try:
-            embed = self._build_embed(match, club, club_id)
+            embed = self._build_embed(match)
         except Exception as e:
             log.error(f"Error building matchday embed: {e}", exc_info=True)
             return
 
         await channel.send(content="📡 New match result:", embed=embed)
-        set_last_match_id(guild_id, club, match_id)
+        set_last_match_id(guild_id, CLUB_NAME, match_id)
 
-    def _build_embed(self, match: dict, club: str, club_id: int) -> discord.Embed:
+    def _build_embed(self, match: dict) -> discord.Embed:
+        club_id = CLUB_ID
         clubs_data = match.get("clubs", {})
         club_data = clubs_data.get(str(club_id), {})
         opp_id = next((k for k in clubs_data if k != str(club_id)), None)
@@ -192,8 +171,8 @@ class MatchdayCog(commands.Cog):
                 scorers.append(f"{pname} — {goals}G {assists}A")
 
         embed = discord.Embed(
-            title=f"{result}  {club} {our_score}–{opp_score} {opp_name}",
-            colour=CLUB_COLOURS[club],
+            title=f"{result}  {CLUB_NAME} {our_score}–{opp_score} {opp_name}",
+            colour=CLUB_COLOUR,
         )
         embed.add_field(
             name="Goals & Assists",
@@ -212,13 +191,13 @@ class MatchdayCog(commands.Cog):
             motm = man_ratings[0]
             embed.add_field(name="⭐ MOTM", value=f"{motm[0]} ({motm[1]:.1f})", inline=True)
 
-        embed.set_footer(text=f"{club} • EA FC Pro Clubs • auto-detected via /matchday")
+        embed.set_footer(text=f"{CLUB_NAME} • EA FC Pro Clubs • auto-detected via /matchday")
         return embed
 
-    def _make_loop(self, guild_id: str, club: str, channel_id: str) -> tasks.Loop:
+    def _make_loop(self, guild_id: str, channel_id: str) -> tasks.Loop:
         @tasks.loop(minutes=POLL_MINUTES)
         async def poll():
-            await self._check_and_post(guild_id, club, channel_id)
+            await self._check_and_post(guild_id, channel_id)
 
         @poll.before_loop
         async def before():
@@ -230,64 +209,55 @@ class MatchdayCog(commands.Cog):
     #  /matchday start
     # ------------------------------------------------------------------ #
     @matchday_group.command(name="start", description="Start polling for new match results in this channel")
-    @app_commands.describe(club="Which club to watch")
-    @app_commands.choices(club=club_choices())
-    async def matchday_start(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
+    async def matchday_start(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
-        key = (guild_id, club.value)
 
-        if key in self.active_loops:
+        if guild_id in self.active_loops:
             await interaction.response.send_message(
-                f"Already polling **{club.value}** in this server — use `/matchday stop` first if you want to move it.",
+                f"Already polling **{CLUB_NAME}** in this server — use `/matchday stop` first if you want to move it.",
                 ephemeral=True,
             )
             return
 
         channel_id = str(interaction.channel_id)
-        start_poll_state(guild_id, club.value, channel_id)
+        start_poll_state(guild_id, CLUB_NAME, channel_id)
 
-        loop = self._make_loop(guild_id, club.value, channel_id)
+        loop = self._make_loop(guild_id, channel_id)
         loop.start()
-        self.active_loops[key] = loop
+        self.active_loops[guild_id] = loop
 
         await interaction.response.send_message(
-            f"📡 Polling **{club.value}** every {POLL_MINUTES} min. New results will post here automatically. "
+            f"📡 Polling **{CLUB_NAME}** every {POLL_MINUTES} min. New results will post here automatically. "
             f"Use `/matchday stop` to end."
         )
 
     # ------------------------------------------------------------------ #
     #  /matchday stop
     # ------------------------------------------------------------------ #
-    @matchday_group.command(name="stop", description="Stop polling for a club in this server")
-    @app_commands.describe(club="Which club to stop watching")
-    @app_commands.choices(club=club_choices())
-    async def matchday_stop(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
-        key = (str(interaction.guild_id), club.value)
-        loop = self.active_loops.pop(key, None)
+    @matchday_group.command(name="stop", description="Stop polling in this server")
+    async def matchday_stop(self, interaction: discord.Interaction):
+        loop = self.active_loops.pop(str(interaction.guild_id), None)
 
         if loop is None:
             await interaction.response.send_message(
-                f"Not currently polling **{club.value}** in this server.", ephemeral=True
+                f"Not currently polling **{CLUB_NAME}** in this server.", ephemeral=True
             )
             return
 
         loop.cancel()
-        await interaction.response.send_message(f"🛑 Stopped polling **{club.value}**.")
+        await interaction.response.send_message(f"🛑 Stopped polling **{CLUB_NAME}**.")
 
     # ------------------------------------------------------------------ #
     #  /matchday status
     # ------------------------------------------------------------------ #
-    @matchday_group.command(name="status", description="Show which clubs are currently being polled")
+    @matchday_group.command(name="status", description="Show whether match polling is active")
     async def matchday_status(self, interaction: discord.Interaction):
-        guild_id = str(interaction.guild_id)
-        running = [club for (gid, club) in self.active_loops if gid == guild_id]
-
-        if not running:
+        if str(interaction.guild_id) not in self.active_loops:
             await interaction.response.send_message("No active matchday polling in this server.", ephemeral=True)
             return
 
         await interaction.response.send_message(
-            f"Currently polling: **{', '.join(running)}** (every {POLL_MINUTES} min)", ephemeral=True
+            f"Currently polling: **{CLUB_NAME}** (every {POLL_MINUTES} min)", ephemeral=True
         )
 
 

@@ -2,17 +2,10 @@
 Background poller that checks for new league matches and auto-logs each
 player's position to rotation history — no manual /lineup confirm needed.
 
-Runs on a discord.ext.tasks loop (simpler than adding apscheduler as a
-second event loop inside the same process; requirements.txt already has
-apscheduler if you'd rather switch to it later, but it's not needed here).
+Runs on a discord.ext.tasks loop.
 
 Uses cogs.link to map an EA persona name -> discord_id, and cogs.rotation's
 log_positions()/processed_matches table to avoid double-logging a match.
-
-Match type note:
-EA partitions match history by matchType, so this checks both
-"leagueMatch" and "playoffMatch" — checking leagueMatch alone would
-silently skip rotation logging for any playoff games played.
 
 Position data note:
 EA's /matches response only gives a broad bucket per player, in
@@ -32,16 +25,12 @@ from discord.ext import commands, tasks
 
 from cogs.rotation import log_positions, is_match_processed, mark_match_processed
 from cogs.link import find_discord_id_by_ea_name
+from config import CLUB_ID, CLUB_NAME
 
 log = logging.getLogger("madboys-bot.rotation_poller")
 
 GUILD_ID = os.getenv("GUILD_ID")  # single-server bot; matches log against this guild
 POLL_MINUTES = int(os.getenv("ROTATION_POLL_MINUTES", "15"))
-
-CLUBS = {
-    "MADBOYS": int(os.getenv("MADBOYS_CLUB_ID", "85077")),
-    "GRASBOYS": int(os.getenv("GRASBOYS_CLUB_ID", "4137103")),
-}
 
 # EA's raw "pos" string -> our broad rotation category
 POSITION_MAP = {
@@ -79,15 +68,14 @@ class RotationPollerCog(commands.Cog):
             log.warning(f"Bot isn't in guild {GUILD_ID} yet — skipping this poll.")
             return
 
-        for club_name, club_id in CLUBS.items():
-            try:
-                await self._poll_club(guild, club_name, club_id)
-            except Exception:
-                log.exception(f"Error polling {club_name} for new matches")
+        try:
+            await self._poll_club(guild)
+        except Exception:
+            log.exception(f"Error polling {CLUB_NAME} for new matches")
 
-    async def _poll_club(self, guild: discord.Guild, club_name: str, club_id: int):
-        # Checks league + playoff matches — see module docstring.
-        matches = await self.ea.get_recent_matches_multi(club_id, count=5)
+    async def _poll_club(self, guild: discord.Guild):
+        club_id = CLUB_ID
+        matches = await self.ea.get_recent_matches(club_id, match_type="leagueMatch", count=5)
         if not matches:
             return
 
@@ -98,7 +86,7 @@ class RotationPollerCog(commands.Cog):
             match_id = str(match.get("matchId") or match.get("timestamp") or "")
             if not match_id:
                 continue
-            if is_match_processed(guild_id, club_name, match_id):
+            if is_match_processed(guild_id, CLUB_NAME, match_id):
                 continue
 
             players = match.get("players", {}).get(str(club_id), {})
@@ -120,16 +108,16 @@ class RotationPollerCog(commands.Cog):
                     entries.append((discord_id, position))
 
             if entries:
-                log_positions(guild_id, club_name, entries, source="auto")
-                log.info(f"[{club_name}] Auto-logged {len(entries)} positions for match {match_id}")
+                log_positions(guild_id, CLUB_NAME, entries, source="auto")
+                log.info(f"[{CLUB_NAME}] Auto-logged {len(entries)} positions for match {match_id}")
 
             if unmatched:
                 log.info(
-                    f"[{club_name}] Match {match_id}: {len(unmatched)} players with no /link — "
+                    f"[{CLUB_NAME}] Match {match_id}: {len(unmatched)} players with no /link — "
                     f"{', '.join(unmatched)}"
                 )
 
-            mark_match_processed(guild_id, club_name, match_id)
+            mark_match_processed(guild_id, CLUB_NAME, match_id)
 
     @poll_matches.before_loop
     async def before_poll(self):

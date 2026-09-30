@@ -1,11 +1,12 @@
 """
-Lineup & Formation management cog.
+Lineup & Formation management cog (single club: MADBOYS FC).
 
 Commands:
   /formation set <formation>   - Manager sets the active formation (e.g. 4-3-3)
   /formation show              - Shows current formation and who's in each slot
-  /position prefer             - Player picks their preferred positions via select menu
+  /prefer                      - Player picks their preferred positions via select menu
   /lineup suggest              - Auto-fills formation based on player preferences
+  /lineup assign <position>    - Manually slot a player into a position
   /lineup confirm              - Manager confirms the lineup (locks it in + logs it)
 """
 
@@ -20,6 +21,8 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from config import CLUB_COLOUR, CLUB_NAME, migrate_legacy_club
 
 log = logging.getLogger("madboys-bot.lineup")
 
@@ -89,6 +92,9 @@ def init_db():
             );
         """)
         _migrate_active_formation_pk(conn)
+        # Carry over anything saved under the old "MADBOYS" club name
+        migrate_legacy_club(conn, "active_formation")
+        migrate_legacy_club(conn, "lineup_slots")
 
 
 def _migrate_active_formation_pk(conn: sqlite3.Connection):
@@ -104,7 +110,7 @@ def _migrate_active_formation_pk(conn: sqlite3.Connection):
         return  # table doesn't exist yet — nothing to migrate
 
     pk_cols = [c["name"] for c in cols if c["pk"]]
-    if pk_cols == ["guild_id", "club"] or pk_cols == ["club", "guild_id"]:
+    if sorted(pk_cols) == ["club", "guild_id"]:
         return  # already correct
 
     log.info("Migrating active_formation to composite primary key (guild_id, club)")
@@ -149,7 +155,7 @@ def set_formation(guild_id: str, club: str, formation: str):
 
 def get_slots(guild_id: str, club: str) -> dict[str, Optional[str]]:
     formation = get_formation(guild_id, club)
-    if not formation:
+    if not formation or formation not in FORMATIONS:
         return {}
     slots = {pos: None for pos in FORMATIONS[formation]}
     with get_db() as conn:
@@ -158,7 +164,8 @@ def get_slots(guild_id: str, club: str) -> dict[str, Optional[str]]:
             (guild_id, club)
         ).fetchall()
         for row in rows:
-            slots[row["position"]] = row["discord_id"]
+            if row["position"] in slots:
+                slots[row["position"]] = row["discord_id"]
     return slots
 
 
@@ -203,6 +210,12 @@ def get_all_prefs(guild_id: str) -> dict[str, list[str]]:
 def prefs_match_slot(prefs: list[str], slot: str) -> bool:
     slot_base = slot.rstrip("123")  # CB1 -> CB, ST1 -> ST, etc.
     return slot_base in prefs or slot in prefs
+
+
+def _is_manager(member: discord.Member) -> bool:
+    if member.guild_permissions.manage_channels:
+        return True
+    return any(r.name.lower() in ("manager", "admin", "coach") for r in member.roles)
 
 
 class PositionPrefView(discord.ui.View):
@@ -281,42 +294,29 @@ class LineupCog(commands.Cog):
     formation_group = app_commands.Group(name="formation", description="Formation management")
     lineup_group = app_commands.Group(name="lineup", description="Lineup management")
 
-    def club_choices(self):
-        return [
-            app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-            app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-        ]
-
     # ------------------------------------------------------------------ #
     #  /formation set
     # ------------------------------------------------------------------ #
     @formation_group.command(name="set", description="Set the active formation (manager only)")
-    @app_commands.describe(club="Which club", formation="Formation to use")
+    @app_commands.describe(formation="Formation to use")
     @app_commands.choices(
-        club=[
-            app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-            app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-        ],
         formation=[app_commands.Choice(name=f, value=f) for f in FORMATIONS],
     )
     async def formation_set(
         self,
         interaction: discord.Interaction,
-        club: app_commands.Choice[str],
         formation: app_commands.Choice[str],
     ):
-        # Basic permission check — must have Manage Channels or a "Manager" role
-        if not interaction.user.guild_permissions.manage_channels:
-            if not any(r.name.lower() in ("manager", "admin", "coach") for r in interaction.user.roles):
-                await interaction.response.send_message(
-                    "You need the Manager/Admin role to set the formation.", ephemeral=True
-                )
-                return
+        if not _is_manager(interaction.user):
+            await interaction.response.send_message(
+                "You need the Manager/Admin role to set the formation.", ephemeral=True
+            )
+            return
 
-        set_formation(str(interaction.guild_id), club.value, formation.value)
+        set_formation(str(interaction.guild_id), CLUB_NAME, formation.value)
         slots = FORMATIONS[formation.value]
         await interaction.response.send_message(
-            f"✅ **{club.value}** formation set to **{formation.value}**\n"
+            f"✅ **{CLUB_NAME}** formation set to **{formation.value}**\n"
             f"Positions: {', '.join(slots)}\n\n"
             f"Use `/lineup suggest` to auto-fill from preferences, or `/lineup assign` to manually slot players."
         )
@@ -325,21 +325,16 @@ class LineupCog(commands.Cog):
     #  /formation show
     # ------------------------------------------------------------------ #
     @formation_group.command(name="show", description="Show the current formation and lineup")
-    @app_commands.describe(club="Which club")
-    @app_commands.choices(club=[
-        app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-        app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-    ])
-    async def formation_show(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
+    async def formation_show(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
-        formation = get_formation(guild_id, club.value)
+        formation = get_formation(guild_id, CLUB_NAME)
         if not formation:
             await interaction.response.send_message(
-                f"No formation set for {club.value} yet. Use `/formation set` first.", ephemeral=True
+                f"No formation set for {CLUB_NAME} yet. Use `/formation set` first.", ephemeral=True
             )
             return
 
-        slots = get_slots(guild_id, club.value)
+        slots = get_slots(guild_id, CLUB_NAME)
         lines = []
         for pos, discord_id in slots.items():
             label = POSITION_LABELS.get(pos, pos)
@@ -351,16 +346,16 @@ class LineupCog(commands.Cog):
             lines.append(f"{label}: {name}")
 
         embed = discord.Embed(
-            title=f"⚽ {club.value} — {formation}",
+            title=f"⚽ {CLUB_NAME} — {formation}",
             description="\n".join(lines),
-            colour=0x1E90FF if club.value == "MADBOYS" else 0x2ECC71,
+            colour=CLUB_COLOUR,
         )
         filled = sum(1 for v in slots.values() if v)
         embed.set_footer(text=f"{filled}/{len(slots)} positions filled")
         await interaction.response.send_message(embed=embed)
 
     # ------------------------------------------------------------------ #
-    #  /position prefer
+    #  /prefer
     # ------------------------------------------------------------------ #
     @app_commands.command(name="prefer", description="Set your preferred positions")
     async def position_prefer(self, interaction: discord.Interaction):
@@ -375,17 +370,12 @@ class LineupCog(commands.Cog):
     #  /lineup suggest
     # ------------------------------------------------------------------ #
     @lineup_group.command(name="suggest", description="Auto-fill lineup based on player preferences")
-    @app_commands.describe(club="Which club")
-    @app_commands.choices(club=[
-        app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-        app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-    ])
-    async def lineup_suggest(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
+    async def lineup_suggest(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
-        formation = get_formation(guild_id, club.value)
+        formation = get_formation(guild_id, CLUB_NAME)
         if not formation:
             await interaction.response.send_message(
-                f"No formation set for {club.value}. Use `/formation set` first.", ephemeral=True
+                f"No formation set for {CLUB_NAME}. Use `/formation set` first.", ephemeral=True
             )
             return
 
@@ -404,7 +394,7 @@ class LineupCog(commands.Cog):
         # Save suggestions to DB
         for pos, discord_id in slots.items():
             if discord_id:
-                set_slot(guild_id, club.value, pos, discord_id)
+                set_slot(guild_id, CLUB_NAME, pos, discord_id)
 
         lines = []
         for pos, discord_id in slots.items():
@@ -417,9 +407,9 @@ class LineupCog(commands.Cog):
             lines.append(f"{label}: {name}")
 
         embed = discord.Embed(
-            title=f"📋 {club.value} — Suggested Lineup ({formation})",
+            title=f"📋 {CLUB_NAME} — Suggested Lineup ({formation})",
             description="\n".join(lines),
-            colour=0x1E90FF if club.value == "MADBOYS" else 0x2ECC71,
+            colour=CLUB_COLOUR,
         )
         filled = sum(1 for v in slots.values() if v)
         embed.set_footer(text=f"{filled}/{len(slots)} filled from preferences • Use /lineup assign to adjust")
@@ -429,28 +419,22 @@ class LineupCog(commands.Cog):
     #  /lineup confirm
     # ------------------------------------------------------------------ #
     @lineup_group.command(name="confirm", description="Confirm and log the current lineup to rotation history")
-    @app_commands.describe(club="Which club")
-    @app_commands.choices(club=[
-        app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-        app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-    ])
-    async def lineup_confirm(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
-        if not interaction.user.guild_permissions.manage_channels:
-            if not any(r.name.lower() in ("manager", "admin", "coach") for r in interaction.user.roles):
-                await interaction.response.send_message(
-                    "You need the Manager/Admin role to confirm a lineup.", ephemeral=True
-                )
-                return
-
-        guild_id = str(interaction.guild_id)
-        formation = get_formation(guild_id, club.value)
-        if not formation:
+    async def lineup_confirm(self, interaction: discord.Interaction):
+        if not _is_manager(interaction.user):
             await interaction.response.send_message(
-                f"No formation set for {club.value}.", ephemeral=True
+                "You need the Manager/Admin role to confirm a lineup.", ephemeral=True
             )
             return
 
-        slots = get_slots(guild_id, club.value)
+        guild_id = str(interaction.guild_id)
+        formation = get_formation(guild_id, CLUB_NAME)
+        if not formation:
+            await interaction.response.send_message(
+                f"No formation set for {CLUB_NAME}.", ephemeral=True
+            )
+            return
+
+        slots = get_slots(guild_id, CLUB_NAME)
         filled = {pos: did for pos, did in slots.items() if did}
         if not filled:
             await interaction.response.send_message(
@@ -460,7 +444,7 @@ class LineupCog(commands.Cog):
 
         # Log to rotation history via rotation module
         from cogs.rotation import log_lineup
-        log_lineup(guild_id, club.value, slots)
+        log_lineup(guild_id, CLUB_NAME, slots)
 
         lines = []
         for pos, discord_id in filled.items():
@@ -469,9 +453,9 @@ class LineupCog(commands.Cog):
             lines.append(f"**{pos}**: {name}")
 
         embed = discord.Embed(
-            title=f"✅ {club.value} Lineup Confirmed — {formation}",
+            title=f"✅ {CLUB_NAME} Lineup Confirmed — {formation}",
             description="\n".join(lines),
-            colour=0x1E90FF if club.value == "MADBOYS" else 0x2ECC71,
+            colour=CLUB_COLOUR,
         )
         embed.set_footer(text=f"Logged {len(filled)} players • {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}")
         await interaction.response.send_message(embed=embed)
@@ -480,22 +464,17 @@ class LineupCog(commands.Cog):
     #  /lineup assign
     # ------------------------------------------------------------------ #
     @lineup_group.command(name="assign", description="Manually assign a player to a position")
-    @app_commands.describe(club="Which club", position="Position slot to fill")
-    @app_commands.choices(club=[
-        app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-        app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-    ])
+    @app_commands.describe(position="Position slot to fill")
     async def lineup_assign(
         self,
         interaction: discord.Interaction,
-        club: app_commands.Choice[str],
         position: str,
     ):
         guild_id = str(interaction.guild_id)
-        formation = get_formation(guild_id, club.value)
+        formation = get_formation(guild_id, CLUB_NAME)
         if not formation:
             await interaction.response.send_message(
-                f"No formation set for {club.value}. Use `/formation set` first.", ephemeral=True
+                f"No formation set for {CLUB_NAME}. Use `/formation set` first.", ephemeral=True
             )
             return
 
@@ -517,9 +496,9 @@ class LineupCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        view = AssignSlotView(guild_id, club.value, position, members)
+        view = AssignSlotView(guild_id, CLUB_NAME, position, members)
         await interaction.response.send_message(
-            f"Assigning player to **{position}** in {club.value} ({formation}):",
+            f"Assigning player to **{position}** in {CLUB_NAME} ({formation}):",
             view=view,
             ephemeral=True,
         )

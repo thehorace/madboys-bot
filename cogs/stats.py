@@ -1,42 +1,20 @@
 """
-/lastgame  - shows the most recent league match result for MADBOYS or GRASBOYS
-/clubstats - shows overall season stats for either club
-/playerstats <name> - shows stats for a specific player in either club
+/lastgame   - shows the most recent league match result for MADBOYS FC
+/clubstats  - shows overall season stats
+/playerstats <name> - shows stats for a specific player
 """
 
-import os
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME, PLATFORM
 from ea_client import EAClient
 
 log = logging.getLogger("madboys-bot.stats")
-
-PLATFORM = os.getenv("EA_PLATFORM", "common-gen5")
-
-CLUBS = {
-    "MADBOYS": int(os.getenv("MADBOYS_CLUB_ID", "85077")),
-    "GRASBOYS": int(os.getenv("GRASBOYS_CLUB_ID", "4137103")),
-}
-
-CLUB_COLOURS = {
-    "MADBOYS": 0x1E90FF,   # blue
-    "GRASBOYS": 0x2ECC71,  # green
-}
-
-club_choice = app_commands.Choice
-
-
-def club_choices():
-    return [
-        app_commands.Choice(name="MADBOYS", value="MADBOYS"),
-        app_commands.Choice(name="GRASBOYS", value="GRASBOYS"),
-    ]
 
 
 def format_result(club_score: int, opp_score: int) -> str:
@@ -53,20 +31,15 @@ class StatsCog(commands.Cog):
         self.ea = ea
 
     @app_commands.command(name="lastgame", description="Show the most recent league match result")
-    @app_commands.describe(club="Which club to check")
-    @app_commands.choices(club=club_choices())
-    async def lastgame(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
+    async def lastgame(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        club_id = CLUBS[club.value]
-        # Checks league + playoff matches and returns whichever is most
-        # recent — EA partitions match history by matchType, so querying
-        # leagueMatch alone misses a club's playoff games entirely.
-        matches = await self.ea.get_recent_matches_multi(club_id, count=1)
+        club_id = CLUB_ID
+        matches = await self.ea.get_recent_matches(club_id, match_type="leagueMatch", count=1)
 
         if not matches:
             await interaction.followup.send(
-                f"Couldn't fetch recent matches for {club.value} right now — EA's API may be down. Try again in a bit.",
+                f"Couldn't fetch recent matches for {CLUB_NAME} right now — EA's API may be down. Try again in a bit.",
                 ephemeral=True,
             )
             return
@@ -84,7 +57,6 @@ class StatsCog(commands.Cog):
             opp_name = opp_data.get("details", {}).get("name", "Unknown")
             result = format_result(our_score, opp_score)
 
-            # Top scorers from player stats
             # NOTE: EA keys this dict by numeric player ID, not name — the
             # actual display name lives in each player's "playername" field.
             players = match.get("players", {}).get(str(club_id), {})
@@ -97,8 +69,8 @@ class StatsCog(commands.Cog):
                     scorers.append(f"{pname} — {goals}G {assists}A")
 
             embed = discord.Embed(
-                title=f"{result}  {club.value} {our_score}–{opp_score} {opp_name}",
-                colour=CLUB_COLOURS[club.value],
+                title=f"{result}  {CLUB_NAME} {our_score}–{opp_score} {opp_name}",
+                colour=CLUB_COLOUR,
             )
             embed.add_field(
                 name="Goals & Assists",
@@ -117,7 +89,7 @@ class StatsCog(commands.Cog):
                 motm = man_ratings[0]
                 embed.add_field(name="⭐ MOTM", value=f"{motm[0]} ({motm[1]:.1f})", inline=True)
 
-            embed.set_footer(text=f"{club.value} • EA FC Pro Clubs")
+            embed.set_footer(text=f"{CLUB_NAME} • EA FC Pro Clubs")
 
         except Exception as e:
             log.error(f"Error parsing match data: {e}", exc_info=True)
@@ -126,25 +98,22 @@ class StatsCog(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="clubstats", description="Show overall season stats for a club")
-    @app_commands.describe(club="Which club to check")
-    @app_commands.choices(club=club_choices())
-    async def clubstats(self, interaction: discord.Interaction, club: app_commands.Choice[str]):
+    @app_commands.command(name="clubstats", description="Show overall season stats for the club")
+    async def clubstats(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        club_id = CLUBS[club.value]
-        stats = await self.ea.get_overall_stats(club_id)
+        stats = await self.ea.get_overall_stats(CLUB_ID)
 
         if not stats:
             await interaction.followup.send(
-                f"Couldn't fetch stats for {club.value} right now — EA's API may be down.",
+                f"Couldn't fetch stats for {CLUB_NAME} right now — EA's API may be down.",
                 ephemeral=True,
             )
             return
 
         embed = discord.Embed(
-            title=f"📊 {club.value} — Season Stats",
-            colour=CLUB_COLOURS[club.value],
+            title=f"📊 {CLUB_NAME} — Season Stats",
+            colour=CLUB_COLOUR,
         )
 
         wins = stats.get("wins", "N/A")
@@ -170,17 +139,15 @@ class StatsCog(commands.Cog):
         if playoff_games and playoff_games != "0":
             embed.add_field(name="Playoff Games", value=playoff_games, inline=True)
 
-        embed.set_footer(text=f"{club.value} • EA FC Pro Clubs")
+        embed.set_footer(text=f"{CLUB_NAME} • EA FC Pro Clubs")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="playerstats", description="Show stats for a specific player")
     @app_commands.describe(
-        club="Which club the player is in",
         player="Player name (partial match works)",
         scope="This season's stats, or career (all-time) totals — defaults to this season",
     )
     @app_commands.choices(
-        club=club_choices(),
         scope=[
             app_commands.Choice(name="This Season", value="season"),
             app_commands.Choice(name="Career (All-Time)", value="career"),
@@ -189,19 +156,17 @@ class StatsCog(commands.Cog):
     async def playerstats(
         self,
         interaction: discord.Interaction,
-        club: app_commands.Choice[str],
         player: str,
         scope: Optional[app_commands.Choice[str]] = None,
     ):
         await interaction.response.defer()
 
         is_career = scope is not None and scope.value == "career"
-        club_id = CLUBS[club.value]
-        members = await self.ea.get_member_stats(club_id, career=is_career)
+        members = await self.ea.get_member_stats(CLUB_ID, career=is_career)
 
         if not members:
             await interaction.followup.send(
-                f"Couldn't fetch player stats for {club.value} right now.",
+                f"Couldn't fetch player stats for {CLUB_NAME} right now.",
                 ephemeral=True,
             )
             return
@@ -212,7 +177,7 @@ class StatsCog(commands.Cog):
 
         if not matches:
             await interaction.followup.send(
-                f"No player matching **{player}** found in {club.value}.",
+                f"No player matching **{player}** found in {CLUB_NAME}.",
                 ephemeral=True,
             )
             return
@@ -222,9 +187,9 @@ class StatsCog(commands.Cog):
         scope_label = "Career (All-Time)" if is_career else "This Season"
 
         embed = discord.Embed(
-            title=f"👤 {name} — {club.value}",
+            title=f"👤 {name} — {CLUB_NAME}",
             description=scope_label,
-            colour=CLUB_COLOURS[club.value],
+            colour=CLUB_COLOUR,
         )
         embed.add_field(name="Games", value=p.get("gamesPlayed", "N/A"), inline=True)
         embed.add_field(name="Goals", value=p.get("goals", "N/A"), inline=True)
@@ -241,7 +206,7 @@ class StatsCog(commands.Cog):
             win_rate = p.get("winRate")
             embed.add_field(name="Win Rate", value=f"{win_rate}%" if win_rate else "N/A", inline=True)
 
-        embed.set_footer(text=f"{club.value} • EA FC Pro Clubs")
+        embed.set_footer(text=f"{CLUB_NAME} • EA FC Pro Clubs")
 
         await interaction.followup.send(embed=embed)
 
