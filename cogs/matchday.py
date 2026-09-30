@@ -13,10 +13,12 @@ What happens in the background, forever, while the bot is running:
      (e.g. "just hit 100 goals").
   6. Once a week it posts a recap.
 
-Polling speed adapts: every POLL_ACTIVE_MINUTES (default 2) while you're
-playing — a match finished recently, or a /session is on — and every
-POLL_IDLE_MINUTES (default 10) otherwise, so EA/the home relay isn't hammered
-at 4am.
+Polling speed adapts: every POLL_ACTIVE_MINUTES (default 1) while you're
+playing and every POLL_IDLE_MINUTES (default 5) otherwise, so EA/the home relay
+isn't hammered at 4am. "Playing" means any of: 2+ squad members in a voice
+channel, someone's Discord status showing EA FC (if ENABLE_PRESENCE=1), a match
+finished in the last 90 min, or a /session is on. The switch to fast checks
+happens within ~15 seconds of people joining voice.
 
 The first time it runs against an empty database it saves what EA currently
 has *without* posting it, so the channel doesn't get spammed with old games.
@@ -30,6 +32,7 @@ Commands:
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -43,7 +46,8 @@ import match_data as md
 from cogs.link import find_discord_id_by_ea_name, get_all_links
 from cogs.rotation import is_match_processed, log_positions, mark_match_processed
 from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, CLUB_NAME, GUILD_ID,
-                    MATCHDAY_CHANNEL_ID, POLL_ACTIVE_MINUTES, POLL_IDLE_MINUTES, RECAP_HOUR, RECAP_WEEKDAY)
+                    MATCHDAY_CHANNEL_ID, POLL_ACTIVE_MINUTES, POLL_IDLE_MINUTES, RECAP_HOUR, RECAP_WEEKDAY,
+                    VOICE_ACTIVE_PLAYERS)
 from db import connect, get_setting, set_setting
 from utils import clip, is_manager, to_int
 
@@ -52,7 +56,10 @@ log = logging.getLogger("madboys-bot.matchday")
 # EA's per-player "pos" bucket -> rotation role
 POSITION_MAP = {"goalkeeper": "GK", "defender": "DEF", "midfielder": "MID", "forward": "FWD"}
 
-MAX_POSTS_PER_POLL = 3  # if the bot was offline and finds 8 new games, don't flood the channel
+MAX_POSTS_PER_POLL = 3
+
+# Discord "Playing ..." names that mean someone's on the game (only used if ENABLE_PRESENCE=1)
+GAME_NAME = re.compile(r"EA SPORTS FC|\bFC ?2[5-9]\b|\bFIFA\b", re.IGNORECASE)  # if the bot was offline and finds 8 new games, don't flood the channel
 
 MILESTONES = {
     "goals":         ("career goals", [10, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000]),
@@ -133,7 +140,6 @@ class MatchdayCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.ea = bot.ea
-        self.next_poll_at = 0.0
         self.last_poll_at: Optional[float] = None
         self.last_poll_ok: Optional[bool] = None
         self.last_new_at: Optional[float] = None
@@ -190,33 +196,63 @@ class MatchdayCog(commands.Cog):
     # ------------------------------------------------------------------ #
     #  adaptive schedule
     # ------------------------------------------------------------------ #
-    def is_active(self) -> bool:
+    def active_reason(self) -> Optional[str]:
+        """
+        Why we think the squad is playing right now (-> check every POLL_ACTIVE_MINUTES),
+        or None (-> check every POLL_IDLE_MINUTES). Cheapest signals first.
+        """
         now = time.time()
         window = ACTIVE_WINDOW_MINUTES * 60
+        guild = self.home_guild()
+
+        # 1. squad members sitting in a voice channel together
+        if guild:
+            linked = set(get_all_links(str(guild.id)))
+            for vc in guild.voice_channels:
+                humans = [m for m in vc.members if not m.bot]
+                squad = [m for m in humans if str(m.id) in linked] if linked else humans
+                if len(squad) >= VOICE_ACTIVE_PLAYERS:
+                    return f"{len(squad)} squad members in 🔊 {vc.name}"
+
+        # 2. someone's Discord status says they're playing EA FC (needs ENABLE_PRESENCE=1)
+        if guild and self.bot.intents.presences:
+            for m in guild.members:
+                if not m.bot and any(GAME_NAME.search(getattr(a, "name", "") or "") for a in m.activities):
+                    return f"{m.display_name} is playing EA FC"
+
+        # 3. a match finished recently (you're probably mid-session)
         last = md.latest_match_ts(CLUB_ID)
         if last and now - last < window:
-            return True
+            return "played a match recently"
+
+        # 4. a /session is on (15 min before kick-off to ~3h after)
         with connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM sessions WHERE cancelled=0 AND starts_at BETWEEN ? AND ? LIMIT 1",
                 (int(now - window - 3 * 3600), int(now + 15 * 60)),
             ).fetchone()
-        # a session counts as "on" from 15 min before start to ~3h + window after
-        return row is not None
+        return "a session is on" if row else None
+
+    def is_active(self) -> bool:
+        return self.active_reason() is not None
 
     def current_interval_minutes(self) -> float:
         return POLL_ACTIVE_MINUTES if self.is_active() else POLL_IDLE_MINUTES
 
-    @tasks.loop(seconds=30)
+    @property
+    def next_poll_at(self) -> float:
+        # Worked out fresh every time (rather than fixed when the last check ran), so the moment
+        # people hop into voice the bot switches to fast checks instead of finishing a long idle wait.
+        return (self.last_poll_at or 0) + self.current_interval_minutes() * 60
+
+    @tasks.loop(seconds=15)
     async def ticker(self):
-        if time.time() < self.next_poll_at or self._polling:
+        if self._polling or time.time() < self.next_poll_at:
             return
         try:
             await self.poll_once()
         except Exception:
             log.exception("Match tracker poll failed")
-        finally:
-            self.next_poll_at = time.time() + self.current_interval_minutes() * 60
 
     @ticker.before_loop
     async def _before_ticker(self):
@@ -422,10 +458,13 @@ class MatchdayCog(commands.Cog):
         gid = str(interaction.guild_id)
         cid = self.channel_id_for(gid)
         enabled = self.posting_enabled(gid)
-        active = self.is_active()
+        reason = self.active_reason()
+        active = reason is not None
         lines = [
             f"**Posting:** {'on' if enabled and cid else 'off'}" + (f" in <#{cid}>" if cid else " (no channel — run `/matchday start`)"),
-            f"**Mode:** {'🟢 active' if active else '💤 idle'} — checks every {self.current_interval_minutes():g} min",
+            f"**Mode:** {'🟢 active' if active else '💤 idle'} — checks every "
+            f"{POLL_ACTIVE_MINUTES if active else POLL_IDLE_MINUTES:g} min" + (f" ({reason})" if reason else
+            " (speeds up when 2+ of the squad are in voice, a /session is on, or you just played)"),
             "**Last check:** " + (f"<t:{int(self.last_poll_at)}:R> ({'ok' if self.last_poll_ok else 'failed — relay/EA unreachable'})"
                                    if self.last_poll_at else "not yet"),
             f"**Next check:** <t:{int(self.next_poll_at)}:R>" if self.next_poll_at else "",
@@ -444,7 +483,6 @@ class MatchdayCog(commands.Cog):
             await interaction.followup.send("A check is already running — give it a few seconds.", ephemeral=True)
             return
         n = await self.poll_once()
-        self.next_poll_at = time.time() + self.current_interval_minutes() * 60
         if not self.last_poll_ok:
             await interaction.followup.send("Couldn't reach EA (the relay may be offline). Try again later.",
                                             ephemeral=True)

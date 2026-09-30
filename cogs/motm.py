@@ -4,8 +4,8 @@ Squad Man of the Match vote — your MOTM, not EA's.
 After each full-time post the bot posts a vote: a dropdown of everyone who
 played that game. Anyone in the server can vote (one vote each, changeable),
 but not for themselves if they're linked. Totals stay hidden while voting is
-open so nobody just follows the crowd; when it closes (MOTM_VOTE_HOURS,
-default 12) the message shows the results and the winner gets a shout-out.
+open so nobody just follows the crowd; when it closes (MOTM_VOTE_MINUTES,
+default 10) the message shows the results and the winner gets a shout-out.
 Ties share the award.
 
   /motm table   - Season table of squad MOTM awards
@@ -28,7 +28,7 @@ from discord.ext import commands, tasks
 
 import match_data as md
 from cogs.link import get_link
-from config import CLUB_NAME, MOTM_VOTE_HOURS
+from config import CLUB_NAME, MOTM_VOTE_MINUTES
 from db import connect, now_iso
 from utils import clip, is_manager
 
@@ -198,7 +198,7 @@ class MotmCog(commands.Cog):
             "title": f"{pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}",
             "candidates": json.dumps([o.value for o in options]),
             "ea_motm": ea.name if ea else None,
-            "closes_at": int(time.time() + MOTM_VOTE_HOURS * 3600),
+            "closes_at": int(time.time() + MOTM_VOTE_MINUTES * 60),
         }
         with connect() as conn:
             if conn.execute("SELECT 1 FROM motm_polls WHERE match_id=?", (pm.match_id,)).fetchone():
@@ -242,7 +242,7 @@ class MotmCog(commands.Cog):
         except discord.HTTPException:
             log.warning(f"Couldn't update MOTM poll {poll['match_id']}")
 
-    @tasks.loop(minutes=1)
+    @tasks.loop(seconds=20)  # short votes should close on time, not up to a minute late
     async def closer(self):
         with connect() as conn:
             due = [dict(r) for r in conn.execute(

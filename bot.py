@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before importing config, which reads env vars
 
 import db  # noqa: E402
-from config import GUILD_ID, PLATFORM  # noqa: E402
+from config import ENABLE_PRESENCE, GUILD_ID, PLATFORM  # noqa: E402
 from ea_client import EAClient  # noqa: E402
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -36,6 +36,9 @@ class MadBoysBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True  # member cache, so names resolve without extra API calls
+        # voice_states is on by default: the match tracker uses "squad is in voice" to know you're playing.
+        # presences is privileged: only request it if it's been enabled in the Developer Portal.
+        intents.presences = ENABLE_PRESENCE
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.ea = EAClient(platform=PLATFORM)
 

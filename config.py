@@ -16,8 +16,12 @@ Server
 Auto match tracker
   MATCHDAY_CHANNEL_ID    Channel to post results in. Optional: /matchday start sets it
                          from Discord and that choice is saved in the DB.
-  POLL_ACTIVE_MINUTES    Check interval while you're playing          (default 2)
-  POLL_IDLE_MINUTES      Check interval otherwise                     (default 10)
+  POLL_ACTIVE_MINUTES    Check interval while you're playing          (default 1)
+  POLL_IDLE_MINUTES      Check interval otherwise                     (default 5)
+  VOICE_ACTIVE_PLAYERS   Squad members in voice that count as "playing" (default 2)
+  ENABLE_PRESENCE        Set to 1 to also detect "Playing EA SPORTS FC" statuses.
+                         Needs "Presence Intent" switched on in the Discord
+                         Developer Portal (Bot page) FIRST, or the bot won't start.
   ACTIVE_WINDOW_MINUTES  How long after a match / session start we stay "active" (default 90)
 
 Weekly recap + sessions
@@ -26,7 +30,7 @@ Weekly recap + sessions
   RECAP_HOUR             Hour of day, in BOT_TZ                       (default 21)
 
 Squad MOTM vote
-  MOTM_VOTE_HOURS        How long the post-match vote stays open     (default 12)
+  MOTM_VOTE_MINUTES      How long the post-match vote stays open     (default 10)
 
 Misc
   ROTATION_THRESHOLD     Games in the same role before /rotation check flags it (default 3)
@@ -48,15 +52,19 @@ MATCH_TYPES = [t.strip() for t in os.getenv("MATCH_TYPES", "leagueMatch,playoffM
 GUILD_ID = os.getenv("GUILD_ID")
 MATCHDAY_CHANNEL_ID = os.getenv("MATCHDAY_CHANNEL_ID")
 
-POLL_ACTIVE_MINUTES = float(os.getenv("POLL_ACTIVE_MINUTES", "2"))
-POLL_IDLE_MINUTES = float(os.getenv("POLL_IDLE_MINUTES", "10"))
+POLL_ACTIVE_MINUTES = float(os.getenv("POLL_ACTIVE_MINUTES", "1"))
+POLL_IDLE_MINUTES = float(os.getenv("POLL_IDLE_MINUTES", "5"))
+VOICE_ACTIVE_PLAYERS = int(os.getenv("VOICE_ACTIVE_PLAYERS", "2"))
+ENABLE_PRESENCE = os.getenv("ENABLE_PRESENCE", "").strip().lower() in ("1", "true", "yes")
 ACTIVE_WINDOW_MINUTES = int(os.getenv("ACTIVE_WINDOW_MINUTES", "90"))
 
 BOT_TZ = os.getenv("BOT_TZ", "Asia/Singapore")
 RECAP_WEEKDAY = int(os.getenv("RECAP_WEEKDAY", "6"))
 RECAP_HOUR = int(os.getenv("RECAP_HOUR", "21"))
 
-MOTM_VOTE_HOURS = float(os.getenv("MOTM_VOTE_HOURS", "12"))
+# (MOTM_VOTE_HOURS still works if someone already set it in Railway)
+MOTM_VOTE_MINUTES = float(os.getenv("MOTM_VOTE_MINUTES")
+                          or float(os.getenv("MOTM_VOTE_HOURS") or 0) * 60 or 10)
 
 ROTATION_THRESHOLD = int(os.getenv("ROTATION_THRESHOLD", "3"))
 BUILDS_URL = os.getenv("BUILDS_URL", "")

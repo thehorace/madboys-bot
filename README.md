@@ -6,23 +6,26 @@ results, stats, lineups, rotation tracking and session sign-ups.
 ## What it does
 
 **Automatic match tracking (always on).** While the bot is running it checks
-EA for new league and playoff results: every 2 min while you're playing,
-every 10 min otherwise. Each new match is:
+EA for new league and playoff results: **every minute while you're playing**
+(2+ of the squad in voice, a session on, or a game just finished), every 5 min
+otherwise. Each new match is:
 
 - saved permanently (so `/form`, `/h2h`, `/recap` work beyond EA's short history)
 - posted to the matchday channel with a full ratings table
 - used to log each linked player's role for `/rotation`
 - posted with a **result card image** (score, scorers, colour-coded ratings)
 - followed by a **squad MOTM vote**: everyone picks their man of the match from
-  a dropdown, results are revealed when it closes (12h), and `/motm table`
+  a dropdown, results are revealed when it closes (10 min), and `/motm table`
   tracks the season's awards
 - checked for career milestones ("🎉 @Fauzan just hit 100 career goals!")
 
 A weekly recap posts on Sunday evening. Set the channel once with
 `/matchday start`; it survives restarts and redeploys.
 
-EA only publishes *finished* matches, so results appear a few minutes after
-full time. There is no live score feed.
+EA only publishes *finished* matches and has no "match ended" notification,
+so results appear about 1–3 minutes after full time. There is no live score feed.
+Optional: set `ENABLE_PRESENCE=1` (after turning on **Presence Intent** in the
+Discord Developer Portal) so "Playing EA SPORTS FC" statuses also count.
 
 ## Buttons instead of commands
 
