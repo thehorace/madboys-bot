@@ -43,7 +43,7 @@ import os
 import sqlite3
 
 CLUB_NAME = os.getenv("CLUB_NAME", "MADBOYS FC")
-CLUB_ID = int(os.getenv("CLUB_ID") or os.getenv("MADBOYS_CLUB_ID") or "85077")
+CLUB_ID = int(os.getenv("CLUB_ID") or os.getenv("MADBOYS_CLUB_ID") or "24342")  # MADBOYS FC on EA (FC 27)
 PLATFORM = os.getenv("EA_PLATFORM", "common-gen5")
 CLUB_COLOUR = 0x1E90FF
 

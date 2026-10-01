@@ -27,6 +27,25 @@ so results appear about 1–3 minutes after full time. There is no live score fe
 Optional: set `ENABLE_PRESENCE=1` (after turning on **Presence Intent** in the
 Discord Developer Portal) so "Playing EA SPORTS FC" statuses also count.
 
+## Exact positions, builds and rotation
+
+EA's match data only says goalkeeper / defender / midfielder / forward, so the
+bot works out exact spots (LB vs CB vs RB...) itself:
+
+1. **Players tap 🛠️ My builds** on the panel once and tick the positions they
+   have builds for.
+2. **A manager taps 🧑‍💼 Manager** on the panel: pick a formation, ✨ Auto-suggest
+   (uses today's session sign-ups, everyone's builds, and spreads positions
+   around based on rotation history), swap anyone with two taps, then
+   📢 Post lineup. That lineup is what tells the bot who's LB and who's CB.
+3. **After each game** the bot logs each player's exact spot from the lineup
+   when EA's role agrees. Without a lineup, it assumes you stayed in the spot
+   you played the previous game this session. Anyone it can't be sure about gets
+   a one-tap "📍 Where did you play?" message. `/position` fixes your last game any time.
+4. **Rotation notes** go to a private managers' channel (set it with
+   "📝 Send rotation notes here" in the Manager menu), e.g. *"Ali — LB 3 games
+   in a row — has builds for CB, CM → try CB next"*. Players aren't nagged.
+
 ## Buttons instead of commands
 
 Not everyone likes typing slash commands, so there's a menu too:
@@ -37,15 +56,17 @@ Not everyone likes typing slash commands, so there's a menu too:
   dropdown. **📢 Share** posts whatever you're looking at to the channel.
 - **`/panel`** (managers) posts a pinned message with big buttons. Anyone can
   click it anytime, even after restarts, and never has to type anything.
+  **`/panel sticky:True`** keeps it at the bottom of a busy channel instead: once
+  the chat moves on a few messages, the bot re-posts it and removes the old one.
 
 ## Commands
 
 | | |
 |---|---|
 | **Stats** | `/lastgame` `/clubstats` `/me` `/playerstats` `/leaderboard` `/compare` `/form` `/h2h` `/recap` |
-| **Setup** | `/link me` (connect your EA name — do this first) `/prefer` (positions you're happy to play) |
+| **Setup** | `/link me` (connect your EA name — do this first) `/builds` (positions you have builds for) `/position` (fix your last game's spot) |
 | **Sessions** | `/session create` (who's on tonight? ✅/🤔/❌ buttons + 30-min reminder) `/session list` `/session cancel` |
-| **Lineups** | `/formation set` `/formation show` (drawn on a pitch) `/lineup suggest` `/lineup assign` `/lineup clear` `/lineup confirm` |
+| **Lineups** | `/lineup builder` (button builder) `/lineup suggest` `/lineup assign` `/lineup clear` `/lineup post` `/formation set` `/formation show` |
 | **Rotation** | `/rotation check` `/rotation history` `/rotation stats` |
 | **Tracker** | `/matchday start` `/matchday stop` `/matchday status` `/matchday check` |
 | **MOTM** | `/motm table` `/motm close` |
@@ -53,9 +74,9 @@ Not everyone likes typing slash commands, so there's a menu too:
 | **Misc** | `/help` `/status` `/build` `/ping` `/debug` (managers: raw EA JSON) |
 
 `/lineup suggest` uses only the players who clicked ✅ for today's session (if
-there is one), respects `/prefer`, and spreads roles around using rotation
-history. It finds the best overall assignment instead of filling slots
-first-come-first-served.
+there is one), only puts people where they have builds, and spreads exact
+positions around using rotation history. It finds the best overall assignment
+instead of filling slots first-come-first-served.
 
 "Manager" commands need Manage Channels, or a role named Manager, Admin or Coach.
 
@@ -97,6 +118,8 @@ cogs/matchday.py  always-on tracker, milestones, weekly recap, /recap
 cogs/stats.py     stats commands
 cogs/lineup.py    formations, prefs, lineup suggest (Hungarian assignment)
 cogs/rotation.py  rotation history + checks
+positions.py      exact-position logic (posted lineups, carry-over, rotation notes)
+cogs/positions.py "where did you play?" picker, /position, manager rotation notes
 cogs/sessions.py  session sign-ups + reminders
 cogs/link.py      Discord <-> EA name links
 cogs/motm.py      squad MOTM vote + awards table

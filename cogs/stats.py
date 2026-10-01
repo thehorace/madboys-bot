@@ -54,12 +54,36 @@ LEADERBOARD_STATS = {
     "manOfTheMatch":   ("MOTMs", "{:.0f}"),
     "gamesPlayed":     ("Games Played", "{:.0f}"),
     "passSuccessRate": ("Pass %", "{:.0f}%"),
+    "passesPerGame":   ("Passes per Game", "{:.1f}"),
     "tacklesMade":     ("Tackles", "{:.0f}"),
-    "cleanSheetsDef":  ("Clean Sheets (DEF)", "{:.0f}"),
+    "tackleSuccessRate": ("Tackle %", "{:.0f}%"),
+    "cleanSheets":     ("Clean Sheets", "{:.0f}"),
 }
+
+# "Per game" / percentage stats are meaningless for someone who's played twice, so they need a
+# minimum number of games: 20% of the most-played squad member's games, and never fewer than 5.
+RATE_STATS = {"ratingAve", "gpg", "passSuccessRate", "passesPerGame", "tackleSuccessRate", "shotSuccessRate", "winRate"}
+
+# Filter by the position each player plays most (EA's "favoritePosition")
+POSITION_FILTERS = {"all": ("All positions", None), "GK": ("Goalkeepers", "goalkeeper"),
+                    "DEF": ("Defenders", "defender"), "MID": ("Midfielders", "midfielder"),
+                    "FWD": ("Forwards", "forward")}
+POSITION_ORDER = ["all", "DEF", "MID", "FWD", "GK"]
+
+
+def min_games_for(members: list[dict], stat: str) -> int:
+    if stat not in RATE_STATS:
+        return 1
+    most = max((to_int(m.get("gamesPlayed")) for m in members), default=0)
+    return max(5, round(most * 0.2))
+
+
+def in_position(m: dict, position: str) -> bool:
+    want = POSITION_FILTERS.get(position, (None, None))[1]
+    return want is None or (m.get("favoritePosition") or "").lower() == want
 LEADERBOARD_EMOJI = {"goals": "⚽", "assists": "🅰️", "ga": "🔥", "gpg": "🎯", "ratingAve": "📈",
-                     "manOfTheMatch": "⭐", "gamesPlayed": "🎮", "passSuccessRate": "🧠", "tacklesMade": "🛡️",
-                     "cleanSheetsDef": "🧱"}
+                     "manOfTheMatch": "⭐", "gamesPlayed": "🎮", "passSuccessRate": "🎯", "passesPerGame": "🔁",
+                     "tacklesMade": "🛡️", "tackleSuccessRate": "🛡️", "cleanSheets": "🧱"}
 
 
 # --------------------------------------------------------------------------- #
@@ -71,6 +95,15 @@ def stat_value(m: dict, key: str) -> Optional[float]:
     if key == "gpg":
         gp = to_int(m.get("gamesPlayed"))
         return (to_int(m.get("goals")) / gp) if gp else None
+    if key == "passesPerGame":
+        gp = to_int(m.get("gamesPlayed"))
+        return (to_int(m.get("passesMade")) / gp) if gp else None
+    if key == "cleanSheets":
+        # EA counts keeper and outfield clean sheets separately; a player only earns the one
+        # matching where they played that game, so the total is the sum.
+        if m.get("cleanSheetsGK") is None and m.get("cleanSheetsDef") is None:
+            return None
+        return to_int(m.get("cleanSheetsGK")) + to_int(m.get("cleanSheetsDef"))
     return to_float(m.get(key))
 
 
@@ -206,7 +239,12 @@ async def build_player(ea, name: str, career: bool = False, with_recent: bool = 
         add("Shot %", "shotSuccessRate", "%")
         add("Tackles", "tacklesMade")
         add("Tackle %", "tackleSuccessRate", "%")
-        add("Clean Sheets", "cleanSheetsDef")
+        cs_gk, cs_def = to_int(p.get("cleanSheetsGK")), to_int(p.get("cleanSheetsDef"))
+        parts = ([f"{cs_gk} in goal"] if cs_gk else []) + ([f"{cs_def} outfield"] if cs_def else [])
+        embed.add_field(name="Clean Sheets", value=f"{cs_gk + cs_def}" + (f" ({', '.join(parts)})" if parts else ""),
+                        inline=True)
+        if gp and p.get("passesMade") not in (None, ""):
+            embed.add_field(name="Passes / game", value=f"{to_int(p.get('passesMade')) / gp:.1f}", inline=True)
         add("Red Cards", "redCards")
         add("Position", "favoritePosition")
         add("Overall", "proOverall")
@@ -217,22 +255,93 @@ async def build_player(ea, name: str, career: bool = False, with_recent: bool = 
     return footer(embed, ea)
 
 
-async def build_leaderboard(ea, stat: str, career: bool = False) -> Screen:
+async def build_leaderboard(ea, stat: str, career: bool = False, position: str = "all") -> Screen:
     members = await ea.get_member_stats(CLUB_ID, career=career)
     if not members:
         return "Couldn't fetch player stats right now."
     label, fmt = LEADERBOARD_STATS[stat]
-    min_games = 3 if stat in ("ratingAve", "gpg", "passSuccessRate") else 1
-    ranked = [(m["name"], v) for m in members
-              if m.get("name") and (v := stat_value(m, stat)) is not None
-              and to_int(m.get("gamesPlayed"), 1) >= min_games]
+    min_games = min_games_for(members, stat)
+    ranked = [(m["name"], v, to_int(m.get("gamesPlayed"))) for m in members
+              if m.get("name") and in_position(m, position)
+              and (v := stat_value(m, stat)) is not None
+              and to_int(m.get("gamesPlayed")) >= min_games]
+    pos_label = POSITION_FILTERS.get(position, ("All positions",))[0]
     if not ranked:
-        return f"EA doesn't provide **{label}** for {'career' if career else 'season'} stats."
-    ranked.sort(key=lambda x: -x[1])
+        return (f"Nobody qualifies for **{label}** ({pos_label.lower()}, min {min_games} games)."
+                if min_games > 1 else f"EA doesn't provide **{label}** for {'career' if career else 'season'} stats.")
+    ranked.sort(key=lambda x: (-x[1], -x[2]))   # ties: more games first
     medals = ["🥇", "🥈", "🥉"]
-    lines = [f"{medals[i] if i < 3 else f'`{i + 1:>2}.`'} **{n}** — {fmt.format(v)}" for i, (n, v) in enumerate(ranked[:15])]
-    embed = discord.Embed(title=f"🏆 {CLUB_NAME} — {label}", description="\n".join(lines), colour=CLUB_COLOUR)
+    show_games = stat in RATE_STATS
+    lines = [f"{medals[i] if i < 3 else f'`{i + 1:>2}.`'} **{n}** — {fmt.format(v)}" + (f"  ·  {g} games" if show_games else "")
+             for i, (n, v, g) in enumerate(ranked[:15])]
+    title = f"🏆 {CLUB_NAME} — {label}" + (f" ({pos_label})" if position != "all" else "")
+    embed = discord.Embed(title=title, description="\n".join(lines), colour=CLUB_COLOUR)
     return footer(embed, ea, ("Career" if career else "This season") + (f" • min {min_games} games" if min_games > 1 else ""))
+
+
+async def build_passing(ea, position: str = "all") -> Screen:
+    """
+    Passing, the way the squad asked for it: accuracy vs how involved you are
+    (EA has no "touches" stat, so passes attempted per game is the involvement
+    measure), per player, per position played, and for the team per match.
+    """
+    members = await ea.get_member_stats(CLUB_ID)
+    embed = discord.Embed(title=f"🎯 {CLUB_NAME} — Passing", colour=CLUB_COLOUR,
+                          description="**Acc** = pass accuracy • **Att/g** = passes attempted per game "
+                                      "(how involved you are — EA doesn't track touches)")
+    if members:
+        min_games = min_games_for(members, "passSuccessRate")
+        rows = []
+        for m in members:
+            gp = to_int(m.get("gamesPlayed"))
+            if not m.get("name") or gp < min_games or not in_position(m, position):
+                continue
+            acc = to_float(m.get("passSuccessRate"))
+            made = to_int(m.get("passesMade"))
+            att = made / (acc / 100) if acc else made        # EA gives made + %, so attempts = made / %
+            pos = md.POS_SHORT.get((m.get("favoritePosition") or "").lower(), "")
+            rows.append((m["name"], pos, gp, att / gp if gp else 0, acc or 0))
+        rows.sort(key=lambda r: (-r[4], -r[2]))
+        if rows:
+            table = [f"{'':<13}{'Pos':<4}{'GP':>3}{'Att/g':>7}{'Acc':>6}"]
+            table += [f"{n[:12]:<13}{p:<4}{g:>3}{a:>7.1f}{c:>5.0f}%" for n, p, g, a, c in rows[:15]]
+            pos_label = POSITION_FILTERS.get(position, ("All positions",))[0]
+            embed.add_field(name=f"This season — {pos_label.lower()} (min {min_games} games)",
+                            value="```\n" + "\n".join(table) + "\n```", inline=False)
+
+    # by position actually played, from the matches the bot has tracked
+    with connect() as conn:
+        by_role = conn.execute("""
+            SELECT LOWER(pos) AS pos, COUNT(*) AS apps, SUM(passes_made) AS made, SUM(pass_attempts) AS att
+            FROM match_players WHERE club_id=? AND pos IS NOT NULL GROUP BY LOWER(pos)
+        """, (CLUB_ID,)).fetchall()
+        per_match = conn.execute("""
+            SELECT m.result, SUM(mp.passes_made) AS made, SUM(mp.pass_attempts) AS att
+            FROM matches m JOIN match_players mp ON mp.club_id=m.club_id AND mp.match_id=m.match_id
+            WHERE m.club_id=? GROUP BY m.match_id ORDER BY m.ts DESC LIMIT 20
+        """, (CLUB_ID,)).fetchall()
+    if by_role:
+        order = {"goalkeeper": 0, "defender": 1, "midfielder": 2, "forward": 3}
+        lines = []
+        for r in sorted(by_role, key=lambda r: order.get(r["pos"], 9)):
+            if r["att"]:
+                lines.append(f"**{md.POS_SHORT.get(r['pos'], r['pos'])}** — {100 * r['made'] / r['att']:.0f}% "
+                             f"• {r['att'] / r['apps']:.1f} att/g ({r['apps']} game{'s' if r['apps'] != 1 else ''})")
+        if lines:
+            embed.add_field(name="By position played (tracked games)", value="\n".join(lines), inline=True)
+    if per_match:
+        tot_m = sum(r["made"] or 0 for r in per_match)
+        tot_a = sum(r["att"] or 0 for r in per_match)
+        lines = [f"Team: **{100 * tot_m / tot_a:.0f}%** over last {len(per_match)} games" if tot_a else ""]
+        for res, word in (("W", "wins"), ("D", "draws"), ("L", "losses")):
+            sub_ = [r for r in per_match if r["result"] == res]
+            m_, a_ = sum(r["made"] or 0 for r in sub_), sum(r["att"] or 0 for r in sub_)
+            if a_:
+                lines.append(f"In {word}: {100 * m_ / a_:.0f}% ({len(sub_)})")
+        embed.add_field(name="Team passing", value="\n".join(l for l in lines if l) or "—", inline=True)
+    if len(embed.fields) == 0:
+        return "No passing data yet."
+    return footer(embed, ea)
 
 
 async def build_compare(ea, a_name: str, b_name: str, career: bool = False) -> Screen:
@@ -370,14 +479,24 @@ class StatsCog(commands.Cog):
         await send_screen(interaction, await build_player(self.ea, player, career, with_recent))
 
     @app_commands.command(name="leaderboard", description="Rank the squad by a stat")
-    @app_commands.describe(stat="What to rank by", scope="This season (default) or career")
+    @app_commands.describe(stat="What to rank by", scope="This season (default) or career",
+                           position="Only players who mainly play this position")
     @app_commands.choices(stat=[app_commands.Choice(name=v[0], value=k) for k, v in LEADERBOARD_STATS.items()],
-                          scope=SCOPES)
+                          scope=SCOPES,
+                          position=[app_commands.Choice(name=v[0], value=k) for k, v in POSITION_FILTERS.items()])
     async def leaderboard(self, interaction: discord.Interaction, stat: app_commands.Choice[str],
-                          scope: Optional[app_commands.Choice[str]] = None):
+                          scope: Optional[app_commands.Choice[str]] = None,
+                          position: Optional[app_commands.Choice[str]] = None):
         await interaction.response.defer()
         await send_screen(interaction, await build_leaderboard(self.ea, stat.value,
-                                                               scope is not None and scope.value == "career"))
+                                                               scope is not None and scope.value == "career",
+                                                               position.value if position else "all"))
+
+    @app_commands.command(name="passing", description="Pass accuracy vs involvement — per player, position and team")
+    @app_commands.choices(position=[app_commands.Choice(name=v[0], value=k) for k, v in POSITION_FILTERS.items()])
+    async def passing(self, interaction: discord.Interaction, position: Optional[app_commands.Choice[str]] = None):
+        await interaction.response.defer()
+        await send_screen(interaction, await build_passing(self.ea, position.value if position else "all"))
 
     @app_commands.command(name="compare", description="Compare two players side by side")
     @app_commands.choices(scope=SCOPES)

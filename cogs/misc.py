@@ -26,13 +26,14 @@ HELP_SECTIONS = [
     ]),
     ("🔗 Setup", [
         ("/link me", "Connect your Discord to your EA name — do this first!"),
-        ("/prefer", "Pick the positions you're happy playing"),
+        ("/builds", "Tick the positions you have a build for (or 🛠️ on the panel)"),
     ]),
     ("🎮 Sessions & lineups", [
         ("/session create", "Post a 'who's on tonight?' sign-up"),
         ("/formation show", "Current lineup on a pitch"),
-        ("/lineup suggest", "Manager: auto-pick from sign-ups, prefs and rotation"),
-        ("/rotation check", "Who's been stuck in one role"),
+        ("/lineup builder", "Manager: build & post the lineup with buttons (or 🧑‍💼 on the panel)"),
+        ("/rotation check", "Who's been stuck in one position"),
+        ("/position", "Fix where you played in your last game"),
     ]),
     ("📡 Match tracking", [
         ("/matchday start", "Manager: choose where results auto-post (one time)"),

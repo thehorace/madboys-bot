@@ -135,6 +135,10 @@ CREATE TABLE IF NOT EXISTS match_players (
     saves           INTEGER DEFAULT 0,
     red_cards       INTEGER DEFAULT 0,
     motm            INTEGER DEFAULT 0,
+    archetype_id    INTEGER,
+    seconds_played  INTEGER,
+    clean_sheet     INTEGER,
+    goals_conceded  INTEGER,
     PRIMARY KEY (club_id, match_id, persona_id)
 );
 CREATE INDEX IF NOT EXISTS idx_match_players_name ON match_players (club_id, name COLLATE NOCASE);
@@ -177,6 +181,28 @@ CREATE TABLE IF NOT EXISTS motm_votes (
     candidate TEXT NOT NULL,
     voted_at  TEXT NOT NULL,
     PRIMARY KEY (match_id, voter_id)
+);
+
+-- ---------- lineups the managers posted (source of truth for exact positions) ----------
+CREATE TABLE IF NOT EXISTS lineup_plans (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   TEXT NOT NULL,
+    club       TEXT NOT NULL,
+    formation  TEXT NOT NULL,
+    slots      TEXT NOT NULL,             -- JSON {slot: discord_id}
+    posted_at  INTEGER NOT NULL,          -- unix seconds
+    posted_by  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lineup_plans ON lineup_plans (guild_id, club, posted_at);
+
+-- ---------- "where did you play?" prompts after a match ----------
+CREATE TABLE IF NOT EXISTS position_prompts (
+    message_id TEXT PRIMARY KEY,
+    guild_id   TEXT NOT NULL,
+    match_id   TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    pending    TEXT NOT NULL,             -- JSON {discord_id: EA bucket e.g. "defender"}
+    created_at INTEGER NOT NULL
 );
 
 -- ---------- new: play sessions + RSVPs ----------
@@ -237,6 +263,15 @@ def init_all():
             conn.execute("ALTER TABLE rotation_log ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
         _migrate_active_formation_pk(conn)
         conn.executescript(SCHEMA)
+        # columns added to match_players after it first shipped
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(match_players)")}
+        for col in ("archetype_id", "seconds_played", "clean_sheet", "goals_conceded"):
+            if col not in have:
+                conn.execute(f"ALTER TABLE match_players ADD COLUMN {col} INTEGER")
+        # rotation entries remember which match they came from, so a player can correct their position
+        if "match_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(rotation_log)")}:
+            conn.execute("ALTER TABLE rotation_log ADD COLUMN match_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rotation_match ON rotation_log (guild_id, match_id, discord_id)")
         for table in ("rotation_log", "processed_matches", "matchday_poll", "active_formation", "lineup_slots"):
             migrate_legacy_club(conn, table)
     log.info(f"Database ready at {DB_PATH}")

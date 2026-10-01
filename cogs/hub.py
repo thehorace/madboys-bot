@@ -14,13 +14,15 @@ Menu layout (Discord allows 5 rows; a dropdown takes a whole row):
   row 3  ▾ Compare with…          (on a player page)
          ▾ Head-to-head vs…       (elsewhere, once some matches are tracked)
          ▾ Which player are you?  (when "Me" is clicked by someone not linked yet)
-  row 4  [📅 Season ⇄ 🕰️ Career] [🏠 Home] [📢 Share]
+  row 4  [📅 Season ⇄ 🕰️ Career] [🏠 Home] [📢 Share] [🔎 position filter, on leaderboards]
 
 All screens come from the same build_* functions the slash commands use
 (cogs/stats.py), so the menu and the commands always agree.
 """
 
+import asyncio
 import logging
+import time
 from typing import Optional
 
 import discord
@@ -31,7 +33,11 @@ import match_data as md
 from cogs import stats as S
 from cogs.link import get_link, set_link
 from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
+from db import get_setting, set_setting
 from utils import is_manager
+
+STICKY_AFTER_MESSAGES = 8      # re-post the sticky panel once it's this many messages up
+STICKY_MIN_SECONDS = 45        # ...but not more often than this
 
 log = logging.getLogger("madboys-bot.hub")
 
@@ -56,6 +62,7 @@ class StatsMenu(discord.ui.View):
         self.player: Optional[str] = None
         self.compare_with: Optional[str] = None
         self.stat = "goals"
+        self.position = "all"   # leaderboard / passing filter: all, DEF, MID, FWD, GK
         self.opponent: Optional[str] = None
         self.career = False
         self.embed: discord.Embed = discord.Embed()
@@ -140,11 +147,13 @@ class StatsMenu(discord.ui.View):
             screen = await S.build_player(self.ea, self.player, self.career, with_recent=True)
         elif page == "compare":
             screen = await S.build_compare(self.ea, self.player, self.compare_with, self.career)
+        elif page == "leaderboard" and self.stat == "passing":
+            screen = await S.build_passing(self.ea, self.position)
         elif page == "leaderboard" and self.stat == "squad_motm":
             from cogs.motm import build_table_embed
             screen = build_table_embed()
         elif page == "leaderboard":
-            screen = await S.build_leaderboard(self.ea, self.stat, self.career)
+            screen = await S.build_leaderboard(self.ea, self.stat, self.career, self.position)
         elif page == "h2h":
             screen = S.build_h2h(self.opponent)
         self.png = None
@@ -179,6 +188,9 @@ class StatsMenu(discord.ui.View):
             discord.SelectOption(label=label, value=key, emoji=S.LEADERBOARD_EMOJI.get(key),
                                  default=self.page == "leaderboard" and key == self.stat)
             for key, (label, _) in S.LEADERBOARD_STATS.items()]
+            + [discord.SelectOption(label="Passing breakdown", value="passing", emoji="📋",
+                                    description="Accuracy vs involvement, by player, position & team",
+                                    default=self.page == "leaderboard" and self.stat == "passing")]
             + [discord.SelectOption(label="Squad MOTM awards", value="squad_motm", emoji="🗳️",
                                     default=self.page == "leaderboard" and self.stat == "squad_motm")])
         lb.callback = self._pick_stat
@@ -207,7 +219,8 @@ class StatsMenu(discord.ui.View):
         toggle = discord.ui.Button(label="Career" if self.career else "This season",
                                    emoji="🕰️" if self.career else "📅", row=4,
                                    style=discord.ButtonStyle.success,
-                                   disabled=self.page not in CAREER_PAGES or (self.page == "leaderboard" and self.stat == "squad_motm"))
+                                   disabled=self.page not in CAREER_PAGES
+                                   or (self.page == "leaderboard" and self.stat in ("squad_motm", "passing")))
         toggle.callback = self._toggle_career
         self.add_item(toggle)
 
@@ -220,6 +233,15 @@ class StatsMenu(discord.ui.View):
                                   disabled=self.page in ("home", "link"))
         share.callback = self._share
         self.add_item(share)
+
+        # position filter for leaderboards (cycles All -> DEF -> MID -> FWD -> GK)
+        if self.page == "leaderboard" and self.stat != "squad_motm":
+            label = S.POSITION_FILTERS[self.position][0]
+            pos_btn = discord.ui.Button(label=label, emoji="🔎", row=4,
+                                        style=discord.ButtonStyle.primary if self.position != "all"
+                                        else discord.ButtonStyle.secondary)
+            pos_btn.callback = self._cycle_position
+            self.add_item(pos_btn)
 
     async def _update(self, interaction: discord.Interaction, page: str):
         await interaction.response.defer()  # EA can take a few seconds; Discord wants an answer within 3
@@ -240,6 +262,11 @@ class StatsMenu(discord.ui.View):
     async def _pick_compare(self, interaction: discord.Interaction):
         self.compare_with = interaction.data["values"][0]
         await self._update(interaction, "compare")
+
+    async def _cycle_position(self, interaction: discord.Interaction):
+        order = S.POSITION_ORDER
+        self.position = order[(order.index(self.position) + 1) % len(order)]
+        await self._update(interaction, "leaderboard")
 
     async def _pick_stat(self, interaction: discord.Interaction):
         self.stat = interaction.data["values"][0]
@@ -296,6 +323,20 @@ class PanelView(discord.ui.View):
     async def leaderboard(self, interaction: discord.Interaction, _):
         await StatsMenu.open(self.bot, interaction, "leaderboard")
 
+    @discord.ui.button(label="My builds", emoji="🛠️", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:builds", row=1)
+    async def builds(self, interaction: discord.Interaction, _):
+        from cogs.lineup import BuildsView, builds_prompt
+        await interaction.response.send_message(builds_prompt(str(interaction.guild_id), str(interaction.user.id)),
+                                                view=BuildsView(str(interaction.guild_id), interaction.user),
+                                                ephemeral=True)
+
+    @discord.ui.button(label="Manager", emoji="🧑‍💼", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:manager", row=1)
+    async def manager(self, interaction: discord.Interaction, _):
+        from cogs.lineup import open_builder
+        await open_builder(self.bot, interaction)
+
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
@@ -305,25 +346,89 @@ def panel_embed() -> discord.Embed:
                     "📊 **Stats** — everything: results, players, leaderboards, head-to-heads\n"
                     "📡 **Last game** — latest result with player ratings\n"
                     "👤 **My stats** — your numbers (first time: pick your EA name)\n"
-                    "🏆 **Leaderboard** — who's top of the squad",
+                    "🏆 **Leaderboard** — who's top of the squad\n"
+                    "🛠️ **My builds** — tick the positions you've got builds for\n"
+                    "🧑‍💼 **Manager** — build & post the lineup (managers only)",
         colour=CLUB_COLOUR)
 
 
 class HubCog(commands.Cog):
+    """
+    /panel sticky:True keeps the panel at the bottom of a busy channel: once the
+    chat has moved on a few messages, the bot posts a fresh panel and deletes the
+    old one, so nobody has to scroll up (or find the pins) to use it.
+    """
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._since: dict[int, int] = {}       # channel -> messages since the panel
+        self._last_repost: dict[int, float] = {}
+        self._lock = asyncio.Lock()
+
+    def _sticky(self, guild_id) -> tuple[Optional[int], Optional[int]]:
+        ch = get_setting(str(guild_id), "panel_channel")
+        msg = get_setting(str(guild_id), "panel_message")
+        return (int(ch) if ch else None), (int(msg) if msg else None)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild:
+            return
+        ch_id, panel_id = self._sticky(message.guild.id)
+        if message.channel.id != ch_id or message.id == panel_id:
+            return
+        self._since[ch_id] = self._since.get(ch_id, 0) + 1
+        if self._since[ch_id] < STICKY_AFTER_MESSAGES or \
+                time.time() - self._last_repost.get(ch_id, 0) < STICKY_MIN_SECONDS:
+            return
+        async with self._lock:
+            if self._since.get(ch_id, 0) < STICKY_AFTER_MESSAGES:
+                return  # someone else just re-posted it
+            await self._repost(message.channel, message.guild.id, panel_id)
+
+    async def _repost(self, channel: discord.abc.Messageable, guild_id: int, old_id: Optional[int]):
+        try:
+            new = await channel.send(embed=panel_embed(), view=PanelView(self.bot))
+        except discord.HTTPException:
+            return
+        set_setting(str(guild_id), "panel_message", str(new.id))
+        self._since[channel.id] = 0
+        self._last_repost[channel.id] = time.time()
+        if old_id:
+            try:
+                await channel.get_partial_message(old_id).delete()
+            except discord.HTTPException:
+                pass
 
     @app_commands.command(name="stats", description="Open the stats menu — buttons and dropdowns, no typing")
     async def stats(self, interaction: discord.Interaction):
         await StatsMenu.open(self.bot, interaction)
 
-    @app_commands.command(name="panel", description="Manager: post (and pin) a button panel in this channel")
-    async def panel(self, interaction: discord.Interaction):
+    @app_commands.command(name="panel", description="Manager: post a button panel in this channel")
+    @app_commands.describe(sticky="Keep it at the bottom of the channel (re-posts itself as the chat moves on)")
+    async def panel(self, interaction: discord.Interaction, sticky: bool = False):
         if not is_manager(interaction.user):
             await interaction.response.send_message("Managers only.", ephemeral=True)
             return
+        gid = str(interaction.guild_id)
+        old_ch, old_msg = self._sticky(gid)
         await interaction.response.send_message(embed=panel_embed(), view=PanelView(self.bot))
         msg = await interaction.original_response()
+        if sticky:
+            if old_msg and old_ch == interaction.channel_id:
+                try:
+                    await interaction.channel.get_partial_message(old_msg).delete()
+                except discord.HTTPException:
+                    pass
+            set_setting(gid, "panel_channel", str(interaction.channel_id))
+            set_setting(gid, "panel_message", str(msg.id))
+            self._since[interaction.channel_id] = 0
+            await interaction.followup.send("📌 Sticky panel on — it'll keep itself at the bottom of this channel.",
+                                            ephemeral=True)
+            return
+        if old_ch == interaction.channel_id:   # a normal panel here turns sticky mode off for this channel
+            set_setting(gid, "panel_channel", None)
+            set_setting(gid, "panel_message", None)
         try:
             await msg.pin(reason="MADBOYS bot panel")
         except discord.HTTPException:

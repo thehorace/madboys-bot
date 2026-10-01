@@ -151,7 +151,8 @@ class EAClient:
             return False, 0.0, "MIDDLEWARE_URL not set"
         t0 = time.perf_counter()
         from config import CLUB_ID
-        data = await self._get("/clubinfo", {"clubId": str(CLUB_ID), "platform": self.platform},
+        # /overallstats is the endpoint /clubstats has always used, so the relay definitely supports it
+        data = await self._get("/overallstats", {"clubId": str(CLUB_ID), "platform": self.platform},
                                bypass_cache=True, allow_stale=False)
         ms = (time.perf_counter() - t0) * 1000
         return (data is not None), ms, ("ok" if data is not None else (self.last_error or "no data"))

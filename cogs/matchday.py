@@ -144,6 +144,7 @@ class MatchdayCog(commands.Cog):
         self.last_poll_ok: Optional[bool] = None
         self.last_new_at: Optional[float] = None
         self._polling = False
+        self._linked_in: dict[str, list[str]] = {}   # match_id -> linked players' discord ids
         self._migrated = False
         self.ticker.start()
         self.recap_loop.start()
@@ -282,6 +283,7 @@ class MatchdayCog(commands.Cog):
             self._migrate_old_poll_channel(guild_id)
 
         first_run = md.match_count(CLUB_ID) == 0
+        self._linked_in.clear()
 
         new: list[md.ParsedMatch] = []
         for raw in sorted(raw_matches, key=lambda m: to_int(m.get("timestamp"))):  # oldest first
@@ -294,9 +296,10 @@ class MatchdayCog(commands.Cog):
         self.last_new_at = time.time()
         log.info(f"[{CLUB_NAME}] {len(new)} new match(es){' (initial backfill, not posting)' if first_run else ''}")
 
+        pending_by_match: dict[str, dict[str, str]] = {}
         if guild_id:
             for pm in new:
-                self._log_rotation(guild_id, pm)
+                pending_by_match[pm.match_id] = self._log_rotation(guild_id, pm)
 
         if first_run:
             await self.check_milestones(guild, announce=False)  # seed the baseline
@@ -306,30 +309,50 @@ class MatchdayCog(commands.Cog):
             cid = self.channel_id_for(guild_id)
             channel = await self._channel(cid) if cid else None
             if channel:
-                await self._post_results(channel, new, guild_id)
+                await self._post_results(channel, new, guild_id, pending_by_match)
+
+        # private rotation notes for players whose position was confirmed straight from the lineup
+        pos_cog = self.bot.get_cog("PositionsCog")
+        if pos_cog and guild:
+            ids = {did for pm in new for did in self._linked_in.get(pm.match_id, [])}
+            ids -= {did for p in pending_by_match.values() for did in p}
+            await pos_cog.check_notes(guild, sorted(ids))
 
         await self.check_milestones(guild, announce=True)
         return len(new)
 
-    def _log_rotation(self, guild_id: str, pm: md.ParsedMatch):
+    def _log_rotation(self, guild_id: str, pm: md.ParsedMatch) -> dict[str, str]:
+        """
+        Log each linked player's position for this match. The exact spot comes from the
+        lineup a manager posted (if EA's role agrees); otherwise EA's broad role is logged
+        and the player is returned in `pending` ({discord_id: EA bucket}) to be asked.
+        """
         if is_match_processed(guild_id, CLUB_NAME, pm.match_id):
-            return  # the old rotation poller already logged this one
-        entries, unmatched = [], []
+            return {}  # already logged (e.g. by the old rotation poller)
+        import positions as POS
+        plan = POS.plan_for_match(guild_id, pm.ts)
+        entries, unmatched, pending = [], [], {}
         for p in pm.players:
             did = find_discord_id_by_ea_name(guild_id, p.name)
-            role = extract_role(p.pos)
-            if did and role:
-                entries.append((did, role))
-            elif not did:
+            if not did:
                 unmatched.append(p.name)
+                continue
+            pos, confirmed = POS.resolve_position(plan, did, p.pos, guild_id, pm.ts)
+            if pos:
+                entries.append((did, pos))
+                if not confirmed:
+                    pending[did] = (p.pos or "").lower()
         when = datetime.fromtimestamp(pm.ts, timezone.utc).isoformat() if pm.ts else None
-        log_positions(guild_id, CLUB_NAME, entries, source="auto", logged_at=when)
+        log_positions(guild_id, CLUB_NAME, entries, source="lineup" if plan else "auto", logged_at=when,
+                      match_id=pm.match_id)
         mark_match_processed(guild_id, CLUB_NAME, pm.match_id)
         if unmatched:
             log.info(f"Match {pm.match_id}: not linked — {', '.join(unmatched)}")
+        self._linked_in[pm.match_id] = [did for did, _ in entries]
+        return pending
 
     async def _post_results(self, channel: discord.abc.Messageable, new: list[md.ParsedMatch],
-                            guild_id: Optional[str] = None):
+                            guild_id: Optional[str] = None, pending_by_match: Optional[dict] = None):
         recent = md.recent_results(CLUB_ID, 5)
         footer = f"Form {md.form_string(recent)} • Streak {md.streak([r['result'] for r in recent])}"
         to_post = new[-MAX_POSTS_PER_POLL:]
@@ -342,6 +365,13 @@ class MatchdayCog(commands.Cog):
             for i, pm in enumerate(to_post):
                 embed, file = await md.match_post(pm, footer_extra=footer if i == len(to_post) - 1 else "")
                 await channel.send(content="📡 **Full time!**", embed=embed, **({"file": file} if file else {}))
+                # "where did you play?" for anyone whose exact position isn't known
+                pos_cog = self.bot.get_cog("PositionsCog")
+                pending = (pending_by_match or {}).get(pm.match_id)
+                # only ask about the newest game if the bot is catching up on several
+                if pos_cog and guild_id and pending and i == len(to_post) - 1:
+                    await pos_cog.open_prompt(channel, guild_id, pm.match_id,
+                                              f"{pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}", pending)
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
             return

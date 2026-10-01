@@ -26,6 +26,7 @@ COGS = [
     "cogs.lineup",
     "cogs.sessions",
     "cogs.motm",
+    "cogs.positions",
     "cogs.matchday",
     "cogs.hub",
     "cogs.misc",
@@ -46,6 +47,9 @@ class MadBoysBot(commands.Bot):
         # Runs once at startup (on_ready can fire again on every reconnect,
         # which used to re-sync slash commands each time and risk rate limits).
         db.init_all()
+        import match_data
+        match_data.backfill_player_fields()
+        match_data.backfill_results()
         for ext in COGS:
             await self.load_extension(ext)
             log.info(f"Loaded {ext}")

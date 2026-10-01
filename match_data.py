@@ -49,6 +49,10 @@ class PlayerLine:
     saves: int = 0
     red_cards: int = 0
     motm: int = 0
+    archetype_id: Optional[int] = None   # the build class used this game (FC 27 "archetype")
+    seconds_played: int = 0
+    clean_sheet: int = 0                 # 1 if no goals conceded while they were on
+    goals_conceded: int = 0
 
 
 @dataclass
@@ -61,9 +65,15 @@ class ParsedMatch:
     opp_id: Optional[str]
     opp_name: str
     players: list[PlayerLine] = field(default_factory=list)
+    ea_result: int = 0   # EA's own result code for us; low bits: 1 = win, 2 = loss, 4 = draw
 
     @property
     def result(self) -> str:
+        # EA's code wins when it disagrees with the score — e.g. the other team quit (DNF) at 0–0 and
+        # we were awarded the win. Codes seen in FC 27 data: 16385 (=0x4001) win, 2 loss, 4 draw.
+        code = self.ea_result & 0xFF
+        if code in (1, 2, 4):
+            return {1: "W", 2: "L", 4: "D"}[code]
         return result_letter(self.our_goals, self.opp_goals)
 
 
@@ -84,6 +94,7 @@ def parse_match(match: dict, club_id: int) -> Optional[ParsedMatch]:
         opp_goals=to_int(opp.get("goals")),
         opp_id=opp_id,
         opp_name=((opp.get("details") or {}).get("name")) or "Unknown",
+        ea_result=to_int(ours.get("result")),
     )
     for pid, p in ((match.get("players") or {}).get(str(club_id)) or {}).items():
         pm.players.append(PlayerLine(
@@ -101,6 +112,10 @@ def parse_match(match: dict, club_id: int) -> Optional[ParsedMatch]:
             saves=to_int(p.get("saves")),
             red_cards=to_int(p.get("redcards")),
             motm=to_int(p.get("mom")),
+            archetype_id=to_int(p.get("archetypeid"), None) if p.get("archetypeid") not in (None, "") else None,
+            seconds_played=to_int(p.get("secondsPlayed") or p.get("gameTime")),
+            clean_sheet=1 if to_int(p.get("cleansheetsany")) else 0,
+            goals_conceded=to_int(p.get("goalsconceded")),
         ))
     return pm
 
@@ -138,13 +153,54 @@ def store_match(club_id: int, pm: ParsedMatch, raw: dict) -> bool:
         conn.executemany(
             """INSERT OR IGNORE INTO match_players
                (club_id, match_id, persona_id, name, pos, goals, assists, rating, shots, passes_made,
-                pass_attempts, tackles_made, tackle_attempts, saves, red_cards, motm)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                pass_attempts, tackles_made, tackle_attempts, saves, red_cards, motm,
+                archetype_id, seconds_played, clean_sheet, goals_conceded)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [(club_id, pm.match_id, p.persona_id, p.name, p.pos, p.goals, p.assists, p.rating, p.shots,
-              p.passes_made, p.pass_attempts, p.tackles_made, p.tackle_attempts, p.saves, p.red_cards, p.motm)
+              p.passes_made, p.pass_attempts, p.tackles_made, p.tackle_attempts, p.saves, p.red_cards, p.motm,
+              p.archetype_id, p.seconds_played, p.clean_sheet, p.goals_conceded)
              for p in pm.players],
         )
         return True
+
+
+def backfill_player_fields():
+    """
+    Matches stored before archetype / minutes / clean sheet columns existed still
+    have their full EA JSON saved, so fill the new columns in from that. Runs at
+    startup and only touches rows that are still empty, so it's quick after the first time.
+    """
+    with connect() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT m.club_id, m.match_id, m.raw_json FROM matches m
+            JOIN match_players mp ON mp.club_id=m.club_id AND mp.match_id=m.match_id
+            WHERE mp.seconds_played IS NULL AND m.raw_json IS NOT NULL""").fetchall()
+        n = 0
+        for r in rows:
+            pm = parse_match(json.loads(r["raw_json"]), r["club_id"])
+            for p in (pm.players if pm else []):
+                conn.execute("""UPDATE match_players SET archetype_id=?, seconds_played=?, clean_sheet=?, goals_conceded=?
+                                WHERE club_id=? AND match_id=? AND persona_id=?""",
+                             (p.archetype_id, p.seconds_played, p.clean_sheet, p.goals_conceded,
+                              r["club_id"], r["match_id"], p.persona_id))
+                n += 1
+    if n:
+        log.info(f"Backfilled archetype/minutes/clean-sheet data for {n} player-match rows")
+
+
+def backfill_results():
+    """Re-check saved W/D/L against EA's own result code (fixes forfeits/DNFs stored as draws)."""
+    with connect() as conn:
+        rows = conn.execute("SELECT club_id, match_id, result, raw_json FROM matches WHERE raw_json IS NOT NULL").fetchall()
+        fixed = 0
+        for r in rows:
+            pm = parse_match(json.loads(r["raw_json"]), r["club_id"])
+            if pm and pm.result != r["result"]:
+                conn.execute("UPDATE matches SET result=? WHERE club_id=? AND match_id=?",
+                             (pm.result, r["club_id"], r["match_id"]))
+                fixed += 1
+    if fixed:
+        log.info(f"Corrected the result of {fixed} saved match(es) using EA's result code")
 
 
 def match_count(club_id: int) -> int:

@@ -150,7 +150,8 @@ def render_match_card(pm: ParsedMatch) -> io.BytesIO:
             d.text((nx, y + (row_h - 8) / 2), pos, font=f_small, fill=MUTED, anchor="lm")
         # G/A + MOTM on the right of the column
         right = x + col_w - 16
-        ga = " ".join(([f"{p.goals}G"] if p.goals else []) + ([f"{p.assists}A"] if p.assists else []))
+        ga = " ".join(([f"{p.goals}G"] if p.goals else []) + ([f"{p.assists}A"] if p.assists else [])
+                      + ([f"{p.saves} saves"] if (p.pos or "").lower() == "goalkeeper" and p.saves else []))
         if motm is p:
             _star(d, right, y + (row_h - 8) / 2, 13, GOLD)
             right -= 28
