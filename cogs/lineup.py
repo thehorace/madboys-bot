@@ -15,7 +15,9 @@ player's exact position (LB vs CB...) for the matches that follow.
   /formation set / show            - Set or view the formation
 
 How suggestions work:
-  - If there's a /session today, only players who clicked ✅ are used.
+  - Only players who are actually around are used: ✅ signed up for today's
+    session, 🎧 in voice right now, or 🎮 played a game in the last 2 hours
+    (so late arrivals are picked up automatically). Nobody around -> everyone with builds.
   - A player only goes in a slot they have a build for. In session mode,
     RSVP'd players without a matching build can still fill leftover gaps.
   - Among those, it picks the assignment that best spreads positions around:
@@ -233,10 +235,14 @@ def suggest_lineup(slots: list[str], prefs: dict[str, list[str]], recent: dict[s
     return out
 
 
-def auto_suggest(guild_id: str, formation: str) -> tuple[dict[str, Optional[str]], Optional[list[str]]]:
-    """Suggest for the current session (or everyone with builds). -> (slots, session pool or None)"""
-    from cogs.sessions import current_session_players
-    pool = current_session_players(guild_id)
+def auto_suggest(guild: discord.Guild, formation: str) -> tuple[dict[str, Optional[str]], Optional[list[str]]]:
+    """
+    Suggest from everyone who's actually around (✅ sign-ups, squad in voice, played in the
+    last 2h), or everyone with builds if nobody is. -> (slots, pool or None)
+    """
+    from cogs.sessions import available_players
+    guild_id = str(guild.id)
+    pool, _ = available_players(guild)
     result = suggest_lineup(FORMATIONS[formation], get_all_prefs(guild_id),
                             get_all_recent(guild_id, CLUB_NAME, limit_per_player=10), pool)
     clear_slots(guild_id, CLUB_NAME)   # old picks must not linger in slots we couldn't fill
@@ -348,26 +354,32 @@ class LineupBuilder(discord.ui.View):
         return get_slots(self.gid, CLUB_NAME)
 
     async def candidates(self) -> list[str]:
-        from cogs.link import get_all_links
-        from cogs.sessions import current_session_players
-        pool = current_session_players(self.gid)
-        ids = list(pool) if pool is not None else list(get_all_links(self.gid))
+        """People who are here first (✅ / 🎧 / 🎮), then the rest of the squad, so anyone can be picked."""
+        from cogs.sessions import available_players, squad_ids
+        pool, self.reasons = available_players(self.guild)
+        here = list(pool or [])
+        rest = [d for d in squad_ids(self.gid) if d not in here]
+        rest += [d for d in self.slots().values() if d and d not in here and d not in rest]
         prefs = get_all_prefs(self.gid)
-        ids += [d for d in self.slots().values() if d and d not in ids]
-        for d in ids:
+        for d in here + rest:
             if d not in self.names:
                 self.names[d] = await resolve_name(self.guild, d)
-        ids.sort(key=lambda d: (not prefs.get(d), self.names[d].lower()))   # people with builds first
-        return ids[:24]   # + "empty" option = 25
+        here.sort(key=lambda d: (not prefs.get(d), self.names[d].lower()))   # people with builds first
+        rest.sort(key=lambda d: (not prefs.get(d), self.names[d].lower()))
+        return (here + rest)[:24]   # + "empty" option = 25
 
     async def refresh(self):
         slots = self.slots()
         if self.slot not in slots:
             self.slot = next((s for s, d in slots.items() if not d), next(iter(slots), None))
         filled = sum(1 for d in slots.values() if d)
-        from cogs.sessions import current_session_players
-        pool = current_session_players(self.gid)
-        src = f"{len(pool)} signed up for today's session" if pool is not None else "no session today — showing linked players"
+        from cogs.sessions import available_players
+        pool, reasons = available_players(self.guild)
+        if pool is not None:
+            counts = {e: sum(1 for r in reasons.values() if r == e) for e in ("✅", "🎧", "🎮")}
+            src = f"{len(pool)} here: " + " · ".join(f"{e} {n}" for e, n in counts.items() if n)
+        else:
+            src = "nobody signed up or in voice yet — showing the whole squad"
         self.embed, self.png = await lineup_message(self.guild, self.formation, slots,
                                                     f"🧑‍💼 Lineup builder — {self.formation}",
                                                     f"{filled}/{len(slots)} filled • {src}")
@@ -391,11 +403,15 @@ class LineupBuilder(discord.ui.View):
         prefs = get_all_prefs(self.gid)
         cands = await self.candidates()
         opts = [discord.SelectOption(label="— leave empty —", value="_empty")]
+        reasons = getattr(self, "reasons", {}) or {}
         for d in cands:
             builds = prefs.get(d, [])
             where = next((strip_number(s) for s, x in slots.items() if x == d), None)
             desc = (f"builds: {', '.join(builds)}" if builds else "no builds set") + (f" • now {where}" if where else "")
-            opts.append(discord.SelectOption(label=self.names[d][:100], value=d, description=desc[:100]))
+            if reasons and d not in reasons:
+                desc = "not here • " + desc
+            opts.append(discord.SelectOption(label=self.names[d][:100], value=d, description=desc[:100],
+                                             emoji=reasons.get(d)))
         psel = discord.ui.Select(row=2, placeholder=f"Who plays {strip_number(self.slot or '')}?", options=opts)
         psel.callback = self._pick_player
         self.add_item(psel)
@@ -459,9 +475,10 @@ class LineupBuilder(discord.ui.View):
 
     async def _auto(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        result, pool = auto_suggest(self.gid, self.formation)
+        result, pool = auto_suggest(self.guild, self.formation)
         bench = [d for d in (pool or []) if d not in result.values()]
-        note = "✨ Suggested from " + ("today's sign-ups" if pool is not None else "everyone with builds set") + \
+        note = "✨ Suggested from " + ("everyone who's here (✅ signed up, 🎧 in voice, 🎮 played tonight)"
+                                      if pool is not None else "everyone with builds set") + \
                ", spreading positions around."
         if bench:
             note += f" Bench: {', '.join([await resolve_name(self.guild, b) for b in bench])}."
@@ -577,9 +594,9 @@ class LineupCog(commands.Cog):
             await interaction.response.send_message("No formation set. Use `/formation set` first.", ephemeral=True)
             return
         await interaction.response.defer()
-        result, pool = auto_suggest(gid, formation)
+        result, pool = auto_suggest(interaction.guild, formation)
         filled = sum(1 for v in result.values() if v)
-        source = (f"{len(pool)} players who RSVP'd ✅" if pool is not None else "everyone with builds set")
+        source = (f"{len(pool)} players who are here" if pool is not None else "everyone with builds set")
         bench = [did for did in (pool or []) if did not in result.values()]
         embed, png = await lineup_message(
             interaction.guild, formation, result, f"📋 {CLUB_NAME} — Suggested Lineup ({formation})",

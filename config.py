@@ -17,7 +17,7 @@ Auto match tracker
   MATCHDAY_CHANNEL_ID    Channel to post results in. Optional: /matchday start sets it
                          from Discord and that choice is saved in the DB.
   POLL_ACTIVE_MINUTES    Check interval while you're playing          (default 1)
-  POLL_IDLE_MINUTES      Check interval otherwise                     (default 5)
+  POLL_IDLE_MINUTES      Check interval otherwise                     (default 3)
   VOICE_ACTIVE_PLAYERS   Squad members in voice that count as "playing" (default 2)
   ENABLE_PRESENCE        Set to 1 to also detect "Playing EA SPORTS FC" statuses.
                          Needs "Presence Intent" switched on in the Discord
@@ -53,7 +53,7 @@ GUILD_ID = os.getenv("GUILD_ID")
 MATCHDAY_CHANNEL_ID = os.getenv("MATCHDAY_CHANNEL_ID")
 
 POLL_ACTIVE_MINUTES = float(os.getenv("POLL_ACTIVE_MINUTES", "1"))
-POLL_IDLE_MINUTES = float(os.getenv("POLL_IDLE_MINUTES", "5"))
+POLL_IDLE_MINUTES = float(os.getenv("POLL_IDLE_MINUTES", "3"))
 VOICE_ACTIVE_PLAYERS = int(os.getenv("VOICE_ACTIVE_PLAYERS", "2"))
 ENABLE_PRESENCE = os.getenv("ENABLE_PRESENCE", "").strip().lower() in ("1", "true", "yes")
 ACTIVE_WINDOW_MINUTES = int(os.getenv("ACTIVE_WINDOW_MINUTES", "90"))

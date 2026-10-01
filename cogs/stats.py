@@ -159,11 +159,18 @@ def recent_player_games(name: str, limit: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 #  screen builders (shared by slash commands and the menu)
 # --------------------------------------------------------------------------- #
-async def build_lastgame(ea) -> Screen:
+async def build_lastgame(ea, bot=None) -> Screen:
     raw_list = await ea.get_recent_matches_multi(CLUB_ID, count=1)
     raw = raw_list[0] if raw_list else md.get_raw_match(CLUB_ID)  # fall back to our own history
     if not raw:
         return "Couldn't fetch the last game — EA or the relay may be down."
+    # Safety net: if someone looks up a game the tracker hasn't posted yet, post it now
+    # instead of waiting for the next scheduled check.
+    mid = str(raw.get("matchId") or raw.get("timestamp") or "")
+    if bot is not None and raw_list and mid and not md.is_stored(CLUB_ID, mid):
+        tracker = bot.get_cog("MatchdayCog")
+        if tracker:
+            tracker.poll_soon("someone opened Last game")
     try:
         pm = md.parse_match(raw, CLUB_ID)
         embed, file = await md.match_post(pm)
@@ -445,7 +452,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="lastgame", description="Latest match result (league or playoffs)")
     async def lastgame(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        await send_screen(interaction, await build_lastgame(self.ea))
+        await send_screen(interaction, await build_lastgame(self.ea, self.bot))
 
     @app_commands.command(name="clubstats", description="Season record, division and recent form")
     async def clubstats(self, interaction: discord.Interaction):

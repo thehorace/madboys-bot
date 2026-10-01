@@ -123,7 +123,7 @@ class StatsMenu(discord.ui.View):
         if page == "home":
             screen = self.home_embed()
         elif page == "lastgame":
-            screen = await S.build_lastgame(self.ea)
+            screen = await S.build_lastgame(self.ea, self.bot)
         elif page == "club":
             screen = await S.build_clubstats(self.ea)
         elif page == "form":

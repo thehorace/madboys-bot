@@ -8,7 +8,10 @@ Play sessions + RSVPs ("who's on tonight?").
 Extras:
   - 30 minutes before kick-off the bot pings everyone who said In/Maybe and
     says how many more players are needed for a full XI.
-  - /lineup suggest only uses players who clicked ✅ for the current session.
+  - Late arrivals: a squad member who joins voice around session time is marked ✅
+    automatically (shown with 🎧), so nobody has to remember to click.
+  - Lineup suggestions use everyone who's actually around: ✅ sign-ups, squad
+    members in voice, and anyone who played a game in the last 2 hours.
   - While a session is on, the match tracker checks EA more often.
   - Buttons keep working after a bot restart (persistent view).
 
@@ -95,12 +98,19 @@ def get_rsvps(session_id: int) -> dict[str, list[str]]:
     return out
 
 
-def set_rsvp(session_id: int, discord_id: str, status: str):
+def set_rsvp(session_id: int, discord_id: str, status: str, source: str = "button"):
     with connect() as conn:
         conn.execute("""
-            INSERT INTO session_rsvps (session_id, discord_id, status, updated_at) VALUES (?,?,?,?)
-            ON CONFLICT(session_id, discord_id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at
-        """, (session_id, discord_id, status, now_iso()))
+            INSERT INTO session_rsvps (session_id, discord_id, status, updated_at, source) VALUES (?,?,?,?,?)
+            ON CONFLICT(session_id, discord_id) DO UPDATE SET
+                status=excluded.status, updated_at=excluded.updated_at, source=excluded.source
+        """, (session_id, discord_id, status, now_iso(), source))
+
+
+def rsvp_sources(session_id: int) -> dict[str, str]:
+    with connect() as conn:
+        return {r["discord_id"]: r["source"] or "button" for r in
+                conn.execute("SELECT discord_id, source FROM session_rsvps WHERE session_id=?", (session_id,))}
 
 
 def upcoming_sessions(guild_id: str, include_recent_hours: float = 0) -> list[dict]:
@@ -109,6 +119,67 @@ def upcoming_sessions(guild_id: str, include_recent_hours: float = 0) -> list[di
         rows = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND cancelled=0 AND starts_at>=? ORDER BY starts_at",
                             (guild_id, since)).fetchall()
     return [dict(r) for r in rows]
+
+
+def active_session(guild_id: str, before_minutes: int = 12 * 60) -> Optional[dict]:
+    """The session happening 'now': started up to 3h ago, or starting within `before_minutes`."""
+    now = time.time()
+    with connect() as conn:
+        row = conn.execute("""
+            SELECT * FROM sessions WHERE guild_id=? AND cancelled=0 AND starts_at BETWEEN ? AND ?
+            ORDER BY ABS(starts_at - ?) LIMIT 1
+        """, (guild_id, int(now - 3 * 3600), int(now + before_minutes * 60), int(now))).fetchone()
+    return dict(row) if row else None
+
+
+def squad_ids(guild_id: str) -> set[str]:
+    """Everyone who's clearly part of the squad: linked to an EA name, or has builds set."""
+    with connect() as conn:
+        a = {r[0] for r in conn.execute("SELECT discord_id FROM ea_links WHERE guild_id=?", (guild_id,))}
+        b = {r[0] for r in conn.execute("SELECT discord_id FROM position_prefs WHERE guild_id=?", (guild_id,))}
+    return a | b
+
+
+def voice_squad(guild: discord.Guild) -> list[str]:
+    """Squad members sitting in any voice channel right now."""
+    squad = squad_ids(str(guild.id))
+    return [str(m.id) for vc in getattr(guild, "voice_channels", []) for m in vc.members
+            if not m.bot and str(m.id) in squad]
+
+
+def played_recently(guild_id: str, hours: float = 2) -> list[str]:
+    """Linked players who appeared in a tracked match in the last few hours."""
+    from datetime import timezone as _tz_utc
+    cutoff = datetime.fromtimestamp(time.time() - hours * 3600, _tz_utc.utc).isoformat()
+    with connect() as conn:
+        rows = conn.execute("SELECT DISTINCT discord_id FROM rotation_log WHERE guild_id=? AND match_id IS NOT NULL "
+                            "AND logged_at>=?", (guild_id, cutoff)).fetchall()
+    return [r[0] for r in rows]
+
+
+def available_players(guild: discord.Guild) -> tuple[Optional[list[str]], dict[str, str]]:
+    """
+    Who's actually around to play, for lineup suggestions:
+      ✅ clicked In on today's session
+      🎧 is in a voice channel right now
+      🎮 played a tracked game in the last 2 hours
+    Someone who clicked ❌ but then turns up in voice or plays still counts (they showed up).
+    -> (player ids, {id: reason emoji}), or (None, {}) when there's no sign of a session at
+       all, so callers fall back to everyone with builds.
+    """
+    gid = str(guild.id)
+    reasons: dict[str, str] = {}
+    s = active_session(gid)
+    if s:
+        for did in get_rsvps(s["id"])["yes"]:
+            reasons[did] = "✅"
+    for did in voice_squad(guild):
+        reasons.setdefault(did, "🎧")
+    for did in played_recently(gid):
+        reasons.setdefault(did, "🎮")
+    if not reasons:
+        return None, {}
+    return list(reasons), reasons
 
 
 def current_session_players(guild_id: str) -> Optional[list[str]]:
@@ -137,11 +208,15 @@ async def session_embed(guild: discord.Guild, s: dict) -> discord.Embed:
     if s.get("cancelled"):
         desc = "~~" + desc.replace("\n", " ") + "~~\n**Cancelled.**"
     embed = discord.Embed(title=title, description=desc, colour=0x95A5A6 if s.get("cancelled") else CLUB_COLOUR)
+    sources = rsvp_sources(s["id"])
     for key in ("yes", "maybe", "no"):
-        names = [await resolve_name(guild, d) for d in rsvps[key]]
+        names = [await resolve_name(guild, d) + (" 🎧" if sources.get(d) == "voice" else "") for d in rsvps[key]]
         embed.add_field(name=f"{STATUS_LABEL[key]} ({len(names)})", value="\n".join(names)[:1024] or "—", inline=True)
     need = max(0, SQUAD_SIZE - len(rsvps["yes"]))
-    embed.set_footer(text=("Full XI! 🔥" if need == 0 else f"Need {need} more for a full XI"))
+    footer = "Full XI! 🔥" if need == 0 else f"Need {need} more for a full XI"
+    if any(v == "voice" for v in sources.values()):
+        footer += " • 🎧 = added automatically when they joined voice"
+    embed.set_footer(text=footer)
     return embed
 
 
@@ -179,6 +254,32 @@ class SessionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.reminders.start()
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState,
+                                    after: discord.VoiceState):
+        """
+        Late arrivals: a squad member who joins voice around session time is marked ✅
+        automatically (even if they'd said ❌ — they showed up), so they're in the
+        lineup suggestions without anyone having to click anything.
+        """
+        if member.bot or after.channel is None or before.channel is not None:
+            return  # only care about "joined voice", not moving between channels / leaving
+        gid = str(member.guild.id)
+        s = active_session(gid, before_minutes=60)
+        if not s or str(member.id) not in squad_ids(gid):
+            return
+        if str(member.id) in get_rsvps(s["id"])["yes"]:
+            return
+        set_rsvp(s["id"], str(member.id), "yes", source="voice")
+        log.info(f"Auto-RSVP'd {member.display_name} to session {s['id']} (joined voice)")
+        if s.get("message_id"):
+            try:
+                ch = self.bot.get_channel(int(s["channel_id"])) or await self.bot.fetch_channel(int(s["channel_id"]))
+                msg = ch.get_partial_message(int(s["message_id"]))
+                await msg.edit(embed=await session_embed(member.guild, s))
+            except (discord.HTTPException, ValueError):
+                pass
 
     def cog_unload(self):
         self.reminders.cancel()

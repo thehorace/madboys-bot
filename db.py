@@ -272,6 +272,9 @@ def init_all():
         if "match_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(rotation_log)")}:
             conn.execute("ALTER TABLE rotation_log ADD COLUMN match_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rotation_match ON rotation_log (guild_id, match_id, discord_id)")
+        # how an RSVP was made: 'button' (clicked) or 'voice' (auto-added when they joined voice)
+        if "source" not in {r["name"] for r in conn.execute("PRAGMA table_info(session_rsvps)")}:
+            conn.execute("ALTER TABLE session_rsvps ADD COLUMN source TEXT")
         for table in ("rotation_log", "processed_matches", "matchday_poll", "active_formation", "lineup_slots"):
             migrate_legacy_club(conn, table)
     log.info(f"Database ready at {DB_PATH}")

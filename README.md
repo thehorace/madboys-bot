@@ -7,8 +7,9 @@ results, stats, lineups, rotation tracking and session sign-ups.
 
 **Automatic match tracking (always on).** While the bot is running it checks
 EA for new league and playoff results: **every minute while you're playing**
-(2+ of the squad in voice, a session on, or a game just finished), every 5 min
-otherwise. Each new match is:
+(2+ of the squad in voice, a session on, or a game just finished), every 3 min
+otherwise. Opening **Last game** also triggers an instant check, so a result someone
+looks up is posted straight away. Each new match is:
 
 - saved permanently (so `/form`, `/h2h`, `/recap` work beyond EA's short history)
 - posted to the matchday channel with a full ratings table
@@ -35,9 +36,12 @@ bot works out exact spots (LB vs CB vs RB...) itself:
 1. **Players tap 🛠️ My builds** on the panel once and tick the positions they
    have builds for.
 2. **A manager taps 🧑‍💼 Manager** on the panel: pick a formation, ✨ Auto-suggest
-   (uses today's session sign-ups, everyone's builds, and spreads positions
-   around based on rotation history), swap anyone with two taps, then
-   📢 Post lineup. That lineup is what tells the bot who's LB and who's CB.
+   (uses everyone who's actually around — ✅ signed up, 🎧 in voice, 🎮 played in
+   the last 2 hours — plus everyone's builds, and spreads positions around based
+   on rotation history), swap anyone with two taps, then 📢 Post lineup. That
+   lineup is what tells the bot who's LB and who's CB.
+   **Late arrivals are automatic:** a squad member who joins voice around session
+   time is marked ✅ on the sign-up (shown with 🎧), even if they'd said ❌.
 3. **After each game** the bot logs each player's exact spot from the lineup
    when EA's role agrees. Without a lineup, it assumes you stayed in the spot
    you played the previous game this session. Anyone it can't be sure about gets
@@ -73,8 +77,8 @@ Not everyone likes typing slash commands, so there's a menu too:
 | **Menus** | `/stats` (button menu) `/panel` (pinned button panel) |
 | **Misc** | `/help` `/status` `/build` `/ping` `/debug` (managers: raw EA JSON) |
 
-`/lineup suggest` uses only the players who clicked ✅ for today's session (if
-there is one), only puts people where they have builds, and spreads exact
+`/lineup suggest` uses only the players who are around (✅ signed up, 🎧 in
+voice, 🎮 played in the last 2 hours), only puts people where they have builds, and spreads exact
 positions around using rotation history. It finds the best overall assignment
 instead of filling slots first-come-first-served.
 

@@ -31,6 +31,7 @@ Commands:
   /recap [days]              - Summary of the last N days (default 7)
 """
 
+import asyncio
 import logging
 import re
 import time
@@ -262,6 +263,15 @@ class MatchdayCog(commands.Cog):
     # ------------------------------------------------------------------ #
     #  the actual work
     # ------------------------------------------------------------------ #
+    def poll_soon(self, why: str = ""):
+        """Run a check right away in the background (no-op if one is already running)."""
+        if self._polling:
+            return
+        log.info(f"Checking for new matches now ({why})")
+        task = asyncio.create_task(self.poll_once())
+        task.add_done_callback(
+            lambda t: (not t.cancelled() and t.exception()) and log.error(f"poll_soon failed: {t.exception()}"))
+
     async def poll_once(self) -> int:
         """Fetch, store, log rotation, post, milestones. Returns number of new matches."""
         self._polling = True
