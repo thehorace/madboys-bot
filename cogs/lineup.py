@@ -308,6 +308,114 @@ class BuildsView(discord.ui.View):
             view=None)
 
 
+class ManagerBuildsView(discord.ui.View):
+    """
+    Private manager menu to set anyone's builds:
+      row 0  ▾ Pick a player             (any server member, searchable)
+      row 1  ▾ Their builds              (multi-select, pre-ticked with what they have now)
+      row 2  [🧹 Clear their builds]
+    The embed lists the whole squad's builds so managers can see who's missing.
+    """
+
+    def __init__(self, guild: discord.Guild, user: discord.abc.User, player: Optional[discord.abc.User] = None):
+        super().__init__(timeout=14 * 60)
+        self.guild, self.user, self.gid = guild, user, str(guild.id)
+        self.player = player
+        self.note = ""
+        self.embed = discord.Embed()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message("This menu belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh(self):
+        from cogs.sessions import squad_ids
+        prefs = get_all_prefs(self.gid)
+        ids = set(squad_ids(self.gid)) | {d for d, p in prefs.items() if p}
+        if self.player:
+            ids.add(str(self.player.id))
+        rows = sorted([(await resolve_name(self.guild, d), d) for d in ids], key=lambda x: x[0].lower())
+        lines = []
+        for name, d in rows:
+            b = prefs.get(d, [])
+            mark = "▶️ " if self.player and d == str(self.player.id) else ""
+            lines.append(f"{mark}**{name}** — {', '.join(b) if b else '*no builds set*'}")
+        self.embed = discord.Embed(
+            title="🛠️ Squad builds",
+            description=((self.note + "\n\n") if self.note else "") + ("\n".join(lines) or "Nobody yet.")[:3800],
+            colour=CLUB_COLOUR)
+        self.embed.set_footer(text="Pick a player, then tick their builds. Players can still change their own "
+                                   "with 🛠️ My builds.")
+        self.render()
+
+    def render(self):
+        self.clear_items()
+        us = discord.ui.UserSelect(row=0, placeholder=(f"Player: {getattr(self.player, 'display_name', '')}"
+                                                       if self.player else "Pick a player…"))
+        us.callback = self._pick_player
+        self.add_item(us)
+        if not self.player:
+            return
+        current = get_prefs(self.gid, str(self.player.id))
+        ps = discord.ui.Select(row=1, placeholder=f"Tick {self.player.display_name}'s builds"[:150],
+                               min_values=0, max_values=len(POSITION_GROUPS),
+                               options=[discord.SelectOption(label=p, value=p, default=p in current)
+                                        for p in POSITION_GROUPS])
+        ps.callback = self._pick_builds
+        self.add_item(ps)
+        cb = discord.ui.Button(row=2, label="Clear their builds", emoji="🧹", style=discord.ButtonStyle.secondary,
+                               disabled=not current)
+        cb.callback = self._clear
+        self.add_item(cb)
+
+    async def _update(self, interaction: discord.Interaction, note: str = ""):
+        self.note = note
+        await self.refresh()
+        await interaction.response.edit_message(embed=self.embed, view=self)
+
+    async def _pick_player(self, interaction: discord.Interaction):
+        uid = int(interaction.data["values"][0])
+        member = self.guild.get_member(uid)
+        if member is None:
+            try:
+                member = await self.guild.fetch_member(uid)
+            except discord.HTTPException:
+                member = None
+        if member is None or member.bot:
+            await self._update(interaction, "Pick a player from this server (not a bot) 🙂")
+            return
+        self.player = member
+        cur = get_prefs(self.gid, str(member.id))
+        await self._update(interaction, f"Editing **{member.display_name}** — "
+                                        + (f"has {', '.join(cur)}." if cur else "no builds set yet."))
+
+    async def _pick_builds(self, interaction: discord.Interaction):
+        chosen = [p for p in POSITION_GROUPS if p in interaction.data.get("values", [])]
+        set_prefs(self.gid, str(self.player.id), chosen)
+        log.info(f"{self.user} set builds for {self.player}: {chosen}")
+        await self._update(interaction, f"✅ **{self.player.display_name}**: "
+                                        + (", ".join(chosen) if chosen else "builds cleared"))
+
+    async def _clear(self, interaction: discord.Interaction):
+        set_prefs(self.gid, str(self.player.id), [])
+        await self._update(interaction, f"🧹 Cleared **{self.player.display_name}**'s builds.")
+
+
+async def open_manager_builds(interaction: discord.Interaction, player: Optional[discord.abc.User] = None,
+                              followup: bool = False):
+    if not is_manager(interaction.user):
+        await interaction.response.send_message("Setting other players' builds is for managers.", ephemeral=True)
+        return
+    view = ManagerBuildsView(interaction.guild, interaction.user, player)
+    await view.refresh()
+    if followup or interaction.response.is_done():
+        await interaction.followup.send(embed=view.embed, view=view, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=view.embed, view=view, ephemeral=True)
+
+
 def builds_prompt(guild_id: str, user_id: str) -> str:
     current = get_prefs(guild_id, user_id)
     msg = ("🛠️ **My builds** — tick every position you've got a build for (or can play well).\n"
@@ -435,6 +543,9 @@ class LineupBuilder(discord.ui.View):
                                emoji="📝", style=discord.ButtonStyle.secondary, row=4)
         nb.callback = self._notes_here
         self.add_item(nb)
+        bb = discord.ui.Button(label="Set players' builds", emoji="🛠️", style=discord.ButtonStyle.secondary, row=4)
+        bb.callback = self._builds
+        self.add_item(bb)
 
     async def _update(self, interaction: discord.Interaction, note: str = ""):
         self.note = note
@@ -506,6 +617,10 @@ class LineupBuilder(discord.ui.View):
             await self._update(interaction, "I can't post in this channel.")
             return
         await self._update(interaction, "📢 Posted! Exact positions from this lineup will be logged after each game.")
+
+    async def _builds(self, interaction: discord.Interaction):
+        # opens a second private menu; the builder stays as it is (✨ Auto-suggest picks up the changes)
+        await open_manager_builds(interaction)
 
     async def _notes_dm(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -590,7 +705,11 @@ class LineupCog(commands.Cog):
 
     # ------------------------------------------------------------------ #
     @app_commands.command(name="builds", description="Tick the positions you have a build for")
-    async def builds(self, interaction: discord.Interaction):
+    @app_commands.describe(player="Managers: set someone else's builds")
+    async def builds(self, interaction: discord.Interaction, player: Optional[discord.Member] = None):
+        if player and player.id != interaction.user.id:
+            await open_manager_builds(interaction, player)
+            return
         await interaction.response.send_message(builds_prompt(str(interaction.guild_id), str(interaction.user.id)),
                                                 view=BuildsView(str(interaction.guild_id), interaction.user),
                                                 ephemeral=True)

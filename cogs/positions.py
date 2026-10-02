@@ -181,13 +181,35 @@ class PositionsCog(commands.Cog):
             ephemeral=True)
         await self.check_notes(interaction.guild, [uid])
 
+    def _due_link_reminder(self, guild_id: str, names: list[str]) -> list[str]:
+        """Unlinked EA names that haven't been reminded in the last 24h (so it doesn't nag every game)."""
+        due, now = [], int(time.time())
+        for n in names:
+            last = get_setting(guild_id, f"linknudge:{n.lower()}")
+            if not last or now - int(last) > 24 * 3600:
+                due.append(n)
+                set_setting(guild_id, f"linknudge:{n.lower()}", str(now))
+        return due
+
     async def open_prompt(self, channel: discord.abc.Messageable, guild_id: str, match_id: str, title: str,
-                          pending: dict[str, str]):
-        """pending: {discord_id: EA bucket} for players whose exact spot is unknown."""
+                          pending: dict[str, str], unlinked: Optional[list[str]] = None):
+        """
+        pending:  {discord_id: EA bucket} for players whose exact spot is unknown (they get tagged)
+        unlinked: EA names of players in the game who haven't linked their Discord — the bot
+                  can't tag them, so they get a once-a-day reminder line instead.
+        """
+        nudge = self._due_link_reminder(guild_id, unlinked or [])
+        nudge_line = (f"\n👤 **Not linked yet:** {', '.join(nudge)} — tap **👤 My stats** on the bot panel "
+                      f"and pick your EA name so your games count.") if nudge else ""
         if not pending:
+            if nudge_line:
+                try:
+                    await channel.send(nudge_line.strip(), allowed_mentions=discord.AllowedMentions.none())
+                except discord.HTTPException:
+                    pass
             return
         try:
-            msg = await channel.send(prompt_text(title, pending), view=PositionPromptView(),
+            msg = await channel.send(prompt_text(title, pending) + nudge_line, view=PositionPromptView(),
                                      allowed_mentions=discord.AllowedMentions(users=True))
         except discord.HTTPException:
             log.warning("Couldn't post position prompt")

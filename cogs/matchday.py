@@ -146,6 +146,7 @@ class MatchdayCog(commands.Cog):
         self.last_new_at: Optional[float] = None
         self._polling = False
         self._linked_in: dict[str, list[str]] = {}   # match_id -> linked players' discord ids
+        self._unlinked: dict[str, list[str]] = {}    # match_id -> EA names of players nobody has linked
         self._migrated = False
         self.ticker.start()
         self.recap_loop.start()
@@ -294,6 +295,7 @@ class MatchdayCog(commands.Cog):
 
         first_run = md.match_count(CLUB_ID) == 0
         self._linked_in.clear()
+        self._unlinked.clear()
 
         new: list[md.ParsedMatch] = []
         for raw in sorted(raw_matches, key=lambda m: to_int(m.get("timestamp"))):  # oldest first
@@ -359,6 +361,7 @@ class MatchdayCog(commands.Cog):
         if unmatched:
             log.info(f"Match {pm.match_id}: not linked — {', '.join(unmatched)}")
         self._linked_in[pm.match_id] = [did for did, _ in entries]
+        self._unlinked[pm.match_id] = unmatched
         return pending
 
     async def _post_results(self, channel: discord.abc.Messageable, new: list[md.ParsedMatch],
@@ -379,9 +382,10 @@ class MatchdayCog(commands.Cog):
                 pos_cog = self.bot.get_cog("PositionsCog")
                 pending = (pending_by_match or {}).get(pm.match_id)
                 # only ask about the newest game if the bot is catching up on several
-                if pos_cog and guild_id and pending and i == len(to_post) - 1:
+                if pos_cog and guild_id and i == len(to_post) - 1:
                     await pos_cog.open_prompt(channel, guild_id, pm.match_id,
-                                              f"{pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}", pending)
+                                              f"{pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}", pending or {},
+                                              unlinked=self._unlinked.get(pm.match_id, []))
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
             return
