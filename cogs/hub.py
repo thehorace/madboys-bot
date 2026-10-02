@@ -285,13 +285,29 @@ class StatsMenu(discord.ui.View):
         await self._update(interaction, self.page)
 
     async def _share(self, interaction: discord.Interaction):
+        """
+        Post what you're looking at. In a channel you can't type in yourself (e.g. a
+        managers-only #announcements holding the panel), it goes to the results channel
+        instead, so Share can't be used to get around the channel's permissions.
+        """
+        target = interaction.channel
+        perms = target.permissions_for(interaction.user) if hasattr(target, "permissions_for") else None
+        if perms is not None and not perms.send_messages:
+            tracker = self.bot.get_cog("MatchdayCog")
+            cid = tracker.channel_id_for(self.guild_id) if tracker else None
+            target = (self.bot.get_channel(cid) if cid else None) or None
+            if target is None:
+                await interaction.response.send_message(
+                    "You can't post in this channel, and no results channel is set to share to.", ephemeral=True)
+                return
         try:
             extra = {"file": S.card_file(self.png)} if self.png else {}
-            await interaction.channel.send(content=f"📢 Shared by {interaction.user.mention}", embed=self.embed,
-                                           allowed_mentions=discord.AllowedMentions.none(), **extra)
-            await interaction.response.send_message("Posted to the channel ✅", ephemeral=True)
+            await target.send(content=f"📢 Shared by {interaction.user.mention}", embed=self.embed,
+                              allowed_mentions=discord.AllowedMentions.none(), **extra)
+            where = "" if target == interaction.channel else f" in {target.mention}"
+            await interaction.response.send_message(f"Posted{where} ✅", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("I'm not allowed to post in this channel.", ephemeral=True)
+            await interaction.response.send_message("I'm not allowed to post there.", ephemeral=True)
 
 
 class PanelView(discord.ui.View):

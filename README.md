@@ -37,8 +37,8 @@ bot works out exact spots (LB vs CB vs RB...) itself:
    have builds for.
 2. **A manager taps 🧑‍💼 Manager** on the panel: pick a formation, ✨ Auto-suggest
    (uses everyone who's actually around — ✅ signed up, 🎧 in voice, 🎮 played in
-   the last 2 hours — plus everyone's builds, and spreads positions around based
-   on rotation history), swap anyone with two taps, then 📢 Post lineup. That
+   the last 2 hours — plus everyone's builds and the rotation policy below),
+   swap anyone with two taps, then 📢 Post lineup. That
    lineup is what tells the bot who's LB and who's CB.
    **Late arrivals are automatic:** a squad member who joins voice around session
    time is marked ✅ on the sign-up (shown with 🎧), even if they'd said ❌.
@@ -46,9 +46,15 @@ bot works out exact spots (LB vs CB vs RB...) itself:
    when EA's role agrees. Without a lineup, it assumes you stayed in the spot
    you played the previous game this session. Anyone it can't be sure about gets
    a one-tap "📍 Where did you play?" message. `/position` fixes your last game any time.
-4. **Rotation notes** go to a private managers' channel (set it with
-   "📝 Send rotation notes here" in the Manager menu), e.g. *"Ali — LB 3 games
-   in a row — has builds for CB, CM → try CB next"*. Players aren't nagged.
+4. **Rotation policy (set by the manager):** the pitch is split into 3 areas —
+   **Defence, Midfield, Front 3**. ST → RW is still the front 3, so it's not a
+   rotation; front 3 → mids is. Someone is "due a rotation" after **3 games in a
+   row in the same area** (keepers excluded). Auto-suggest keeps everyone else
+   settled where they played last — no moving for the sake of it.
+5. **Rotation notes** are private: managers tap "📩 DM me rotation notes" in the
+   🧑‍💼 Manager menu and get a DM like *"Ali — Defence 3 games in a row (CB, LB, LB)
+   — has builds for CM → could try Midfield next"*, once per streak. They can also
+   be posted in a managers-only channel. Players aren't nagged.
 
 ## Buttons instead of commands
 
@@ -78,8 +84,9 @@ Not everyone likes typing slash commands, so there's a menu too:
 | **Misc** | `/help` `/status` `/build` `/ping` `/debug` (managers: raw EA JSON) |
 
 `/lineup suggest` uses only the players who are around (✅ signed up, 🎧 in
-voice, 🎮 played in the last 2 hours), only puts people where they have builds, and spreads exact
-positions around using rotation history. It finds the best overall assignment
+voice, 🎮 played in the last 2 hours), only puts people where they have builds,
+keeps players settled, and only moves someone to another area once they've
+done 3 games in a row in one area. It finds the best overall assignment
 instead of filling slots first-come-first-served.
 
 "Manager" commands need Manage Channels, or a role named Manager, Admin or Coach.

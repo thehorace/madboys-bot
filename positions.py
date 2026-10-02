@@ -17,7 +17,7 @@ import json
 import time
 from typing import Optional
 
-from cogs.rotation import broad_role, current_streak, get_recent_positions, is_exact, strip_number
+from cogs.rotation import AREA_NAMES, area_of, broad_role, current_streak, get_recent_positions, is_exact, strip_number
 from config import CLUB_NAME, ROTATION_THRESHOLD
 from db import connect
 
@@ -127,23 +127,22 @@ def last_exact_position(guild_id: str, discord_id: str, role: Optional[str] = No
 # --------------------------------------------------------------------------- #
 def rotation_note(guild_id: str, discord_id: str, builds: list[str]) -> Optional[tuple[str, str]]:
     """
-    If this player has just been in the same exact position ROTATION_THRESHOLD+
-    games in a row, -> (dedupe key, suggestion). The key changes only when a
-    new streak starts, so each streak is mentioned once, not after every game.
+    If this player has just played ROTATION_THRESHOLD+ games in a row in the same
+    AREA (Defence / Midfield / Front 3), -> (dedupe key, note). The key changes only
+    when a new streak starts, so each streak is mentioned once, not after every game.
     """
     entries = get_recent_positions(guild_id, CLUB_NAME, discord_id, limit=15)
     positions = [e["position"] for e in entries]
-    pos, run = current_streak(positions)
-    if not pos or run < ROTATION_THRESHOLD or not is_exact(pos) or pos == "GK":
+    area, run = current_streak(positions)
+    if not area or run < ROTATION_THRESHOLD or area == "GK":
         return None   # keepers staying in goal is the plan, not a rotation problem
-    # oldest game in the streak identifies it
-    key = f"{pos}:{entries[run - 1]['logged_at']}"
-    # suggest another position they have a build for, preferring ones they've played least lately
-    recent = [strip_number(p) for p in positions]
-    others = [b for b in builds if b != pos and b != "GK"]
-    others.sort(key=lambda b: (recent.count(b), ALL_POSITIONS.index(b) if b in ALL_POSITIONS else 99))
-    if others:
-        tip = f"has builds for {', '.join(others[:3])} → try **{others[0]}** next"
+    key = f"{area}:{entries[run - 1]['logged_at']}"   # oldest game in the streak identifies it
+    spots = ", ".join(strip_number(p) if is_exact(p) else "?" for p in positions[:run][::-1])
+    # builds in a DIFFERENT area are the real rotation options
+    elsewhere = [b for b in builds if area_of(b) not in (area, "GK")]
+    elsewhere.sort(key=lambda b: ALL_POSITIONS.index(b) if b in ALL_POSITIONS else 99)
+    if elsewhere:
+        tip = f"has builds for {', '.join(elsewhere[:3])} → could try **{AREA_NAMES[area_of(elsewhere[0])]}** next"
     else:
-        tip = "no other builds set yet (they can add some under 🛠️ My builds)"
-    return key, f"**{pos}** {run} games in a row — {tip}"
+        tip = f"only has {AREA_NAMES.get(area, area).lower()} builds set (they can add more under 🛠️ My builds)"
+    return key, f"**{AREA_NAMES.get(area, area)}** {run} games in a row ({spots}) — {tip}"

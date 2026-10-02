@@ -89,29 +89,28 @@ def set_match_position(guild_id: str, club: str, match_id: str, discord_id: str,
                          (guild_id, club, discord_id, position, logged_at or now_iso(), "player", match_id))
 
 
+# The manager's rotation policy works in 3 areas: moving ST -> RW is still the
+# front 3 (not a rotation); moving front 3 -> mids is. Exact spots are still
+# logged for stats and lineups, but streaks are counted per area.
+AREA_NAMES = {"DEF": "Defence", "MID": "Midfield", "FWD": "Front 3", "GK": "Goal"}
+
+
+def area_of(pos: str) -> str:
+    """Any slot / position / bucket -> DEF, MID, FWD or GK."""
+    return broad_role(pos)
+
+
 def current_streak(positions: list[str]) -> tuple[Optional[str], int]:
-    """
-    positions newest-first -> (position, games in a row). Compares exact positions
-    (LB vs CB count as different) when the newest entry is exact, otherwise falls
-    back to the broad role for games nobody confirmed.
-    """
+    """positions newest-first -> (area, games in a row in that area), e.g. ('DEF', 4)."""
     if not positions:
         return None, 0
-    first = strip_number(positions[0].upper())
-    if is_exact(first):
-        n = 0
-        for p in positions:
-            if strip_number(p.upper()) != first:
-                break
-            n += 1
-        return first, n
-    role = broad_role(first)
+    area = area_of(positions[0])
     n = 0
     for p in positions:
-        if broad_role(p) != role:
+        if area_of(p) != area:
             break
         n += 1
-    return role, n
+    return area, n
 
 
 def is_match_processed(guild_id: str, club: str, match_id: str) -> bool:
@@ -197,11 +196,12 @@ class RotationCog(commands.Cog):
             if len(positions) < ROTATION_THRESHOLD:
                 continue
             name = await resolve_name(interaction.guild, discord_id)
-            pos, run = current_streak(positions)
-            if run >= ROTATION_THRESHOLD:
-                flagged.append(f"⚠️ **{name}** — {pos} for last {run} games")
+            area, run = current_streak(positions)
+            spots = " → ".join(strip_number(p) for p in positions[:max(run, 3)][:6])
+            if run >= ROTATION_THRESHOLD and area != "GK":
+                flagged.append(f"⚠️ **{name}** — {AREA_NAMES.get(area, area)} {run} games in a row ({spots})")
             else:
-                healthy.append(f"✅ {name} — {' → '.join(strip_number(p) for p in positions[:3])}")
+                healthy.append(f"✅ {name} — {spots}")
 
         embed = discord.Embed(title=f"🔄 {CLUB_NAME} — Rotation Check", colour=0xFF4444 if flagged else 0x2ECC71)
         if flagged:
@@ -210,7 +210,8 @@ class RotationCog(commands.Cog):
             embed.add_field(name="All good!", value="No one is stuck in the same role.", inline=False)
         if healthy:
             embed.add_field(name="Rotating well", value=clip("\n".join(healthy[:15])), inline=False)
-        embed.set_footer(text=f"Flags {ROTATION_THRESHOLD}+ games in a row in the same position • "
+        embed.set_footer(text=f"Flags {ROTATION_THRESHOLD}+ games in a row in the same area (Defence / Midfield / "
+                              f"Front 3) • keepers aren't flagged • "
                               f"/lineup suggest takes this into account")
         await interaction.followup.send(embed=embed)
 

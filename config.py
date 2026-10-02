@@ -33,7 +33,7 @@ Squad MOTM vote
   MOTM_VOTE_MINUTES      How long the post-match vote stays open     (default 10)
 
 Misc
-  ROTATION_THRESHOLD     Games in the same role before /rotation check flags it (default 3)
+  ROTATION_THRESHOLD     Games in a row in one area (Defence/Midfield/Front 3) before a rotation note (default 3)
   BUILDS_URL             Link used by /build (e.g. an FC 27 Clubs Builder site)
   DB_PATH                SQLite file. On Railway, point this into a mounted volume,
                          e.g. /data/madboys.db, or the DB is wiped on every deploy.

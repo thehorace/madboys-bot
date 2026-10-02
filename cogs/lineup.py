@@ -20,10 +20,11 @@ How suggestions work:
     (so late arrivals are picked up automatically). Nobody around -> everyone with builds.
   - A player only goes in a slot they have a build for. In session mode,
     RSVP'd players without a matching build can still fill leftover gaps.
-  - Among those, it picks the assignment that best spreads positions around:
-    a slot costs more the more a player has played that exact position (and,
-    less so, that role) in their last 5 games, and much more if they're on a
-    streak there. It's solved optimally (Hungarian algorithm), not first-come.
+  - Rotation follows the manager's policy: 3 areas (Defence / Midfield / Front 3).
+    Players stay settled in the spot they played last time, unless they've been
+    in the same AREA for ROTATION_THRESHOLD+ games — then they're moved to another
+    area they have a build for (ST -> RW doesn't count as rotating; front 3 -> mids does).
+    No moving for the sake of it. Solved optimally (Hungarian algorithm), not first-come.
 """
 
 import json
@@ -58,9 +59,8 @@ SLOT_ALIASES = {"RAM": ["CAM", "RM"], "LAM": ["CAM", "LM"]}
 
 # assignment costs
 COST_PREF = 10
-COST_SAME_POSITION = 8   # per recent game in this exact position (LB...)
-COST_SAME_ROLE = 2       # per recent game in this role (DEF...)
-COST_STUCK = 30
+COST_SETTLED_BONUS = 3   # keep someone in the spot they played last time (no moving for the sake of it)
+COST_STUCK = 30          # ...unless they've been in that AREA for ROTATION_THRESHOLD+ games
 COST_NO_PREF = 200      # only allowed in session mode (RSVP'd, no matching preference)
 COST_EMPTY = 1000       # leaving the slot empty
 COST_FORBIDDEN = 10**6
@@ -215,14 +215,13 @@ def suggest_lineup(slots: list[str], prefs: dict[str, list[str]], recent: dict[s
             c = COST_NO_PREF
         else:
             return COST_FORBIDDEN
-        base, role = strip_number(slot), broad_role(slot)
+        base, area = strip_number(slot), broad_role(slot)
         hist = recent.get(pid, [])
-        last5 = hist[:5]
-        c += COST_SAME_POSITION * sum(1 for p in last5 if is_exact(p) and strip_number(p) == base)
-        c += COST_SAME_ROLE * sum(1 for p in last5 if broad_role(p) == role)
-        streak_pos, run = current_streak(hist)
-        if run >= ROTATION_THRESHOLD and streak_pos in (base, role):
-            c += COST_STUCK
+        streak_area, run = current_streak(hist)
+        if run >= ROTATION_THRESHOLD and streak_area == area and area != "GK":
+            c += COST_STUCK                      # been in this area too long -> try them elsewhere
+        elif hist and is_exact(hist[0]) and strip_number(hist[0]) == base:
+            c -= COST_SETTLED_BONUS              # otherwise, stability: keep them where they were
         return c
 
     # columns: real players, then one "leave empty" dummy per slot
@@ -328,7 +327,7 @@ class LineupBuilder(discord.ui.View):
       row 1  ▾ Slot to change            (shows who's in each slot)
       row 2  ▾ Who plays there           (session sign-ups, or linked players)
       row 3  [✨ Auto-suggest] [🧹 Clear] [📢 Post lineup]
-      row 4  [📝 Send rotation notes here]
+      row 4  [📩 DM me rotation notes] [📝 Also post notes in this channel]
     """
 
     def __init__(self, bot: commands.Bot, guild: discord.Guild, user: discord.abc.User):
@@ -423,10 +422,16 @@ class LineupBuilder(discord.ui.View):
             b.callback = cb
             self.add_item(b)
 
-        from cogs.positions import K_MANAGER_CHANNEL
+        from cogs.positions import K_MANAGER_CHANNEL, note_dm_list
         from db import get_setting
+        dm_on = str(self.user.id) in note_dm_list(self.gid)
+        db_ = discord.ui.Button(label="Rotation notes: DMing you ✓" if dm_on else "DM me rotation notes",
+                                emoji="📩", row=4,
+                                style=discord.ButtonStyle.success if dm_on else discord.ButtonStyle.secondary)
+        db_.callback = self._notes_dm
+        self.add_item(db_)
         here = get_setting(self.gid, K_MANAGER_CHANNEL)
-        nb = discord.ui.Button(label="Rotation notes go here ✓" if here else "Send rotation notes here",
+        nb = discord.ui.Button(label="Notes also post in a channel ✓" if here else "Also post notes in this channel",
                                emoji="📝", style=discord.ButtonStyle.secondary, row=4)
         nb.callback = self._notes_here
         self.add_item(nb)
@@ -501,6 +506,22 @@ class LineupBuilder(discord.ui.View):
             await self._update(interaction, "I can't post in this channel.")
             return
         await self._update(interaction, "📢 Posted! Exact positions from this lineup will be logged after each game.")
+
+    async def _notes_dm(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        from cogs.positions import toggle_note_dm
+        on = toggle_note_dm(self.gid, str(interaction.user.id))
+        if on:
+            try:   # check DMs actually reach them
+                await interaction.user.send("📩 You'll get the MADBOYS rotation notes here — a quick heads-up when "
+                                            "someone's been in the same area (Defence / Midfield / Front 3) for 3 games.")
+                note = "📩 Rotation notes will be DM'd to you."
+            except discord.HTTPException:
+                note = ("📩 Turned on, but I couldn't DM you — allow DMs from server members "
+                        "(Server → Privacy Settings) so the notes can reach you.")
+        else:
+            note = "📩 Stopped DMing you rotation notes."
+        await self._update(interaction, note)
 
     async def _notes_here(self, interaction: discord.Interaction):
         await interaction.response.defer()

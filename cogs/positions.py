@@ -15,12 +15,13 @@ Without a lineup, players are assumed to stay in the spot they played the
 previous game this session (if EA's role still matches), so normally only
 the first game of a session asks. /position fixes your last game any time.
 
-Rotation notes: when someone has played the same exact position
-ROTATION_THRESHOLD games in a row, a short note goes to the managers' channel
-(once per streak), e.g. "Ali — LB 4 games in a row — has builds for CB, CM →
-try CB next". Nothing is posted to players. No managers' channel set = no notes.
-The channel is set from the 🧑‍💼 Manager menu ("Send rotation notes here") or
-with MANAGER_CHANNEL_ID.
+Rotation notes: when someone has played ROTATION_THRESHOLD games in a row in
+the same AREA (Defence / Midfield / Front 3), the managers get a short private
+note (once per streak), e.g. "Ali — Defence 3 games in a row (LB, LB, CB) —
+has builds for CM → could try Midfield next". Nothing is posted to players.
+Delivery: by DM to managers who tapped "📩 DM me rotation notes" in the
+🧑‍💼 Manager menu, and/or to a managers' channel ("📝 Send rotation notes here",
+or MANAGER_CHANNEL_ID). Nobody opted in = no notes.
 """
 
 import json
@@ -43,6 +44,25 @@ from utils import resolve_name
 log = logging.getLogger("madboys-bot.positions")
 
 K_MANAGER_CHANNEL = "manager_channel"
+K_NOTE_DMS = "rotation_dm"     # JSON list of managers who get the notes by DM
+
+
+def note_dm_list(guild_id: str) -> list[str]:
+    raw = get_setting(guild_id, K_NOTE_DMS)
+    return json.loads(raw) if raw else []
+
+
+def toggle_note_dm(guild_id: str, user_id: str) -> bool:
+    """Add/remove a manager from the rotation-note DMs. Returns True if they're now on the list."""
+    ids = note_dm_list(guild_id)
+    if user_id in ids:
+        ids.remove(user_id)
+        on = False
+    else:
+        ids.append(user_id)
+        on = True
+    set_setting(guild_id, K_NOTE_DMS, json.dumps(ids) if ids else None)
+    return on
 
 
 def get_prompt(message_id: int) -> Optional[dict]:
@@ -184,13 +204,14 @@ class PositionsCog(commands.Cog):
         return int(cid) if cid else None
 
     async def check_notes(self, guild: Optional[discord.Guild], discord_ids: list[str]):
-        """Post a private note for anyone who's just hit a streak in one exact position."""
+        """Privately tell the managers about anyone who's just hit a streak in one area."""
         if guild is None:
             return
         gid = str(guild.id)
         cid = self.manager_channel_id(gid)
-        if not cid:
-            return
+        dms = note_dm_list(gid)
+        if not cid and not dms:
+            return   # nobody has asked for notes
         from cogs.lineup import get_prefs
         lines = []
         for did in discord_ids:
@@ -204,12 +225,19 @@ class PositionsCog(commands.Cog):
             lines.append(f"• **{await resolve_name(guild, did)}** — {text}")
         if not lines:
             return
-        try:
-            ch = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
-            await ch.send("🔄 **Rotation notes**\n" + "\n".join(lines)[:1900],
-                          allowed_mentions=discord.AllowedMentions.none())
-        except discord.HTTPException:
-            log.warning("Couldn't post rotation notes")
+        text = (f"🔄 **Rotation notes — {CLUB_NAME}**\n" + "\n".join(lines))[:1900]
+        for uid in dms:   # private DMs to the managers who opted in
+            try:
+                user = self.bot.get_user(int(uid)) or await self.bot.fetch_user(int(uid))
+                await user.send(text, allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                log.warning(f"Couldn't DM rotation notes to {uid} (DMs closed?)")
+        if cid:
+            try:
+                ch = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
+                await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                log.warning("Couldn't post rotation notes")
 
 
 async def setup(bot: commands.Bot):
