@@ -30,6 +30,7 @@ COGS = [
     "cogs.matchday",
     "cogs.hub",
     "cogs.misc",
+    "cogs.usage",
 ]
 
 

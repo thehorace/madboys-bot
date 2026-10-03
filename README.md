@@ -34,7 +34,9 @@ EA's match data only says goalkeeper / defender / midfielder / forward, so the
 bot works out exact spots (LB vs CB vs RB...) itself:
 
 1. **Players tap 🛠️ My builds** on the panel once and tick the positions they
-   have builds for.
+   have builds for. **Managers can do it for them:** 🧑‍💼 Manager → 🛠️ Set
+   players' builds shows the whole squad's builds, and lets them pick any player
+   and tick their positions (or `/builds player:@someone`).
 2. **A manager taps 🧑‍💼 Manager** on the panel: pick a formation, ✨ Auto-suggest
    (uses everyone who's actually around — ✅ signed up, 🎧 in voice, 🎮 played in
    the last 2 hours — plus everyone's builds and the rotation policy below),
@@ -90,6 +92,30 @@ done 3 games in a row in one area. It finds the best overall assignment
 instead of filling slots first-come-first-served.
 
 "Manager" commands need Manage Channels, or a role named Manager, Admin or Coach.
+
+## Daily session sign-ups
+
+Every day at **11am**, the bot posts a sign-up in **#general** for **6:30pm**
+that evening, using `BOT_TZ` (default Singapore time). It uses the usual
+In / Maybe / Out buttons and the 30-minute reminder. Nobody is signed up
+automatically when the post is created.
+
+If the bot restarts after 11am, it catches up before kick-off. Existing sessions
+at that start time, including cancelled ones, prevent another post. Set
+`SESSION_CHANNEL_ID` if the channel has a different name or there is more than
+one #general, and `GUILD_ID` if the bot is in multiple servers. Set
+`DAILY_SESSIONS=0` to disable daily posts. Keep `DB_PATH` on a persistent volume
+so the bot remembers posts across deploys.
+
+## Bot usage stats (private)
+
+The bot logs every command, button tap and dropdown pick (who, what they picked,
+when) — never normal chat messages. **`/usage`** opens a private report: overview,
+who uses the bot most, which features get used, what people look up (players,
+leaderboards, opponents), a per-person breakdown, and a CSV download. Only the
+people listed in `USAGE_VIEWERS` (Discord usernames or IDs, comma-separated) can
+open it; if that's not set, only `fauz` can. Logs older than
+`USAGE_KEEP_DAYS` (180) are deleted automatically.
 
 ## Local setup
 

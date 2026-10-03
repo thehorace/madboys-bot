@@ -30,7 +30,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from config import BOT_TZ, CLUB_COLOUR, CLUB_NAME
+from config import BOT_TZ, CLUB_COLOUR, CLUB_NAME, DAILY_SESSIONS, GUILD_ID, SESSION_CHANNEL_ID
 from db import connect, now_iso
 from utils import is_manager, resolve_name
 
@@ -78,6 +78,14 @@ def resolve_start(day: str, hm: tuple[int, int], now: Optional[datetime] = None)
     if start <= now:
         start += timedelta(days=7)
     return start
+
+
+def daily_start(now: datetime) -> Optional[int]:
+    """Today's 18:30 session is due from 11:00 until kick-off, in BOT_TZ."""
+    now = now.astimezone(_tz())
+    post_at = now.replace(hour=11, minute=0, second=0, microsecond=0)
+    start = now.replace(hour=18, minute=30, second=0, microsecond=0)
+    return int(start.timestamp()) if post_at <= now < start else None
 
 
 # --------------------------------------------------------------------------- #
@@ -254,6 +262,8 @@ class SessionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.reminders.start()
+        if DAILY_SESSIONS:
+            self.daily_sessions.start()
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState,
@@ -283,6 +293,7 @@ class SessionsCog(commands.Cog):
 
     def cog_unload(self):
         self.reminders.cancel()
+        self.daily_sessions.cancel()
 
     session_group = app_commands.Group(name="session", description="Plan play sessions and see who's on")
 
@@ -350,13 +361,62 @@ class SessionsCog(commands.Cog):
             pass
         await interaction.response.send_message(f"🚫 Cancelled the session at <t:{s['starts_at']}:F>.")
 
+    async def post_daily_session(self, guild: discord.Guild, starts_at: int):
+        if SESSION_CHANNEL_ID:
+            channel = guild.get_channel(int(SESSION_CHANNEL_ID))
+        else:
+            matches = [ch for ch in guild.text_channels if ch.name.lower() == "general"]
+            channel = matches[0] if len(matches) == 1 else None
+        if not isinstance(channel, discord.TextChannel):
+            log.warning("Daily session: no unique #general in guild %s; set SESSION_CHANNEL_ID", guild.id)
+            return
+        with connect() as conn:
+            # Include cancelled sessions: cancelling today must not recreate it.
+            rows = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND starts_at=?",
+                                (str(guild.id), starts_at)).fetchall()
+            if any(r["cancelled"] or r["message_id"] or r["created_by"] != "daily" for r in rows):
+                return
+            if rows:
+                s = dict(rows[0])  # retry an unsent daily sign-up after a send failure
+            else:
+                cur = conn.execute(
+                    "INSERT INTO sessions (guild_id, channel_id, starts_at, created_by) VALUES (?,?,?,?)",
+                    (str(guild.id), str(channel.id), starts_at, "daily"))
+                s = {"id": cur.lastrowid, "starts_at": starts_at, "note": None, "cancelled": 0}
+        # Nobody is automatically signed up on behalf of the bot.
+        msg = await channel.send(embed=await session_embed(guild, s), view=SessionView())
+        with connect() as conn:
+            conn.execute("UPDATE sessions SET channel_id=?, message_id=? WHERE id=?",
+                         (str(channel.id), str(msg.id), s["id"]))
+        log.info("Posted daily session %s in #%s", s["id"], channel.name)
+
+    @tasks.loop(minutes=1)
+    async def daily_sessions(self):
+        starts_at = daily_start(datetime.now(_tz()))
+        if starts_at is None:
+            return
+        guild = (self.bot.get_guild(int(GUILD_ID)) if GUILD_ID else
+                 self.bot.guilds[0] if len(self.bot.guilds) == 1 else None)
+        if guild is None:
+            log.warning("Daily session: set GUILD_ID to select the server")
+            return
+        try:
+            await self.post_daily_session(guild, starts_at)
+        except discord.HTTPException:
+            log.exception("Couldn't post daily session; will retry next minute")
+
+    @daily_sessions.before_loop
+    async def _before_daily(self):
+        await self.bot.wait_until_ready()
+
     # ------------------------------------------------------------------ #
     @tasks.loop(minutes=1)
     async def reminders(self):
         now = int(time.time())
         with connect() as conn:
             due = [dict(r) for r in conn.execute(
-                "SELECT * FROM sessions WHERE cancelled=0 AND reminded=0 AND starts_at BETWEEN ? AND ?",
+                "SELECT * FROM sessions WHERE cancelled=0 AND reminded=0 AND message_id IS NOT NULL "
+                "AND starts_at BETWEEN ? AND ?",
                 (now, now + REMIND_MINUTES * 60)).fetchall()]
             for s in due:
                 conn.execute("UPDATE sessions SET reminded=1 WHERE id=?", (s["id"],))

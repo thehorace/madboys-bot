@@ -61,6 +61,8 @@ ACTIVE_WINDOW_MINUTES = int(os.getenv("ACTIVE_WINDOW_MINUTES", "90"))
 BOT_TZ = os.getenv("BOT_TZ", "Asia/Singapore")
 RECAP_WEEKDAY = int(os.getenv("RECAP_WEEKDAY", "6"))
 RECAP_HOUR = int(os.getenv("RECAP_HOUR", "21"))
+DAILY_SESSIONS = os.getenv("DAILY_SESSIONS", "1").strip().lower() in ("1", "true", "yes")
+SESSION_CHANNEL_ID = os.getenv("SESSION_CHANNEL_ID")
 
 # (MOTM_VOTE_HOURS still works if someone already set it in Railway)
 MOTM_VOTE_MINUTES = float(os.getenv("MOTM_VOTE_MINUTES")
