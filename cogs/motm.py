@@ -30,6 +30,7 @@ import match_data as md
 from cogs.link import get_link
 from config import CLUB_NAME, MOTM_VOTE_MINUTES
 from db import connect, now_iso
+from interaction_tracking import TrackedView, failed
 from utils import clip, is_manager
 
 log = logging.getLogger("madboys-bot.motm")
@@ -128,7 +129,7 @@ def build_table_embed() -> discord.Embed:
 # --------------------------------------------------------------------------- #
 #  The vote dropdown
 # --------------------------------------------------------------------------- #
-class MotmView(discord.ui.View):
+class MotmView(TrackedView):
     def __init__(self, options: Optional[list[discord.SelectOption]] = None):
         super().__init__(timeout=None)
         self.select = discord.ui.Select(
@@ -263,6 +264,7 @@ class MotmCog(commands.Cog):
     @motm_group.command(name="close", description="Manager: close the open MOTM vote now")
     async def motm_close(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("Managers only.", ephemeral=True)
             return
         with connect() as conn:

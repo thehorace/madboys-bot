@@ -44,6 +44,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import match_data as md
+from cogs.operations import report_health
 from cogs.link import find_discord_id_by_ea_name, get_all_links
 from cogs.rotation import is_match_processed, log_positions, mark_match_processed
 from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, CLUB_NAME, GUILD_ID,
@@ -51,6 +52,7 @@ from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, CLUB_NA
                     VOICE_ACTIVE_PLAYERS)
 from db import connect, get_setting, set_setting
 from utils import clip, is_manager, to_int
+from interaction_tracking import failed
 
 log = logging.getLogger("madboys-bot.matchday")
 
@@ -278,6 +280,9 @@ class MatchdayCog(commands.Cog):
         self._polling = True
         try:
             return await self._poll_once()
+        except Exception:
+            self.last_poll_ok = False
+            raise
         finally:
             self._polling = False
 
@@ -388,7 +393,9 @@ class MatchdayCog(commands.Cog):
                                               unlinked=self._unlinked.get(pm.match_id, []))
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
+            await report_health(self.bot, guild_id, "Match result posting", "The bot can't post results. Check its matchday channel permissions.")
             return
+        await report_health(self.bot, guild_id, "Match result posting")
 
         # squad MOTM vote for the newest match only (no vote spam after a catch-up)
         motm = self.bot.get_cog("MotmCog")
@@ -470,6 +477,7 @@ class MatchdayCog(commands.Cog):
     @app_commands.describe(channel="Where to post (defaults to this channel)")
     async def matchday_start(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         channel = channel or interaction.channel
@@ -490,6 +498,7 @@ class MatchdayCog(commands.Cog):
     @matchday_group.command(name="stop", description="Stop posting results (matches are still tracked)")
     async def matchday_stop(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         set_setting(str(interaction.guild_id), K_ENABLED, "0")

@@ -14,6 +14,8 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.sqlite3
+backups/
+*.sqlite3.tmp
 
 # OS / editor cruft
 .DS_Store

@@ -215,7 +215,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     note       TEXT,
     created_by TEXT NOT NULL,
     reminded   INTEGER NOT NULL DEFAULT 0,
-    cancelled  INTEGER NOT NULL DEFAULT 0
+    cancelled  INTEGER NOT NULL DEFAULT 0,
+    sticky_messages INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_msg ON sessions (message_id);
 
@@ -275,6 +276,12 @@ def init_all():
         # how an RSVP was made: 'button' (clicked) or 'voice' (auto-added when they joined voice)
         if "source" not in {r["name"] for r in conn.execute("PRAGMA table_info(session_rsvps)")}:
             conn.execute("ALTER TABLE session_rsvps ADD COLUMN source TEXT")
+        if "sticky_messages" not in {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}:
+            conn.execute("ALTER TABLE sessions ADD COLUMN sticky_messages INTEGER NOT NULL DEFAULT 0")
+        have_sessions = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+        for column in ("sticky_at", "started_shown"):
+            if column not in have_sessions:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
         for table in ("rotation_log", "processed_matches", "matchday_poll", "active_formation", "lineup_slots"):
             migrate_legacy_club(conn, table)
     log.info(f"Database ready at {DB_PATH}")

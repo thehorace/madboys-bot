@@ -31,6 +31,9 @@ COGS = [
     "cogs.hub",
     "cogs.misc",
     "cogs.usage",
+    "cogs.operations",
+    "cogs.onboarding",
+    "cogs.admin",
 ]
 
 
@@ -81,6 +84,9 @@ bot = MadBoysBot()
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """One friendly error message for every command, instead of 'The application did not respond'."""
+    from interaction_tracking import record, failed
+    failed(interaction)
+    record(interaction, "failed")
     if isinstance(error, app_commands.CommandOnCooldown):
         msg = f"Slow down — try again in {error.retry_after:.0f}s."
     elif isinstance(error, app_commands.CheckFailure):

@@ -32,6 +32,7 @@ from cogs.link import get_link
 from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
 from db import connect
 from utils import clip, is_manager, to_float, to_int
+from interaction_tracking import failed
 
 log = logging.getLogger("madboys-bot.stats")
 
@@ -433,6 +434,8 @@ def card_file(png: bytes) -> discord.File:
 async def send_screen(interaction: discord.Interaction, screen: Screen):
     """Send a builder's result as a reply to a (deferred) slash command."""
     if isinstance(screen, str):
+        from interaction_tracking import failed
+        failed(interaction)
         await interaction.followup.send(screen, ephemeral=True)
     elif isinstance(screen, tuple):
         await interaction.followup.send(embed=screen[0], file=card_file(screen[1]))
@@ -478,10 +481,13 @@ class StatsCog(commands.Cog):
         if not player:
             player = get_link(str(interaction.guild_id), str(interaction.user.id))
             if not player:
+                from interaction_tracking import failed
+                failed(interaction)
                 await interaction.response.send_message(
                     "You're not linked yet — run `/link me` with your EA name first (or pass a player name).",
                     ephemeral=True)
                 return
+        interaction.extras["usage_lookup"] = ("Stats: player", player + (", career" if career else ", season"))
         await interaction.response.defer()
         await send_screen(interaction, await build_player(self.ea, player, career, with_recent))
 
@@ -550,6 +556,7 @@ class StatsCog(commands.Cog):
     ])
     async def debug(self, interaction: discord.Interaction, what: app_commands.Choice[str]):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("Managers only.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)

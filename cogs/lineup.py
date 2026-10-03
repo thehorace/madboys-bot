@@ -38,6 +38,7 @@ from discord.ext import commands
 from cogs.rotation import broad_role, current_streak, get_all_recent, is_exact, strip_number
 from config import CLUB_COLOUR, CLUB_NAME, ROTATION_THRESHOLD
 from db import connect, now_iso
+from interaction_tracking import TrackedView, failed
 from pitch import render_lineup
 from utils import is_manager, resolve_name
 
@@ -284,7 +285,7 @@ async def post_lineup(channel: discord.abc.Messageable, guild: discord.Guild, fo
 # --------------------------------------------------------------------------- #
 #  UI: builds picker (players)
 # --------------------------------------------------------------------------- #
-class BuildsView(discord.ui.View):
+class BuildsView(TrackedView):
     def __init__(self, guild_id: str, user: discord.abc.User):
         super().__init__(timeout=300)
         self.guild_id, self.user = guild_id, user
@@ -299,6 +300,7 @@ class BuildsView(discord.ui.View):
 
     async def on_select(self, interaction: discord.Interaction):
         if interaction.user.id != self.user.id:
+            failed(interaction)
             await interaction.response.send_message("This menu isn't for you!", ephemeral=True)
             return
         chosen = interaction.data["values"]
@@ -308,7 +310,7 @@ class BuildsView(discord.ui.View):
             view=None)
 
 
-class ManagerBuildsView(discord.ui.View):
+class ManagerBuildsView(TrackedView):
     """
     Private manager menu to set anyone's builds:
       row 0  ▾ Pick a player             (any server member, searchable)
@@ -326,6 +328,7 @@ class ManagerBuildsView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user.id:
+            failed(interaction)
             await interaction.response.send_message("This menu belongs to someone else.", ephemeral=True)
             return False
         return True
@@ -406,6 +409,7 @@ class ManagerBuildsView(discord.ui.View):
 async def open_manager_builds(interaction: discord.Interaction, player: Optional[discord.abc.User] = None,
                               followup: bool = False):
     if not is_manager(interaction.user):
+        failed(interaction)
         await interaction.response.send_message("Setting other players' builds is for managers.", ephemeral=True)
         return
     view = ManagerBuildsView(interaction.guild, interaction.user, player)
@@ -428,7 +432,7 @@ def builds_prompt(guild_id: str, user_id: str) -> str:
 # --------------------------------------------------------------------------- #
 #  UI: lineup builder (managers)
 # --------------------------------------------------------------------------- #
-class LineupBuilder(discord.ui.View):
+class LineupBuilder(TrackedView):
     """
     Private manager menu. Layout:
       row 0  ▾ Formation
@@ -453,6 +457,7 @@ class LineupBuilder(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user.id:
+            failed(interaction)
             await interaction.response.send_message("This builder belongs to someone else.", ephemeral=True)
             return False
         return True
@@ -649,6 +654,7 @@ class LineupBuilder(discord.ui.View):
 
 async def open_builder(bot: commands.Bot, interaction: discord.Interaction):
     if not is_manager(interaction.user):
+        failed(interaction)
         await interaction.response.send_message("The lineup builder is for managers.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -682,6 +688,7 @@ class LineupCog(commands.Cog):
     @app_commands.choices(formation=[app_commands.Choice(name=f, value=f) for f in FORMATIONS])
     async def formation_set(self, interaction: discord.Interaction, formation: app_commands.Choice[str]):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role to set the formation.", ephemeral=True)
             return
         set_formation(str(interaction.guild_id), CLUB_NAME, formation.value)
@@ -726,6 +733,7 @@ class LineupCog(commands.Cog):
     @lineup_group.command(name="suggest", description="Manager: auto-fill the lineup (session RSVPs, builds, rotation)")
     async def lineup_suggest(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         gid = str(interaction.guild_id)
@@ -751,6 +759,7 @@ class LineupCog(commands.Cog):
     @app_commands.autocomplete(position=slot_autocomplete)
     async def lineup_assign(self, interaction: discord.Interaction, position: str, player: discord.Member):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         gid = str(interaction.guild_id)
@@ -774,6 +783,7 @@ class LineupCog(commands.Cog):
     @app_commands.autocomplete(position=slot_autocomplete)
     async def lineup_clear(self, interaction: discord.Interaction, position: Optional[str] = None):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         clear_slots(str(interaction.guild_id), CLUB_NAME, position.upper() if position else None)
@@ -781,6 +791,7 @@ class LineupCog(commands.Cog):
 
     async def _post(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role to post a lineup.", ephemeral=True)
             return
         gid = str(interaction.guild_id)

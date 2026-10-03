@@ -100,14 +100,46 @@ that evening, using `BOT_TZ` (default Singapore time). It uses the usual
 In / Maybe / Out buttons and the 30-minute reminder. Nobody is signed up
 automatically when the post is created.
 
+Both daily and manual sign-ups ping `@everyone` on their first post (the bot
+needs Mention Everyone permission in that channel). Until kick-off, the sign-up
+moves to the bottom after every 10 new messages from other users or bots,
+keeping all RSVPs and removing the old post. These moves do not ping everyone
+again. A **5-minute minimum gap** prevents frequent reposts in a busy chat.
+Cancellation and kick-off stop sticky moves; both the count and cooldown survive restarts.
+
+Only private allowlisted users (`USAGE_VIEWERS`, default `fauz`) can use
+**`/session settings`** to view or change the daily posting
+time, kick-off time, channel, weekdays, enabled state, sticky cooldown and waitlist.
+For example: `/session settings post_time:11am kickoff_time:6:30pm days:all`.
+Times use `BOT_TZ`, and posting must be earlier than kick-off that same day.
+Changes apply to future daily posts; already-posted sessions keep their time.
+**`/session skip`** skips today's automatic session and cancels it if already posted.
+It uses that same private allowlist; manager/admin roles and server ownership
+do not grant access to these two commands. Ordinary session cancellation and
+lineup management still use the existing manager permissions.
+
+Session posts prominently show **Need N more**, **Full XI**, or **Session started**.
+The waitlist is enabled by default: the first 11 In sign-ups take the places;
+extra players queue in order and move into the XI when someone drops out.
+Clicking In again does not move a player to the back. Sign-up buttons close at
+kick-off (late voice arrivals are still detected for lineup suggestions).
+
 If the bot restarts after 11am, it catches up before kick-off. Existing sessions
 at that start time, including cancelled ones, prevent another post. Set
 `SESSION_CHANNEL_ID` if the channel has a different name or there is more than
 one #general, and `GUILD_ID` if the bot is in multiple servers. Set
-`DAILY_SESSIONS=0` to disable daily posts. Keep `DB_PATH` on a persistent volume
+`DAILY_SESSIONS=0` to set the initial default to disabled (saved Discord settings
+take precedence). Keep `DB_PATH` on a persistent volume
 so the bot remembers posts across deploys.
 
 ## Bot usage stats (private)
+
+**`/admin`** opens an ephemeral admin panel with buttons for Usage, session
+controls, Health, Backup and tracker status. Session controls include schedule
+editing, a channel picker, daily-post/waitlist toggles and Skip today. Every
+button and schedule submission rechecks the panel owner and private allowlist;
+manager roles and server ownership do not bypass this. Panels expire after 14
+minutes; reopen with `/admin`. Admin panel activity is excluded from usage logs.
 
 The bot logs every command, button tap and dropdown pick (who, what they picked,
 when) — never normal chat messages. **`/usage`** opens a private report: overview,
@@ -116,6 +148,40 @@ leaderboards, opponents), a per-person breakdown, and a CSV download. Only the
 people listed in `USAGE_VIEWERS` (Discord usernames or IDs, comma-separated) can
 open it; if that's not set, only `fauz` can. Logs older than
 `USAGE_KEEP_DAYS` (180) are deleted automatically.
+
+The report separates actual stats lookups from menu navigation and other actions,
+shows people returning on multiple days, and includes a **Trends** tab comparing
+the last seven days with the preceding seven. Successful-use totals exclude
+failed and unfinished attempts. CSV includes category and outcome, including
+historical entries whose outcome is unknown. Those older entries are preserved
+but do not count as confirmed successes. Normal chat content is never stored.
+
+## Guided player setup
+
+**`/setup`**, or the panel's **Setup** button, opens a private three-step flow:
+pick your EA player (or enter the name), choose your build positions, then read
+a short guide to Stats, Me, session RSVPs and Share. The flow resumes from saved
+progress. Opening `/stats` before linking and choosing positions opens this flow.
+
+## Backups and private alerts
+
+The bot makes a checked online SQLite backup daily after **3am in `BOT_TZ`**,
+catching up on startup, and retains seven dated snapshots by default. Configure
+`BACKUP_DIR` and `BACKUP_KEEP_DAYS` if needed; the default folder is `backups`
+beside `DB_PATH`. SQLite's backup API includes committed WAL changes.
+
+Only usage viewers can open **`/maintenance status`** or **`/maintenance backup`**.
+The latter creates and downloads a checked copy (large files stay on the volume
+if they exceed Discord's upload limit). Failure and recovery alerts for session
+posting, reminders, tracking and backups are sent by DM to usage viewers, or to
+`ALERT_USER_ID` when configured. The bot sends one alert per failure episode and
+stays quiet while a notified failure is unchanged. DMs must be enabled.
+
+Keep the database and backups on a persistent Railway Volume. Copies on that
+same volume protect against bad data changes, not loss of the whole volume;
+download a copy periodically for an independent backup. To restore, stop the
+bot, preserve the current database, replace it with the downloaded copy, remove
+stale `-wal`/`-shm` files while stopped, then restart. There is no automatic restore.
 
 ## Local setup
 

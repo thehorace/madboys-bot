@@ -25,6 +25,7 @@ HELP_SECTIONS = [
         ("/motm table", "Squad MOTM awards (voted after every game)"),
     ]),
     ("🔗 Setup", [
+        ("/setup", "Guided EA link, positions and button tour"),
         ("/link me", "Connect your Discord to your EA name — do this first!"),
         ("/builds", "Tick the positions you have a build for (or 🛠️ on the panel)"),
     ]),

@@ -21,6 +21,7 @@ from discord.ext import commands
 from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
 from db import connect, now_iso
 from utils import clip, is_manager, resolve_name
+from interaction_tracking import failed
 
 log = logging.getLogger("madboys-bot.link")
 
@@ -102,6 +103,7 @@ class LinkCog(commands.Cog):
     @app_commands.autocomplete(ea_name=roster_autocomplete)
     async def link_set(self, interaction: discord.Interaction, member: discord.Member, ea_name: str):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message(
                 "You need the Manager/Admin role to link someone else. They can use `/link me`.", ephemeral=True)
             return
@@ -115,6 +117,7 @@ class LinkCog(commands.Cog):
     async def link_remove(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
         target = member or interaction.user
         if target.id != interaction.user.id and not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("Only managers can remove someone else's link.", ephemeral=True)
             return
         ok = remove_link(str(interaction.guild_id), str(target.id))
@@ -134,6 +137,7 @@ class LinkCog(commands.Cog):
     @link_group.command(name="list", description="Manager: list all EA persona links, and who in the roster isn't linked")
     async def link_list(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)

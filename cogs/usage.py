@@ -64,6 +64,12 @@ CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_log (guild_id, user_id, ts);
 def init_usage():
     with connect() as conn:
         conn.executescript(SCHEMA)
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(usage_log)")}
+        for column, declaration in (("interaction_id", "TEXT"), ("outcome", "TEXT NOT NULL DEFAULT 'unknown'"),
+                                    ("category", "TEXT NOT NULL DEFAULT 'action'")):
+            if column not in have:
+                conn.execute(f"ALTER TABLE usage_log ADD COLUMN {column} {declaration}")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_interaction ON usage_log (interaction_id)")
         conn.execute("DELETE FROM usage_log WHERE ts < ?", (int(time.time()) - USAGE_KEEP_DAYS * 86400,))
 
 
@@ -135,33 +141,56 @@ def describe_component(data: dict, message: Optional[discord.Message],
     return "dropdown", placeholder, picked
 
 
-def log_interaction(interaction: discord.Interaction):
+def category_for(action: str, detail: str) -> str:
+    command = action.split(" ")[0].lower()
+    lookup_commands = {"/lastgame", "/clubstats", "/playerstats", "/me", "/leaderboard", "/passing", "/compare", "/form", "/h2h", "/recap"}
+    lookup_components = {"Player stats", "Leaderboards", "Compare", "Head-to-head vs", "Last game", "Club", "Form", "Recap", "Me", "My stats", "Leaderboard"}
+    if command in lookup_commands or action in lookup_components:
+        return "lookup"
+    if action in {"Home", "Stats", "Career", "Season/Career toggle", "This season"} or command == "/stats":
+        return "navigation"
+    return "action"
+
+
+def log_interaction(interaction: discord.Interaction, outcome: str = "pending"):
     if interaction.user.bot or interaction.guild_id is None:
         return
     data = interaction.data or {}
     if interaction.type == discord.InteractionType.application_command:
         kind, (action, detail) = "command", describe_command(data, interaction.guild)
-        if action.startswith("/usage"):
+        if action.startswith(("/usage", "/maintenance", "/admin")):
             return
     elif interaction.type == discord.InteractionType.component:
-        if str(data.get("custom_id", "")).startswith("usage:"):
+        if str(data.get("custom_id", "")).startswith(("usage:", "admin:")):
             return   # browsing this report isn't "usage"
         kind, action, detail = describe_component(data, interaction.message, interaction.guild)
     else:
         return
+    category = interaction.extras.get("usage_category", category_for(action, detail))
+    context = interaction.extras.get("usage_lookup")
+    if context:
+        action, detail = context
+        category = "lookup"
+    outcome = interaction.extras.get("usage_status", outcome)
     with connect() as conn:
-        conn.execute("INSERT INTO usage_log (ts, guild_id, user_id, user_name, kind, action, detail, channel_id) "
-                     "VALUES (?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO usage_log (ts, guild_id, user_id, user_name, kind, action, detail, channel_id, interaction_id, outcome, category) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(interaction_id) DO UPDATE SET "
+                     "outcome=CASE WHEN excluded.outcome='pending' THEN usage_log.outcome ELSE excluded.outcome END, "
+                     "action=CASE WHEN excluded.outcome='pending' THEN usage_log.action ELSE excluded.action END, "
+                     "detail=CASE WHEN excluded.outcome='pending' THEN usage_log.detail ELSE excluded.detail END, "
+                     "category=CASE WHEN excluded.outcome='pending' THEN usage_log.category ELSE excluded.category END",
                      (int(time.time()), str(interaction.guild_id), str(interaction.user.id),
                       getattr(interaction.user, "display_name", None) or interaction.user.name,
-                      kind, action[:100], (detail or "")[:200], str(interaction.channel_id or "")))
+                      kind, action[:100], (detail or "")[:200], str(interaction.channel_id or ""), str(interaction.id), outcome, category))
 
 
 # --------------------------------------------------------------------------- #
 #  Report queries
 # --------------------------------------------------------------------------- #
-def rows_since(guild_id: str, since: Optional[int], user_id: Optional[str] = None) -> list[dict]:
+def rows_since(guild_id: str, since: Optional[int], user_id: Optional[str] = None, raw: bool = False) -> list[dict]:
     q, args = "SELECT * FROM usage_log WHERE guild_id=?", [guild_id]
+    if not raw:
+        q += " AND outcome='success'"
     if since:
         q += " AND ts>=?"
         args.append(since)
@@ -188,7 +217,7 @@ def _local(ts: int) -> datetime:
 
 
 def is_lookup(r: dict) -> bool:
-    return bool(r["detail"])
+    return r.get("category", category_for(r["action"], r["detail"])) == "lookup"
 
 
 def build_overview(rows: list[dict], period: str) -> discord.Embed:
@@ -204,6 +233,14 @@ def build_overview(rows: list[dict], period: str) -> discord.Embed:
                      f"Commands {sum(r['kind'] == 'command' for r in rows)} · "
                      f"buttons {sum(r['kind'] == 'button' for r in rows)} · "
                      f"dropdowns {sum(r['kind'] == 'dropdown' for r in rows)}")
+    lookups = sum(is_lookup(r) for r in rows)
+    navigation = sum(r.get("category") == "navigation" for r in rows)
+    e.description += f"\n**{lookups} actual lookups** · {navigation} menu navigation actions"
+    by_user_days = {}
+    for r in rows:
+        by_user_days.setdefault(r["user_id"], set()).add(_local(r["ts"]).date())
+    repeat = sum(len(days) >= 2 for days in by_user_days.values())
+    e.add_field(name="🔁 Returning users", value=f"**{repeat}** used the bot on at least two different days", inline=False)
     top = people.most_common(1)[0][1]
     e.add_field(name="👥 Most active", inline=False, value="\n".join(
         f"`{n:>4}` {_bar(n, top)} **{names[u]}**" for u, n in people.most_common(5)))
@@ -237,6 +274,28 @@ def build_people(rows: list[dict], period: str) -> discord.Embed:
                      f"mostly *{fav}* ({fn}) · last <t:{rs[-1]['ts']}:R>")
     e.description = "\n".join(lines)[:4000]
     e.set_footer(text="Pick someone in the ▾ dropdown for their full breakdown")
+    return e
+
+
+def build_trends(guild_id: str, now: Optional[int] = None) -> discord.Embed:
+    now = now or int(time.time())
+    week = 7 * 86400
+    rows = rows_since(guild_id, now - 2 * week)
+    current = [r for r in rows if now - week <= r["ts"] <= now]
+    previous = [r for r in rows if r["ts"] < now - week]
+    e = discord.Embed(title="📈 Weekly trends", colour=CLUB_COLOUR,
+                      description="Last 7 days compared with the preceding 7 days. Successful actions only.")
+    for label, metric in (("Actions", lambda rs: len(rs)),
+                          ("Lookups", lambda rs: sum(is_lookup(r) for r in rs)),
+                          ("Active users", lambda rs: len({r["user_id"] for r in rs}))):
+        a, b = metric(current), metric(previous)
+        delta = f"{(a - b) / b:+.0%}" if b else "no previous baseline"
+        e.add_field(name=label, value=f"**{a}** vs {b} · {delta}", inline=False)
+    old_users = {r["user_id"] for r in previous}
+    new_users = {r["user_id"] for r in current}
+    e.add_field(name="Returning from previous week", value=str(len(new_users & old_users)))
+    e.add_field(name="New this fortnight", value=str(len(new_users - old_users)))
+    e.set_footer(text="Historical logs without a recorded outcome stay in CSV; they are excluded from successful-use totals.")
     return e
 
 
@@ -295,10 +354,10 @@ def build_person(rows: list[dict], period: str, name: str) -> discord.Embed:
 def csv_file(rows: list[dict], period: str) -> discord.File:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "user", "user_id", "type", "action", "detail"])
+    w.writerow(["time", "user", "user_id", "type", "action", "detail", "category", "outcome"])
     for r in rows:
         w.writerow([_local(r["ts"]).strftime("%Y-%m-%d %H:%M:%S"), r["user_name"], r["user_id"],
-                    r["kind"], r["action"], r["detail"]])
+                    r["kind"], r["action"], r["detail"], r.get("category", "action"), r.get("outcome", "unknown")])
     return discord.File(io.BytesIO(buf.getvalue().encode("utf-8-sig")), f"madboys-bot-usage-{period}.csv")
 
 
@@ -320,14 +379,16 @@ class UsageView(discord.ui.View):
         self.embed = discord.Embed()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.user.id
+        return interaction.user.id == self.user.id and can_view(interaction.user, interaction.guild)
 
     def since(self) -> Optional[int]:
         secs = PERIODS[self.period][1]
         return int(time.time()) - secs if secs else None
 
     def build(self):
-        if self.page == "person" and self.person:
+        if self.page == "trends":
+            self.embed = build_trends(self.gid)
+        elif self.page == "person" and self.person:
             rows = rows_since(self.gid, self.since(), self.person)
             m = self.guild.get_member(int(self.person))
             name = m.display_name if m else (latest_names(rows).get(self.person) or self.person)
@@ -336,18 +397,23 @@ class UsageView(discord.ui.View):
             rows = rows_since(self.gid, self.since())
             self.embed = {"overview": build_overview, "people": build_people, "features": build_features,
                           "lookups": build_lookups}[self.page](rows, self.period)
+        if self.page == "overview":
+            attempts = rows_since(self.gid, self.since(), raw=True)
+            outcomes = Counter(r["outcome"] for r in attempts)
+            self.embed.add_field(name="Excluded from successful-use totals", inline=False,
+                                 value=f"Failed: {outcomes['failed']} · unfinished: {outcomes['pending']} · historical unknown: {outcomes['unknown']}")
         self.render()
 
     def render(self):
         self.clear_items()
         for key, label, emoji in (("overview", "Overview", "📊"), ("people", "People", "👥"),
-                                  ("features", "Features", "🧭"), ("lookups", "Lookups", "🔎")):
+                                  ("features", "Features", "🧭"), ("lookups", "Lookups", "🔎"), ("trends", "Trends", "📈")):
             b = discord.ui.Button(label=label, emoji=emoji, row=0, custom_id=f"usage:page:{key}",
                                   style=discord.ButtonStyle.primary if self.page == key
                                   else discord.ButtonStyle.secondary)
             b.callback = self._page(key)
             self.add_item(b)
-        ex = discord.ui.Button(label="CSV", emoji="📄", row=0, custom_id="usage:csv",
+        ex = discord.ui.Button(label="CSV", emoji="📄", row=3, custom_id="usage:csv",
                                style=discord.ButtonStyle.secondary)
         ex.callback = self._csv
         self.add_item(ex)
@@ -378,7 +444,7 @@ class UsageView(discord.ui.View):
         await self._show(interaction)
 
     async def _csv(self, interaction: discord.Interaction):
-        rows = rows_since(self.gid, self.since(), self.person if self.page == "person" else None)
+        rows = rows_since(self.gid, self.since(), self.person if self.page == "person" else None, raw=True)
         await interaction.response.send_message(f"📄 {len(rows)} rows ({PERIODS[self.period][0].lower()})",
                                                 file=csv_file(rows, self.period), ephemeral=True)
 
@@ -386,6 +452,13 @@ class UsageView(discord.ui.View):
 class UsageCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_app_command_completion(self, interaction: discord.Interaction, command):
+        try:
+            log_interaction(interaction, interaction.extras.get("usage_status", "success"))
+        except Exception:
+            log.exception("Couldn't record command outcome")
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):

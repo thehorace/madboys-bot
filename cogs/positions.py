@@ -39,6 +39,7 @@ import positions as P
 from cogs.rotation import set_match_position
 from config import CLUB_NAME
 from db import connect, get_setting, set_setting
+from interaction_tracking import TrackedView
 from utils import resolve_name
 
 log = logging.getLogger("madboys-bot.positions")
@@ -94,7 +95,7 @@ def prompt_text(title: str, pending: dict) -> str:
             f"EA only says defender/midfielder/forward, so tap your exact spot (keeps rotation accurate).")
 
 
-class PositionPromptView(discord.ui.View):
+class PositionPromptView(TrackedView):
     def __init__(self):
         super().__init__(timeout=None)
         sel = discord.ui.Select(custom_id="madboys:pos:pick", placeholder="📍 Pick your position…",

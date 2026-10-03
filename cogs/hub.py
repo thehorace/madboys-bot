@@ -35,6 +35,7 @@ from cogs.link import get_link, set_link
 from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
 from db import get_setting, set_setting
 from utils import is_manager
+from interaction_tracking import TrackedView, failed
 
 STICKY_AFTER_MESSAGES = 8      # re-post the sticky panel once it's this many messages up
 STICKY_MIN_SECONDS = 45        # ...but not more often than this
@@ -51,7 +52,7 @@ def error_embed(msg: str) -> discord.Embed:
     return discord.Embed(description=f"⚠️ {msg}", colour=0xE67E22)
 
 
-class StatsMenu(discord.ui.View):
+class StatsMenu(TrackedView):
     def __init__(self, bot: commands.Bot, user: discord.abc.User, guild_id: str,
                  roster: list[str], opponents: list[str]):
         super().__init__(timeout=MENU_TIMEOUT)
@@ -73,16 +74,24 @@ class StatsMenu(discord.ui.View):
     @classmethod
     async def open(cls, bot: commands.Bot, interaction: discord.Interaction, page: str = "home"):
         """Send a new private menu in reply to a slash command or a panel button."""
+        from cogs.lineup import get_prefs
+        if not get_link(str(interaction.guild_id), str(interaction.user.id)) or not get_prefs(str(interaction.guild_id), str(interaction.user.id)):
+            interaction.extras["usage_category"] = "navigation"
+            from cogs.onboarding import open_setup
+            await open_setup(bot, interaction)
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         roster = await S.roster_names(bot.ea)
         menu = cls(bot, interaction.user, str(interaction.guild_id), roster, md.opponents(CLUB_ID, limit=25))
         await menu.go(page)
+        menu.record_result(interaction)
         menu.message_interaction = interaction
         extra = {"file": S.card_file(menu.png)} if menu.png else {}
         await interaction.followup.send(embed=menu.embed, view=menu, ephemeral=True, **extra)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user.id:
+            failed(interaction)
             await interaction.response.send_message("This menu is someone else's — use `/stats` to open your own.",
                                                     ephemeral=True)
             return False
@@ -160,7 +169,21 @@ class StatsMenu(discord.ui.View):
         if isinstance(screen, tuple):
             screen, self.png = screen
         self.embed = error_embed(screen) if isinstance(screen, str) else screen
+        self.screen_failed = isinstance(screen, str)
         self.render()
+
+    def record_result(self, interaction):
+        if self.screen_failed:
+            failed(interaction)
+        if self.page in {"lastgame", "club", "form", "recap", "me", "player", "compare", "leaderboard", "h2h"}:
+            detail = self.player or ""
+            if self.page == "compare":
+                detail = f"{self.player} vs {self.compare_with}"
+            elif self.page == "leaderboard":
+                detail = f"{self.stat}, {self.position}, {'career' if self.career else 'season'}"
+            elif self.page == "h2h":
+                detail = self.opponent or ""
+            interaction.extras["usage_lookup"] = ("Stats: " + self.page, detail)
 
     # ------------------------------------------------------------------ #
     #  components
@@ -246,6 +269,7 @@ class StatsMenu(discord.ui.View):
     async def _update(self, interaction: discord.Interaction, page: str):
         await interaction.response.defer()  # EA can take a few seconds; Discord wants an answer within 3
         await self.go(page)
+        self.record_result(interaction)
         self.message_interaction = interaction
         await interaction.edit_original_response(
             embed=self.embed, view=self, attachments=[S.card_file(self.png)] if self.png else [])
@@ -310,7 +334,7 @@ class StatsMenu(discord.ui.View):
             await interaction.response.send_message("I'm not allowed to post there.", ephemeral=True)
 
 
-class PanelView(discord.ui.View):
+class PanelView(TrackedView):
     """
     The pinned control panel. Persistent: fixed custom_ids and no timeout, and
     registered with bot.add_view() at startup, so buttons keep working forever.
@@ -352,6 +376,12 @@ class PanelView(discord.ui.View):
     async def manager(self, interaction: discord.Interaction, _):
         from cogs.lineup import open_builder
         await open_builder(self.bot, interaction)
+
+    @discord.ui.button(label="Setup", emoji="🔗", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:setup", row=1)
+    async def setup_player(self, interaction: discord.Interaction, _):
+        from cogs.onboarding import open_setup
+        await open_setup(self.bot, interaction)
 
 
 def panel_embed() -> discord.Embed:
@@ -424,6 +454,7 @@ class HubCog(commands.Cog):
     @app_commands.describe(sticky="Keep it at the bottom of the channel (re-posts itself as the chat moves on)")
     async def panel(self, interaction: discord.Interaction, sticky: bool = False):
         if not is_manager(interaction.user):
+            failed(interaction)
             await interaction.response.send_message("Managers only.", ephemeral=True)
             return
         gid = str(interaction.guild_id)
