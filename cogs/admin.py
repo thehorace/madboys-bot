@@ -74,7 +74,8 @@ class AdminView(TrackedView):
                         f"Sticky: 10 messages, minimum **{settings['cooldown']} seconds**\n"
                         f"Waitlist: **{'On' if settings['waitlist'] else 'Off'}**\n"
                         f"Skipped date: {settings['skip_date'] or 'None'}\n\n"
-                        "Changes apply to future daily posts. Use the channel picker to change where they post.")
+                        "Changes also update today's sign-up if it's already posted (kick-off time, "
+                        "reminder, channel). Use the channel picker to change where they post.")
 
     def button(self, label, action, row=0, style=discord.ButtonStyle.secondary):
         button = discord.ui.Button(label=label, row=row, style=style, custom_id="admin:" + action)

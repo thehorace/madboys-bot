@@ -454,6 +454,7 @@ class SessionsCog(commands.Cog):
                 conn.execute("INSERT INTO settings (guild_id,key,value) VALUES (?,?,?) "
                              "ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value", (gid, "session:" + key, value))
         current = session_settings(gid)
+        today_note, today_id = self.update_today_in_db(gid, changes, current)
         embed = discord.Embed(title="🎮 Session settings", colour=CLUB_COLOUR,
             description=f"Daily posts: **{'On' if current['enabled'] else 'Off'}**\n"
                         f"Post **{current['post_time']}** · Kick-off **{current['kickoff_time']}** ({BOT_TZ})\n"
@@ -462,8 +463,89 @@ class SessionsCog(commands.Cog):
                         f"Sticky: every 10 messages, at least **{current['cooldown']} seconds** apart\n"
                         f"Waitlist: **{'On' if current['waitlist'] else 'Off'}**\n"
                         f"Skipped date: {current['skip_date'] or 'None'}")
-        embed.set_footer(text="Changes apply to future daily posts; existing session times stay as posted. /session skip skips today.")
+        if today_note:
+            embed.add_field(name="Today's sign-up", value=today_note, inline=False)
+        embed.set_footer(text="Changes also update today's sign-up if it's already posted. /session skip skips today.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        if today_id:   # Discord edits after replying, so the settings reply never times out
+            await self.refresh_today(interaction.guild, today_id)
+
+    # ------------------------------------------------------------------ #
+    #  Keep today's already-posted daily sign-up in step with the settings
+    # ------------------------------------------------------------------ #
+    def todays_daily_session(self, guild_id: str) -> Optional[dict]:
+        midnight = datetime.now(_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND created_by='daily' AND cancelled=0 "
+                               "AND message_id IS NOT NULL AND starts_at>=? AND starts_at<? "
+                               "ORDER BY starts_at DESC LIMIT 1",
+                               (guild_id, int(midnight.timestamp()),
+                                int((midnight + timedelta(days=1)).timestamp()))).fetchone()
+        return dict(row) if row else None
+
+    def update_today_in_db(self, guild_id: str, changes: dict, settings: dict) -> tuple[str, Optional[int]]:
+        """
+        Apply kick-off / channel / waitlist changes to today's posted daily sign-up.
+        -> (what changed, for the reply; session id to refresh on Discord) or ("", None) if nothing to do.
+        """
+        if not any(k in changes for k in ("kickoff_time", "channel_id", "waitlist")):
+            return "", None
+        s = self.todays_daily_session(guild_id)
+        if not s:
+            return "", None
+        now, notes = int(time.time()), []
+        if "kickoff_time" in changes:
+            h, m = parse_time(settings["kickoff_time"])
+            new = int(datetime.fromtimestamp(s["starts_at"], _tz()).replace(
+                hour=h, minute=m, second=0, microsecond=0).timestamp())
+            if new != s["starts_at"]:
+                with connect() as conn:
+                    if new > now:   # back to "upcoming": buttons, reminder and started-status all re-arm
+                        conn.execute("UPDATE sessions SET starts_at=?, reminded=0, started_shown=0 WHERE id=?",
+                                     (new, s["id"]))
+                    else:
+                        conn.execute("UPDATE sessions SET starts_at=? WHERE id=?", (new, s["id"]))
+                notes.append(f"kick-off moved to <t:{new}:t>" + ("" if new > now else " (already passed, so sign-ups are closed)"))
+        if "channel_id" in changes and changes["channel_id"] != s["channel_id"] and s["starts_at"] > now:
+            notes.append(f"moved to <#{changes['channel_id']}>")
+        if "waitlist" in changes:
+            notes.append("waitlist " + ("on" if settings["waitlist"] else "off"))
+        if not notes:
+            return "", None
+        return "Updated: " + ", ".join(notes) + ".", s["id"]
+
+    async def refresh_today(self, guild: discord.Guild, session_id: int):
+        """Re-draw today's sign-up (new time, waitlist), moving it if the session channel changed."""
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if not row:
+            return
+        s = dict(row)
+        open_ = not s["cancelled"] and s["starts_at"] > int(time.time())
+        view = SessionView() if open_ else None
+        want = session_settings(str(guild.id))["channel_id"]
+        try:
+            old_ch = self.bot.get_channel(int(s["channel_id"])) or await self.bot.fetch_channel(int(s["channel_id"]))
+            new_ch = guild.get_channel(int(want)) if (open_ and want and want != s["channel_id"]) else None
+            if isinstance(new_ch, discord.TextChannel):
+                new = await new_ch.send(embed=await session_embed(guild, s), view=view,
+                                        allowed_mentions=discord.AllowedMentions.none())
+                with connect() as conn:
+                    conn.execute("UPDATE sessions SET channel_id=?, message_id=?, sticky_messages=0, sticky_at=? "
+                                 "WHERE id=?", (str(new_ch.id), str(new.id), int(time.time()), s["id"]))
+                old = old_ch.get_partial_message(int(s["message_id"]))
+                try:
+                    await old.delete()
+                except discord.HTTPException:
+                    try:
+                        await old.edit(view=None)
+                    except discord.HTTPException:
+                        pass
+                return
+            await old_ch.get_partial_message(int(s["message_id"])).edit(
+                embed=await session_embed(guild, s), view=view, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.HTTPException, ValueError):
+            log.warning("Couldn't refresh today's session %s after a settings change", s["id"])
 
     @session_group.command(name="skip", description="Private: skip today's daily session and cancel it if already posted")
     async def skip(self, interaction: discord.Interaction):

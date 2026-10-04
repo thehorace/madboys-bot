@@ -207,6 +207,65 @@ class DailyPostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows()[0]["starts_at"], 101800)
         self.assertEqual(self.rows()[0]["message_id"], "30")
 
+    async def _settings(self, **kwargs):
+        interaction = SimpleNamespace(guild_id=10, guild=self.guild, user=SimpleNamespace(id=1, name="fauz"),
+                                      extras={}, response=SimpleNamespace(send_message=AsyncMock()))
+        with patch.object(sessions, "can_view", return_value=True), \
+                patch.object(sessions, "resolve_name", AsyncMock(return_value="Fauz")):
+            await sessions.SessionsCog.settings.callback(self.cog, interaction, **kwargs)
+        return interaction.response.send_message.await_args.kwargs["embed"]
+
+    def todays_posted_session(self):
+        tz = ZoneInfo(sessions.BOT_TZ)
+        now = datetime.now(tz)
+        if now.hour >= 21:
+            self.skipTest("needs a few hours left in the local day")
+        start = now.replace(minute=0, second=0, microsecond=0)
+        old = int((start.replace(hour=now.hour + 2)).timestamp())
+        with db.connect() as conn:
+            sid = conn.execute("INSERT INTO sessions (guild_id,channel_id,message_id,starts_at,created_by,reminded) "
+                               "VALUES ('10','20','50',?,'daily',1)", (old,)).lastrowid
+        self.cog.bot.get_channel.return_value = self.channel
+        self.channel.get_partial_message.return_value = SimpleNamespace(delete=AsyncMock(), edit=AsyncMock())
+        return sid, start
+
+    async def test_new_kickoff_updates_todays_posted_session(self):
+        sid, start = self.todays_posted_session()
+        new = start.replace(hour=start.hour + 3)
+        embed = await self._settings(kickoff_time=new.strftime("%H:%M"))
+        row = self.rows()[0]
+        self.assertEqual(row["starts_at"], int(new.timestamp()))
+        self.assertEqual(row["reminded"], 0)          # reminder re-armed for the new time
+        self.channel.get_partial_message.return_value.edit.assert_awaited()   # message re-drawn
+        self.assertIn("kick-off moved", embed.fields[0].value)
+        # the daily loop must not post a second sign-up at the new time
+        await self.cog.post_daily_session(self.guild, int(new.timestamp()))
+        self.channel.send.assert_not_awaited()
+        self.assertEqual(len(self.rows()), 1)
+
+    async def test_new_channel_moves_todays_posted_session(self):
+        sid, start = self.todays_posted_session()
+        other = Mock(spec=discord.TextChannel)
+        other.id = 21
+        other.send = AsyncMock(return_value=SimpleNamespace(id=77))
+        self.guild.get_channel = lambda cid: other if cid == 21 else self.channel
+        await self._settings(channel=other)
+        row = self.rows()[0]
+        self.assertEqual((row["channel_id"], row["message_id"]), ("21", "77"))
+        other.send.assert_awaited_once()
+        self.channel.get_partial_message.return_value.delete.assert_awaited()
+
+    async def test_unchanged_schedule_leaves_today_alone(self):
+        sid, start = self.todays_posted_session()
+        with db.connect() as conn:
+            conn.execute("INSERT INTO settings (guild_id,key,value) VALUES ('10','session:kickoff_time',?)",
+                         (datetime.fromtimestamp(self.rows()[0]["starts_at"], ZoneInfo(sessions.BOT_TZ)).strftime("%H:%M"),))
+        embed = await self._settings(post_time="00:01", kickoff_time=datetime.fromtimestamp(
+            self.rows()[0]["starts_at"], ZoneInfo(sessions.BOT_TZ)).strftime("%H:%M"))
+        self.assertEqual(self.rows()[0]["reminded"], 1)
+        self.assertFalse(embed.fields)
+        self.channel.get_partial_message.return_value.edit.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
