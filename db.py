@@ -227,6 +227,18 @@ CREATE TABLE IF NOT EXISTS session_rsvps (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (session_id, discord_id)
 );
+
+CREATE TABLE IF NOT EXISTS session_history (
+    session_id INTEGER PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    ended_at INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    match_ids TEXT NOT NULL,
+    rsvps TEXT NOT NULL,
+    players TEXT NOT NULL,
+    message_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_session_history_guild ON session_history(guild_id, ended_at);
 """
 
 

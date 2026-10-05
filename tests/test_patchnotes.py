@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -23,6 +24,40 @@ def article(slug="title-update-v1", year=2020, title="EA SPORTS FC 27 | Title Up
 
 
 class ParserTests(unittest.TestCase):
+    def test_featured_grounds_article_is_included_and_deduplicated(self):
+        featured = article("fc-27-the-grounds-developer-launch-update", 2021,
+                           "EA SPORTS FC 27 | The Grounds Developer Launch Update")
+        found = P.update_articles(html({"initialNewsData": {"items": [article()], "featured": featured}}))
+        self.assertEqual(found[-1]["slug"], featured["slug"])
+        duplicate = P.update_articles(html({"initialNewsData": {"items": [featured], "featured": featured}}))
+        self.assertEqual(len(duplicate), 1)
+
+    def test_purchase_rewards_and_edition_promotions_are_not_mode_news(self):
+        rejected = [
+            {**article("fc-27-launch-rewards", title="EA SPORTS FC 27 | Launch Rewards"),
+             "summary": "Rewards across Ultimate Team, The Grounds and Career, including an ICON Pack."},
+            {**article("ultimate-edition", title="EA SPORTS FC 27 Ultimate Edition"),
+             "summary": "Get special rewards in Pro Clubs and The Grounds."},
+            {**article("pre-order-bonus", title="Pre-order bonus"), "tags": ["Clubs"]},
+            article("career", title="EA SPORTS FC 27 | Career Mode Developer Launch Update"),
+            article("fut", title="EA SPORTS FC 27 | FUT Developer Launch Update"),
+        ]
+        self.assertEqual(P.update_articles(html({"initialNewsData": {"items": rejected}})), [])
+        legitimate = {**article(), "summary": "Fixed an Ultimate Edition rewards issue."}
+        self.assertTrue(P.relevant_news(legitimate))
+
+    def test_clubs_fixes_precede_long_images_and_other_mode_sections(self):
+        data = {**article(), "body": "![Banner](https://example.com/" + "x" * 4000 + ")\n\n"
+                "**Table of Contents**\n- [Feedback](#feedback)\n\n"
+                "## Feedback\nGeneral introduction.\n\n"
+                "### Clubs 11v11 fatigue\nFatigue test change.\n\n"
+                "## Quality-of-Life & Live Issues\n- Matchmaking test fix.\n"}
+        excerpt = P.article_excerpt(data)
+        self.assertTrue(excerpt.startswith("### Clubs"))
+        self.assertIn("Matchmaking test fix", excerpt)
+        self.assertNotIn("example.com", excerpt)
+        self.assertNotIn("Table of Contents", excerpt)
+
     def test_clubs_and_grounds_news_without_update_in_title(self):
         items = [
             article("fc-27-the-grounds-developer-launch-update", title="EA SPORTS FC 27 | The Grounds Developer Launch Update"),
@@ -33,8 +68,10 @@ class ParserTests(unittest.TestCase):
             article("unrelated", title="Ultimate Team pack rewards"),
         ]
         found = P.update_articles(html({"initialNewsData": {"items": items}}))
-        self.assertEqual(len(found), 5)
+        self.assertEqual(len(found), 2)
         self.assertNotIn("unrelated", [a["slug"] for a in found])
+        self.assertNotIn("getting-started-in-clubs", [a["slug"] for a in found])
+        self.assertNotIn("the-grounds-new-event", [a["slug"] for a in found])
 
     def test_filters_news_old_games_bad_slugs_and_future_notes(self):
         items = [article(), article("promo", title="New kits available"),
@@ -82,6 +119,10 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.db_patch.stop)
         db.init_all()
         P.init_patchnotes()
+        self.now = datetime(2020, 1, 1, 13, tzinfo=timezone.utc)
+        clock_patch = patch.object(P, "utc_now", side_effect=lambda: self.now)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
         self.cog = object.__new__(P.PatchNotesCog)
         self.cog.bot = SimpleNamespace(get_cog=lambda name: None)
         self.cog._lock = asyncio.Lock()
@@ -97,29 +138,82 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             return html({"initialNewsData": {"items": self.items}})
         return html({"articleDetailsFallback": next(a for a in self.items if url.endswith(a["slug"]))})
 
-    async def test_first_check_posts_latest_only_then_deduplicates_across_restart(self):
+    def new_update(self):
+        self.now += timedelta(hours=1)
+        item = article("title-update-v2", title="EA SPORTS FC 27 | Title Update v2")
+        item["publishingDate"] = (self.now - timedelta(minutes=10)).isoformat()
+        self.items.append(item)
+        return item
+
+    async def test_first_check_is_quiet_then_only_new_publications_post_once(self):
+        await self.cog.check(self.guild)
+        self.channel.send.assert_not_awaited()
+        await self.cog.check(self.guild)
+        self.channel.send.assert_not_awaited()
+        with db.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM patchnotes_seen").fetchone()[0], 2)
+        self.new_update()
         await self.cog.check(self.guild)
         self.channel.send.assert_awaited_once()
         self.assertFalse(self.channel.send.call_args.kwargs["allowed_mentions"].everyone)
-        self.assertIn("title-update-v1", self.channel.send.call_args.kwargs["embed"].url)
         await self.cog.check(self.guild)
         self.channel.send.assert_awaited_once()
-        with db.connect() as conn:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM patchnotes_seen").fetchone()[0], 2)
-        self.items.append(article("title-update-v2", 2021, "EA SPORTS FC 27 | Title Update v2"))
+
+    async def test_newly_discovered_old_featured_article_does_not_post(self):
         await self.cog.check(self.guild)
-        self.assertEqual(self.channel.send.await_count, 2)
+        featured = article("fc-27-the-grounds-developer-launch-update", 2019,
+                           "EA SPORTS FC 27 | The Grounds Developer Launch Update")
+        async def fetch_with_featured(url):
+            if url == P.SOURCE:
+                return html({"initialNewsData": {"items": self.items, "featured": featured}})
+            if url.endswith(featured["slug"]):
+                return html({"articleDetailsFallback": featured})
+            return await self.fetch(url)
+        self.cog.fetch.side_effect = fetch_with_featured
+        await self.cog.check(self.guild)
+        self.channel.send.assert_not_awaited()
+        await self.cog.check(self.guild)
+        self.channel.send.assert_not_awaited()
+        # The same featured slot can subsequently hold a genuinely new article.
+        self.now += timedelta(hours=1)
+        featured = {**featured, "slug": "new-grounds-feature-update",
+                    "publishingDate": (self.now - timedelta(minutes=10)).isoformat()}
+        await self.cog.check(self.guild)
+        self.channel.send.assert_awaited_once()
 
     async def test_failed_send_is_not_marked_seen_and_can_retry(self):
+        await self.cog.check(self.guild)
+        self.new_update()
         self.channel.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Denied"), "denied")
         with self.assertRaises(discord.Forbidden):
             await self.cog.check(self.guild)
-        self.assertIsNone(db.get_setting("10", "patchnotes:initialized"))
+        self.assertEqual(db.get_setting("10", "patchnotes:initialized"), "1")
         with db.connect() as conn:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM patchnotes_seen").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM patchnotes_seen").fetchone()[0], 2)
         self.channel.send.side_effect = None
         await self.cog.check(self.guild)
         self.assertEqual(self.channel.send.await_count, 2)
+
+    async def test_existing_installs_migrate_without_replaying_archive(self):
+        db.set_setting("10", "patchnotes:initialized", "1")
+        await self.cog.check(self.guild)
+        self.channel.send.assert_not_awaited()
+        self.assertIsNotNone(db.get_setting("10", "patchnotes:watch_since"))
+
+    async def test_old_updates_after_downtime_are_not_caught_up(self):
+        await self.cog.check(self.guild)
+        self.new_update()
+        self.now += timedelta(days=3)
+        await self.cog.check(self.guild)
+        self.channel.send.assert_not_awaited()
+
+    async def test_filter_expansion_does_not_post_prebaseline_recent_news(self):
+        await self.cog.check(self.guild)
+        older = article("clubs-new-feature", title="Clubs new feature update")
+        older["publishingDate"] = (self.now - timedelta(minutes=5)).isoformat()
+        self.items.append(older)
+        await self.cog.check(self.guild)
+        self.channel.send.assert_not_awaited()
 
     async def test_disabled_monitor_does_not_fetch_or_send(self):
         db.set_setting("10", "patchnotes:enabled", "0")

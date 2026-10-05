@@ -145,6 +145,7 @@ class MatchdayCog(commands.Cog):
         self.ea = bot.ea
         self.last_poll_at: Optional[float] = None
         self.last_poll_ok: Optional[bool] = None
+        self.last_success_at: Optional[float] = None
         self.last_new_at: Optional[float] = None
         self._polling = False
         self._linked_in: dict[str, list[str]] = {}   # match_id -> linked players' discord ids
@@ -279,7 +280,20 @@ class MatchdayCog(commands.Cog):
         """Fetch, store, log rotation, post, milestones. Returns number of new matches."""
         self._polling = True
         try:
-            return await self._poll_once()
+            count = await self._poll_once()
+            if self.last_poll_ok:
+                self.last_success_at = time.time()
+                reports = self.bot.get_cog("SessionReportsCog")
+                guild = self.home_guild()
+                if guild:
+                    set_setting(str(guild.id), "matchday:last_success", str(int(self.last_success_at)))
+                if reports and guild:
+                    try:
+                        await reports.after_poll(guild)
+                    except Exception:
+                        log.exception("Session summary failed")
+                        await report_health(self.bot, str(guild.id), "Session summaries", "Couldn't save or post the session summary. Check the recap channel and logs.")
+            return count
         except Exception:
             self.last_poll_ok = False
             raise
@@ -508,6 +522,10 @@ class MatchdayCog(commands.Cog):
 
     @matchday_group.command(name="status", description="Show what the match tracker is doing")
     async def matchday_status(self, interaction: discord.Interaction):
+        from cogs.usage import can_view
+        if not can_view(interaction.user, interaction.guild):
+            await interaction.response.send_message("This status report is private.", ephemeral=True)
+            return
         gid = str(interaction.guild_id)
         cid = self.channel_id_for(gid)
         enabled = self.posting_enabled(gid)

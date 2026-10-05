@@ -4,7 +4,7 @@ import logging
 import os
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import closing
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -14,12 +14,74 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import BOT_TZ, DB_PATH, GUILD_ID
-from db import connect
+from db import connect, get_setting
 
 log = logging.getLogger("madboys-bot.operations")
 BACKUP_KEEP = max(1, int(os.getenv("BACKUP_KEEP_DAYS", "7")))
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR") or str(Path(DB_PATH).parent / "backups"))
 ALERT_USER_ID = os.getenv("ALERT_USER_ID", "").strip()
+
+
+def next_session_post(gid, now=None):
+    from cogs.sessions import session_settings
+    settings = session_settings(gid)
+    if not settings["enabled"]:
+        return None
+    now = now or datetime.now(ZoneInfo(settings["timezone"]))
+    now = now.astimezone(ZoneInfo(settings["timezone"]))
+    for offset in range(8):
+        day = now + timedelta(days=offset)
+        if day.strftime("%A").lower() not in settings["days"] or day.date().isoformat() == settings["skip_date"]:
+            continue
+        post = day.replace(hour=int(settings["post_time"][:2]), minute=int(settings["post_time"][3:]), second=0, microsecond=0)
+        start = day.replace(hour=int(settings["kickoff_time"][:2]), minute=int(settings["kickoff_time"][3:]), second=0, microsecond=0)
+        if start <= now:
+            continue
+        midnight = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        with connect() as conn:
+            existing = conn.execute("SELECT 1 FROM sessions WHERE guild_id=? AND starts_at>=? AND starts_at<? AND (message_id IS NOT NULL OR cancelled=1)",
+                (gid, int(midnight.timestamp()), int((midnight + timedelta(days=1)).timestamp()))).fetchone()
+        if not existing:
+            return int(max(post, now).timestamp())
+    return None
+
+
+def status_embed(bot, gid):
+    from cogs.patchnotes import patch_settings
+    from cogs.session_reports import report_settings
+    from cogs.sessions import session_settings
+    from config import CLUB_ID, CLUB_COLOUR
+    import match_data
+    embed = discord.Embed(title="Bot status", colour=CLUB_COLOUR)
+    tracker = bot.get_cog("MatchdayCog")
+    def stamp(value):
+        return f"<t:{int(value)}:R>" if value else "Not checked yet"
+    if tracker:
+        state = "Stopped" if not tracker.ticker.is_running() else "Check failed" if tracker.last_poll_ok is False else "Waiting for first check" if tracker.last_poll_ok is None else "Running"
+        cid = tracker.channel_id_for(gid)
+        successful = getattr(tracker, "last_success_at", None) or get_setting(gid, "matchday:last_success")
+        embed.add_field(name="Match tracker", value=f"**{state}**\nLast attempt: {stamp(tracker.last_poll_at)}\nLast successful check: {stamp(successful)}\nNext check: {stamp(tracker.next_poll_at)}\nResults: {'On' if tracker.posting_enabled(gid) else 'Off'} · {f'<#{cid}>' if cid else 'No channel'}\nLatest game: {stamp(match_data.latest_match_ts(CLUB_ID))}", inline=False)
+    else:
+        embed.add_field(name="Match tracker", value="Unavailable", inline=False)
+    sessions = bot.get_cog("SessionsCog")
+    settings = session_settings(gid)
+    running = sessions and all(getattr(sessions, name).is_running() for name in ("daily_sessions", "reminders", "session_updates"))
+    next_post = next_session_post(gid)
+    embed.add_field(name="Session scheduling", value=f"Tasks: {'Running' if running else 'Stopped / unavailable'} · Daily posts: {'On' if settings['enabled'] else 'Off'}\nNext post: {f'<t:{next_post}:F>' if next_post else 'None scheduled'}\nKick-off: {settings['kickoff_time']} ({settings['timezone']})", inline=False)
+    news = patch_settings(gid)
+    news_cog = bot.get_cog("PatchNotesCog")
+    embed.add_field(name="EA news", value=f"Posts: {'On' if news['enabled'] else 'Off'} · Task: {'Running' if news_cog and news_cog.ticker.is_running() else 'Stopped / unavailable'}\nLast successful check: {news['last_checked']}", inline=False)
+    copies = sorted(BACKUP_DIR.glob("madboys-????-??-??.sqlite3"), reverse=True)
+    embed.add_field(name="Backups", value=f"{len(copies)} saved · Newest: {copies[0].stem if copies else 'None yet'}\nDaily after 3am ({BOT_TZ})", inline=False)
+    reports = report_settings(gid)
+    with connect() as conn:
+        saved = conn.execute("SELECT COUNT(*) FROM session_history WHERE guild_id=?", (gid,)).fetchone()[0]
+        has_health = conn.execute("SELECT 1 FROM sqlite_master WHERE name='service_health'").fetchone()
+        problems = conn.execute("SELECT service,problem FROM service_health WHERE guild_id=? AND problem IS NOT NULL", (gid,)).fetchall() if has_health else []
+    embed.add_field(name="Session summaries", value=f"Posts: {'On' if reports['enabled'] else 'Off'} · Finish gap: {reports['gap']} minutes\n{saved} sessions saved · Only closes after a successful EA check", inline=False)
+    embed.add_field(name="Needs attention", value=("\n".join(f"**{r['service']}**: {r['problem']}" for r in problems)[:1024] or "No recorded failures. Check the service states above."), inline=False)
+    embed.set_footer(text="Private • Refresh to update these values")
+    return embed
 
 
 def backup_database(source: str, directory: Path, date: str, keep: int = BACKUP_KEEP) -> Path:
@@ -163,14 +225,7 @@ class OperationsCog(commands.Cog):
         if not can_view(interaction.user, interaction.guild):
             await interaction.response.send_message("This report is private.", ephemeral=True)
             return
-        with connect() as conn:
-            problems = conn.execute("SELECT service,problem FROM service_health WHERE guild_id=? AND problem IS NOT NULL",
-                                    (str(interaction.guild_id),)).fetchall()
-        copies = sorted(BACKUP_DIR.glob("madboys-????-??-??.sqlite3"), reverse=True)
-        text = "\n".join(f"⚠️ **{r['service']}**: {r['problem']}" for r in problems) or "✅ No recorded service failures."
-        text += f"\nBackups saved: **{len(copies)}** · newest: **{copies[0].stem if copies else 'None yet'}**"
-        text += "\nDaily backup after 3am; `/maintenance backup` saves and downloads a copy now."
-        await interaction.response.send_message(text[:1900], ephemeral=True)
+        await interaction.response.send_message(embed=status_embed(self.bot, str(interaction.guild_id)), ephemeral=True)
 
     @maintenance.command(name="backup", description="Private: create and download a checked database backup")
     async def backup(self, interaction: discord.Interaction):

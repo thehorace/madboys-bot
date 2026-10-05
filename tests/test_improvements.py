@@ -274,7 +274,7 @@ class OnboardingTests(DatabaseCase):
         self.assertIn("CB, ST", ready.embed().description)
 
     async def test_all_cogs_load_with_commands_and_persistent_views(self):
-        names = ["link", "rotation", "stats", "lineup", "sessions", "motm", "positions", "matchday", "hub", "misc", "usage", "operations", "onboarding", "admin", "patchnotes"]
+        names = ["link", "rotation", "stats", "lineup", "sessions", "motm", "positions", "matchday", "hub", "misc", "usage", "operations", "onboarding", "admin", "patchnotes", "session_reports"]
         async with commands.Bot(command_prefix="!", intents=discord.Intents.none()) as bot:
             bot.ea = Mock()
             for name in names:
@@ -282,6 +282,8 @@ class OnboardingTests(DatabaseCase):
             self.assertIsNotNone(bot.tree.get_command("setup"))
             self.assertIsNotNone(bot.tree.get_command("maintenance"))
             self.assertIsNotNone(bot.tree.get_command("admin"))
+            self.assertIsNotNone(bot.tree.get_command("mysession"))
+            self.assertIsNotNone(bot.tree.get_command("sessionhistory"))
             group = bot.tree.get_command("session")
             self.assertIsNotNone(group.get_command("settings"))
             self.assertIsNotNone(group.get_command("skip"))

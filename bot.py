@@ -35,6 +35,7 @@ COGS = [
     "cogs.onboarding",
     "cogs.admin",
     "cogs.patchnotes",
+    "cogs.session_reports",
 ]
 
 

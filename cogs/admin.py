@@ -8,6 +8,9 @@ from cogs.patchnotes import patch_settings, SOURCE
 from cogs.usage import can_view
 from config import CLUB_COLOUR
 from interaction_tracking import TrackedView, failed
+from db import get_setting, set_setting
+from cogs.operations import status_embed
+from cogs.session_reports import report_settings
 
 
 class ScheduleModal(discord.ui.Modal, title="Daily session schedule"):
@@ -65,11 +68,32 @@ class AdminView(TrackedView):
             return discord.Embed(title="🔒 Private admin panel", colour=CLUB_COLOUR,
                 description="Your bot controls, visible only to you.\n\n"
                             "📊 **Usage** — people, lookups, trends and CSV\n"
-                            "🎮 **Sessions** — daily schedule, channel, waitlist and skip today\n"
-                            "🩺 **Health** — failures and saved backups\n"
+                            "⚙️ **Settings** — sessions, tracker, summaries and EA News\n"
+                            "🩺 **Bot status** — checks, schedules, backups and failures\n"
                             "💾 **Backup** — create and download a database snapshot\n"
-                            "📡 **Tracker status** — latest match check and posting state\n"
-                            "📰 **EA News** — FC 27 patch notes, Pro Clubs and The Grounds")
+                            "🗓️ **Session history** — results, actual players and sign-ups")
+        if self.page == "status":
+            return status_embed(self.bot, str(self.guild.id))
+        if self.page == "settings":
+            return discord.Embed(title="Bot settings", colour=CLUB_COLOUR,
+                description="Choose a section below. All settings save across restarts.\n\n"
+                    "**Sessions** — schedule, timezone, channel, sticky cooldown and waitlist\n"
+                    "**Match tracker** — result posting and match channel\n"
+                    "**Session summaries** — automatic recap, channel and 1–2 hour finish gap\n"
+                    "**EA News** — automatic news and channel\n\nThese controls are private to your allowlist.")
+        if self.page == "reports":
+            settings = report_settings(str(self.guild.id))
+            channel = f"<#{settings['channel']}>" if settings["channel"] else "The session's channel"
+            return discord.Embed(title="Session summary settings", colour=CLUB_COLOUR,
+                description=f"Automatic recaps: **{'On' if settings['enabled'] else 'Off'}**\nFinish after **{settings['gap']} minutes** without a game\nChannel: {channel}\n\n"
+                    "One recap with a private My session summary button. No pings. History saves even when posts are off. "
+                    "Finishing waits for a successful EA check. First game must be within the selected gap after kick-off.")
+        if self.page == "tracker_settings":
+            tracker = self.bot.get_cog("MatchdayCog")
+            gid = str(self.guild.id)
+            cid = tracker.channel_id_for(gid) if tracker else None
+            return discord.Embed(title="Match tracker settings", colour=CLUB_COLOUR,
+                description=f"Result posts: **{'On' if get_setting(gid, 'matchday_enabled') != '0' else 'Off'}**\nChannel: {f'<#{cid}>' if cid else 'Choose a channel'}\n\nMatch data continues to be saved when posting is off. Weekly recaps use this channel too.")
         if self.page == "patchnotes":
             settings = patch_settings(str(self.guild.id))
             channel = f"<#{settings['channel_id']}>" if settings["channel_id"] else "#general"
@@ -77,7 +101,7 @@ class AdminView(TrackedView):
                 description=f"Automatic posts: **{'On' if settings['enabled'] else 'Off'}**\nChannel: {channel}\n"
                             f"Checks every hour. Last successful check: {settings['last_checked']}\n\n"
                             "Patch notes, Pro Clubs and Grounds news post once, with details and the official link. No everyone ping.\n"
-                            "First check posts only the newest current update. Preview latest is private.\n\n"
+                            "Only newly published updates (within 24 hours) are announced. No startup backfill. Preview latest is private.\n\n"
                             f"[Official EA source]({SOURCE})")
         settings = session_settings(str(self.guild.id))
         channel = f"<#{settings['channel_id']}>" if settings["channel_id"] else "#general"
@@ -102,10 +126,28 @@ class AdminView(TrackedView):
     def render(self):
         self.clear_items()
         if self.page == "home":
-            for label, action in (("📊 Usage", "usage"), ("🎮 Sessions", "sessions"), ("🩺 Health", "health"),
-                                  ("💾 Backup", "backup"), ("📡 Tracker status", "tracker")):
+            for label, action in (("📊 Usage", "usage"), ("⚙️ Settings", "settings"), ("🩺 Bot status", "status"),
+                                  ("💾 Backup", "backup"), ("🗓️ Session history", "history")):
                 self.button(label, action)
-            self.button("📰 EA News", "patchnotes", row=1)
+        elif self.page == "status":
+            self.button("Settings", "settings")
+        elif self.page == "settings":
+            for label, action in (("Sessions", "sessions"), ("Match tracker", "tracker_settings"),
+                                  ("Session summaries", "reports"), ("EA News", "patchnotes")):
+                self.button(label, action)
+        elif self.page in ("reports", "tracker_settings"):
+            if self.page == "reports":
+                settings = report_settings(str(self.guild.id))
+                self.button("Disable recaps" if settings["enabled"] else "Enable recaps", "toggle_reports")
+                self.button("Finish gap: 1 hour", "gap60")
+                self.button("Finish gap: 2 hours", "gap120")
+                self.button("Use session channel", "reset_report_channel")
+            else:
+                self.button("Disable result posts" if get_setting(str(self.guild.id), "matchday_enabled") != "0" else "Enable result posts", "toggle_tracker")
+            picker = discord.ui.ChannelSelect(placeholder="Summary channel" if self.page == "reports" else "Match result channel",
+                channel_types=[discord.ChannelType.text], row=1, custom_id="admin:servicechannel")
+            picker.callback = self.choose_service_channel
+            self.add_item(picker)
         elif self.page == "patchnotes":
             settings = patch_settings(str(self.guild.id))
             self.button("Disable patch posts" if settings["enabled"] else "Enable patch posts", "toggle_patchnotes")
@@ -126,6 +168,8 @@ class AdminView(TrackedView):
             picker.callback = self.choose_channel
             self.add_item(picker)
         self.button("Refresh", "refresh", row=2)
+        if self.page not in ("home", "settings"):
+            self.button("All settings", "settings", row=2)
         self.button("Home", "home", row=2)
 
     async def show(self, interaction):
@@ -163,9 +207,31 @@ class AdminView(TrackedView):
     async def act(self, interaction, action):
         if not await self.authorize(interaction):
             return
-        if action in ("sessions", "patchnotes", "home", "refresh"):
+        if action in ("sessions", "patchnotes", "home", "refresh", "settings", "status", "reports", "tracker_settings"):
             if action != "refresh":
                 self.page = action
+            await self.show(interaction)
+        elif action == "history":
+            reports = self.bot.get_cog("SessionReportsCog")
+            if reports:
+                await reports.show_history(interaction, private=True)
+            else:
+                await interaction.response.send_message("Session history is unavailable.", ephemeral=True)
+        elif action in ("toggle_reports", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
+            gid = str(self.guild.id)
+            if action == "toggle_reports":
+                enabled = not report_settings(gid)["enabled"]
+                set_setting(gid, "reports:enabled", "1" if enabled else "0")
+                if not enabled:
+                    from db import connect
+                    with connect() as conn:
+                        conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))
+            elif action.startswith("gap"):
+                set_setting(gid, "reports:gap", action[3:])
+            elif action == "reset_report_channel":
+                set_setting(gid, "reports:channel", None)
+            else:
+                set_setting(gid, "matchday_enabled", "0" if get_setting(gid, "matchday_enabled") != "0" else "1")
             await self.show(interaction)
         elif action == "schedule":
             await interaction.response.send_modal(ScheduleModal(self))
@@ -187,6 +253,21 @@ class AdminView(TrackedView):
             cog, method = {"usage": ("UsageCog", "usage"), "health": ("OperationsCog", "status"),
                            "backup": ("OperationsCog", "backup"), "tracker": ("MatchdayCog", "matchday_status")}[action]
             await self.run_command(interaction, cog, method)
+
+    async def choose_service_channel(self, interaction):
+        if not await self.authorize(interaction):
+            return
+        channel = self.guild.get_channel(int(interaction.data["values"][0]))
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Choose a text channel in this server.", ephemeral=True)
+            return
+        perms = channel.permissions_for(self.guild.me)
+        if not (perms.send_messages and perms.embed_links and perms.view_channel):
+            await interaction.response.send_message("Give the bot View Channel, Send Messages and Embed Links in that channel first.", ephemeral=True)
+            return
+        key = "reports:channel" if self.page == "reports" else "matchday_channel"
+        set_setting(str(self.guild.id), key, str(channel.id))
+        await self.show(interaction)
 
     async def choose_patch_channel(self, interaction):
         if not await self.authorize(interaction):

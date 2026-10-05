@@ -386,6 +386,16 @@ class PanelView(TrackedView):
         from cogs.onboarding import open_setup
         await open_setup(self.bot, interaction)
 
+    @discord.ui.button(label="My session", emoji="📋", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:mysession", row=2)
+    async def my_session(self, interaction: discord.Interaction, _):
+        await self.bot.get_cog("SessionReportsCog").show_personal(interaction)
+
+    @discord.ui.button(label="Session history", emoji="🗓️", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:history", row=2)
+    async def session_history(self, interaction: discord.Interaction, _):
+        await self.bot.get_cog("SessionReportsCog").show_history(interaction)
+
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
@@ -397,6 +407,8 @@ def panel_embed() -> discord.Embed:
                     "👤 **My stats** — your numbers (first time: pick your EA name)\n"
                     "🏆 **Leaderboard** — who's top of the squad\n"
                     "🛠️ **My builds** — tick the positions you've got builds for\n"
+                    "📋 **My session** — your private stats after the session finishes\n"
+                    "🗓️ **Session history** — finished sessions and club results\n"
                     "🧑‍💼 **Manager** — build & post the lineup (managers only)",
         colour=CLUB_COLOUR)
 

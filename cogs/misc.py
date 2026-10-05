@@ -31,6 +31,8 @@ HELP_SECTIONS = [
     ]),
     ("🎮 Sessions & lineups", [
         ("/session create", "Post a 'who's on tonight?' sign-up"),
+        ("/mysession", "Private personal summary after the session finishes"),
+        ("/sessionhistory", "Browse finished sessions and your past summaries"),
         ("/formation show", "Current lineup on a pitch"),
         ("/lineup builder", "Manager: build & post the lineup with buttons (or 🧑‍💼 on the panel)"),
         ("/rotation check", "Who's been stuck in one position"),
@@ -39,7 +41,7 @@ HELP_SECTIONS = [
     ("📡 Match tracking", [
         ("/matchday start", "Manager: choose where results auto-post (one time)"),
         ("/panel", "Manager: post a pinned button panel"),
-        ("/matchday status", "What the tracker is doing"),
+        ("/matchday status", "Private: what the tracker is doing"),
         ("/status", "Is the bot / EA relay healthy?"),
     ]),
 ]

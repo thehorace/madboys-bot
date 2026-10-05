@@ -134,8 +134,8 @@ so the bot remembers posts across deploys.
 
 ## Bot usage stats (private)
 
-**`/admin`** opens an ephemeral admin panel with buttons for Usage, session
-controls, Health, Backup and tracker status. Session controls include schedule
+**`/admin`** opens an ephemeral admin panel with buttons for Usage, Settings,
+Bot status, Backup and Session history. Session controls include schedule
 editing, a channel picker, daily-post/waitlist toggles and Skip today. Every
 button and schedule submission rechecks the panel owner and private allowlist;
 manager roles and server ownership do not bypass this. Panels expire after 14
@@ -161,20 +161,68 @@ but do not count as confirmed successes. Normal chat content is never stored.
 The bot checks [EA's official FC 27 news page](https://www.ea.com/games/ea-sports-fc/fc-27/news)
 hourly for title updates, patch notes and developer/gameplay launch updates,
 plus all Pro Clubs and The Grounds articles identified by their title, summary,
-URL slug or EA tags. This includes guides, feature announcements and events,
-even when the title does not say "update".
+URL slug or EA tags. Grounds/Clubs articles must concern new features, developer
+updates, improvements or fixes. Beginner guides and general events are excluded.
+Featured EA articles are included too. Purchase/edition promotions, launch-reward
+ads and unrelated FUT/Career developer news are excluded. Excerpts put Clubs,
+Grounds and live-issue changes first, with decorative images and table-of-contents
+links removed so those cannot crowd out the details.
 New articles post once in **#general**, with an excerpt of EA's change details,
 publication time and a link to the full official notes. No mentions are sent.
-On first deployment only the newest current update is announced; older articles
-are recorded as seen. Failed fetches or sends are retried without marking the
+The first check quietly records a baseline and sends nothing. Existing installs
+also migrate quietly. Only articles published after that baseline and within
+the last 24 hours are announced, so new filters, featured articles, restarts or
+long downtime cannot replay the archive. Private Preview latest can still show
+the latest existing article on demand. Posts use short excerpts (about 1,500
+characters maximum) and a link rather than dumping a long article.
+Failed fetches or sends are retried without marking the
 unsent update as posted. The seen list survives restarts with the database.
 
-Private **`/admin` → EA News** controls offer enable/disable, a channel picker,
+Private **`/admin` → Settings → EA News** controls offer enable/disable, a channel picker,
 Check EA now and Preview latest. The equivalent `/patchnotes settings`,
 `/patchnotes check` and `/patchnotes latest` commands use the same private allowlist.
 `PATCHNOTES_CHANNEL_ID` sets the initial channel default. If EA blocks the bot or
 changes its page format, the bot reports the problem privately and avoids
 posting empty notes. Edits to an already-seen article do not create another post.
+
+## Bot status, settings and session history
+
+Open **`/admin` → Bot status** for the match tracker's current state, last
+successful EA check (saved across restarts), next check, latest game, session
+tasks and next daily post, EA news check, backups, summary settings and recorded
+failures. A service awaiting its first check is shown as unchecked. Refresh
+updates the panel. `/maintenance status` opens the same report; `/matchday status`
+is now restricted to the private `USAGE_VIEWERS` allowlist too.
+
+**`/admin` → Settings** collects Sessions, Match tracker, Session summaries and
+EA News in one place. The existing allowlist and panel-owner checks apply to
+each change. Schedule, timezone, sticky cooldown, waitlist, channels, posting
+toggles and summary finish gap are saved in SQLite.
+
+After a planned session has no recorded game for **two hours** (default), the
+next successful EA poll saves its history and posts one club recap in the
+session's channel, with no pings. **Settings → Session summaries** lets you
+choose a one-hour or two-hour gap, a recap channel, or disable public recaps
+while still saving history. A new game resets the timer; failed EA checks do
+not finish sessions. Games are grouped from the scheduled start up to the first
+inactivity gap or next session. The first game must occur within the configured
+gap after kick-off; later play after a full inactivity gap needs a new session.
+Stats cover games actually stored by the tracker, and can be incomplete if EA
+did not provide a match while the bot was offline.
+
+The recap's **My session summary** button opens only the clicking player's
+games, goals, assists, average rating, MOTMs, tackles, saves and passing accuracy
+privately. It requires an EA link at completion. **My session** on the main panel
+and `/mysession` show the latest finished club session. Recap buttons survive
+restarts. Initial historical records are saved without public catch-up posts;
+failed sends retry for up to 24 hours after the last game.
+
+**Session history** on the main panel or `/sessionhistory` browses saved sessions,
+results, cancellations and sessions without games, with a session picker and
+older/newer pages. Each player can open their own past summary. **`/admin` →
+Session history** additionally shows actual EA players and frozen RSVP lists.
+Sign-ups are explicitly separate from actual attendance. History and player
+stats survive restarts and remain tied to the EA links at session completion.
 
 ## Guided player setup
 
