@@ -41,8 +41,9 @@ def next_session_post(gid, now=None):
             continue
         midnight = day.replace(hour=0, minute=0, second=0, microsecond=0)
         with connect() as conn:
-            existing = conn.execute("SELECT 1 FROM sessions WHERE guild_id=? AND starts_at>=? AND starts_at<? AND (message_id IS NOT NULL OR cancelled=1)",
-                (gid, int(midnight.timestamp()), int((midnight + timedelta(days=1)).timestamp()))).fetchone()
+            existing = conn.execute("SELECT 1 FROM sessions WHERE guild_id=? AND starts_at>=? AND starts_at<? "
+                "AND (created_by='daily' OR starts_at=?) AND (message_id IS NOT NULL OR cancelled=1)",
+                (gid, int(midnight.timestamp()), int((midnight + timedelta(days=1)).timestamp()), int(start.timestamp()))).fetchone()
         if not existing:
             return int(max(post, now).timestamp())
     return None
@@ -59,7 +60,7 @@ def status_embed(bot, gid):
     def stamp(value):
         return f"<t:{int(value)}:R>" if value else "Not checked yet"
     if tracker:
-        state = "Stopped" if not tracker.ticker.is_running() else "Check failed" if tracker.last_poll_ok is False else "Waiting for first check" if tracker.last_poll_ok is None else "Running"
+        state = "Stopped" if not tracker.ticker.is_running() else "Partial check — session summaries waiting" if getattr(tracker, "last_poll_partial", False) else "Check failed" if tracker.last_poll_ok is False else "Waiting for first check" if tracker.last_poll_ok is None else "Running"
         cid = tracker.channel_id_for(gid)
         successful = getattr(tracker, "last_success_at", None) or get_setting(gid, "matchday:last_success")
         embed.add_field(name="Match tracker", value=f"**{state}**\nLast attempt: {stamp(tracker.last_poll_at)}\nLast successful check: {stamp(successful)}\nNext check: {stamp(tracker.next_poll_at)}\nResults: {'On' if tracker.posting_enabled(gid) else 'Off'} · {f'<#{cid}>' if cid else 'No channel'}\nLatest game: {stamp(match_data.latest_match_ts(CLUB_ID))}", inline=False)
@@ -80,7 +81,11 @@ def status_embed(bot, gid):
         saved = conn.execute("SELECT COUNT(*) FROM session_history WHERE guild_id=?", (gid,)).fetchone()[0]
         has_health = conn.execute("SELECT 1 FROM sqlite_master WHERE name='service_health'").fetchone()
         problems = conn.execute("SELECT service,problem FROM service_health WHERE guild_id=? AND problem IS NOT NULL", (gid,)).fetchall() if has_health else []
-    embed.add_field(name="Session summaries", value=f"Club posts: {'On' if reports['enabled'] else 'Off'} · Personal DMs: {'On' if reports['dms'] else 'Off'}\nFinish gap: {reports['gap']} minutes · {saved} sessions saved\nOnly closes after a successful EA check", inline=False)
+        deliveries = conn.execute("SELECT status,COUNT(*) count FROM session_summary_dms WHERE session_id=("
+            "SELECT h.session_id FROM session_history h JOIN sessions s ON s.id=h.session_id "
+            "WHERE h.guild_id=? AND outcome='completed' ORDER BY s.starts_at DESC,s.id DESC LIMIT 1) GROUP BY status", (gid,)).fetchall()
+    delivery_text = " · ".join(f"{r['count']} {r['status']}" for r in deliveries) or "None recorded"
+    embed.add_field(name="Session summaries", value=f"Club posts: {'On' if reports['enabled'] else 'Off'} · Personal DMs: {'On' if reports['dms'] else 'Off'}\nFinish gap: {reports['gap']} minutes · {saved} sessions saved\nLatest session DMs: {delivery_text}\nOnly closes after a successful EA check", inline=False)
     embed.add_field(name="Needs attention", value=("\n".join(f"**{r['service']}**: {r['problem']}" for r in problems)[:1024] or "No recorded failures. Check the service states above."), inline=False)
     embed.set_footer(text="Private • Refresh to update these values")
     return embed
@@ -211,7 +216,8 @@ class OperationsCog(commands.Cog):
         if tracker:
             stopped = not tracker.ticker.is_running()
             failing = tracker.last_poll_at and not tracker.last_poll_ok
-            problem = "Match checks are failing. Check the EA relay and `/matchday status`." if failing else "The tracker loop stopped. Restart the bot and check logs." if stopped else None
+            problem = ("Some EA match types are unavailable. Available games are still tracked, but session summaries are waiting for a complete check."
+                       if failing and getattr(tracker, "last_poll_partial", False) else "Match checks are failing. Check the EA relay and `/matchday status`." if failing else "The tracker loop stopped. Restart the bot and check logs." if stopped else None)
             await self.health(gid, "Match tracking", problem)
         sessions = self.bot.get_cog("SessionsCog")
         if sessions:

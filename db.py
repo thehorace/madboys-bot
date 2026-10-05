@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS matches (
     PRIMARY KEY (club_id, match_id)
 );
 CREATE INDEX IF NOT EXISTS idx_matches_ts ON matches (club_id, ts);
+CREATE INDEX IF NOT EXISTS idx_matches_opponent ON matches (club_id, opp_id, ts);
 
 CREATE TABLE IF NOT EXISTS match_players (
     club_id         INTEGER NOT NULL,

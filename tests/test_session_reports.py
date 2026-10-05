@@ -306,3 +306,45 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         with db.connect() as conn:
             status = conn.execute("SELECT status FROM session_summary_dms WHERE discord_id='42'").fetchone()[0]
         self.assertEqual(status, "expired")
+
+    async def test_my_session_finds_last_played_session_beyond_first_page(self):
+        self.game("a", self.start + 600)
+        await self.poll(self.start + 8000)
+        with db.connect() as conn:
+            other = json.loads(reports.history("10")[0]["players"])
+            other[0]["discord_ids"] = ["43"]
+            for i in range(25):
+                sid = conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by) VALUES ('10','20',?,'daily')", (self.start + (i + 1) * 86400,)).lastrowid
+                conn.execute("INSERT INTO session_history VALUES (?,'10',?,'completed','[]','[]',?,'suppressed')", (sid, self.start + (i + 1) * 86400, json.dumps(other)))
+        interaction = self.interaction()
+        await self.cog.show_personal(interaction)
+        embed = interaction.response.send_message.call_args.kwargs["embed"]
+        self.assertIn(f"Session #{self.sid} ", embed.description)
+        self.assertIn("1 goals", embed.fields[0].value)
+
+    async def test_finished_session_is_not_reused_for_voice_signups_or_lineups(self):
+        from cogs import sessions
+        self.game("a", self.start + 600)
+        await self.poll(self.start + 8000)
+        with patch.object(sessions.time, "time", return_value=self.start + 8100):
+            self.assertIsNone(sessions.active_session("10"))
+            self.assertIsNone(sessions.current_session_players("10"))
+
+    async def test_status_explains_blocked_dm_and_history_options_include_date(self):
+        self.member.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Blocked")
+        self.game("a", self.start + 600)
+        await self.poll(self.start + 8000)
+        status = operations.status_embed(self.bot, "10")
+        field = next(f for f in status.fields if f.name == "Session summaries")
+        self.assertIn("1 blocked", field.value)
+        view = reports.HistoryView(42, "10", reports.history("10"))
+        picker = next(c for c in view.children if isinstance(c, discord.ui.Select))
+        self.assertIn("2027", picker.options[0].description)
+
+    async def test_next_post_not_hidden_by_unrelated_manual_session(self):
+        db.set_setting("10", "session:timezone", "Asia/Singapore")
+        db.set_setting("10", "session:enabled", "1")
+        now = datetime(2026, 10, 5, 10, tzinfo=ZoneInfo("Asia/Singapore"))
+        with db.connect() as conn:
+            conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by,message_id) VALUES ('10','20',?,'42','100')", (int(now.replace(hour=12).timestamp()),))
+        self.assertEqual(operations.next_session_post("10", now), int(now.replace(hour=11).timestamp()))

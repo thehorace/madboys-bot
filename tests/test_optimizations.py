@@ -82,6 +82,39 @@ class EAClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await ea.get_member_stats(1))
         self.assertEqual(ea._down_until, 0.0)
 
+    async def test_partial_match_history_is_available_but_marked_incomplete(self):
+        ea = ea_client.EAClient()
+        ea.get_recent_matches = AsyncMock(side_effect=[[], None, [], None])
+        partial = await ea.get_recent_matches_multi(1, match_types=["leagueMatch", "playoffMatch"],
+            bypass_cache=True, allow_stale=False)
+        self.assertEqual(partial, [])
+        self.assertFalse(partial.complete)
+        self.assertEqual(await ea.get_recent_matches_multi(1, match_types=["leagueMatch", "playoffMatch"]), [])
+
+    async def test_user_waiting_on_tracker_times_out_without_cancelling_tracker(self):
+        ea = await self.client("http://unused")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fetch(*args):
+            started.set()
+            await release.wait()
+            return [{"name": "Killa"}]
+
+        ea._fetch = AsyncMock(side_effect=fetch)
+        tracker = asyncio.create_task(ea._get("/members", {}, bypass_cache=True, allow_stale=False))
+        try:
+            await started.wait()
+            with patch.object(ea_client, "USER_TIMEOUT", 0.01):
+                self.assertIsNone(await ea._get("/members", {}))
+            self.assertFalse(tracker.done())
+            release.set()
+            self.assertEqual(await tracker, [{"name": "Killa"}])
+            ea._fetch.assert_awaited_once()
+        finally:
+            release.set()
+            await tracker
+
 
 class SurviveTests(unittest.IsolatedAsyncioTestCase):
     async def test_loop_keeps_running_after_an_unexpected_error(self):
@@ -107,6 +140,47 @@ class NameCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("left server", await utils.resolve_name(guild, "5"))
         self.assertIn("left server", await utils.resolve_name(guild, "5"))
         guild.fetch_member.assert_awaited_once()
+
+    async def test_membership_miss_in_one_server_does_not_hide_member_in_another(self):
+        utils._LEFT.clear()
+        first = SimpleNamespace(id=1, get_member=lambda _: None, fetch_member=AsyncMock(side_effect=
+            discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "gone")))
+        second = SimpleNamespace(id=2, get_member=lambda _: None,
+            fetch_member=AsyncMock(return_value=SimpleNamespace(display_name="Fauz")))
+        await utils.resolve_name(first, "42")
+        self.assertEqual(await utils.resolve_name(second, "42"), "Fauz")
+        second.fetch_member.assert_awaited_once()
+
+
+class SharePermissionTests(unittest.IsolatedAsyncioTestCase):
+    def menu_and_interaction(self, target_access):
+        from cogs.hub import StatsMenu
+        menu = object.__new__(StatsMenu)
+        menu.guild_id, menu.png, menu.embed = "10", None, discord.Embed(title="Stats")
+        target = SimpleNamespace(mention="#results", send=AsyncMock(), permissions_for=lambda _: target_access)
+        source = SimpleNamespace(permissions_for=lambda _: SimpleNamespace(send_messages=False))
+        menu.bot = SimpleNamespace(get_cog=lambda _: SimpleNamespace(channel_id_for=lambda _: 20), get_channel=lambda _: target)
+        interaction = SimpleNamespace(user=SimpleNamespace(mention="@Fauz"), channel=source, extras={},
+            response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock()))
+        return menu, interaction, target
+
+    async def test_share_cannot_write_into_hidden_or_read_only_destination(self):
+        for view, send in ((False, True), (True, False)):
+            menu, interaction, target = self.menu_and_interaction(SimpleNamespace(view_channel=view, send_messages=send))
+            await menu._share(interaction)
+            target.send.assert_not_awaited()
+            self.assertEqual(interaction.extras["usage_status"], "failed")
+
+    async def test_share_with_permissions_acknowledges_before_posting(self):
+        menu, interaction, target = self.menu_and_interaction(SimpleNamespace(view_channel=True, send_messages=True))
+
+        async def post(**kwargs):
+            interaction.response.defer.assert_awaited_once()
+
+        target.send.side_effect = post
+        await menu._share(interaction)
+        target.send.assert_awaited_once()
+        interaction.followup.send.assert_awaited_once()
 
 
 class SessionEdgeTests(unittest.IsolatedAsyncioTestCase):

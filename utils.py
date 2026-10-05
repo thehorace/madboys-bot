@@ -38,7 +38,7 @@ def is_manager(member: discord.abc.User) -> bool:
     return any(r.name.lower() in MANAGER_ROLE_NAMES for r in getattr(member, "roles", []))
 
 
-_LEFT: dict[int, float] = {}       # discord id -> when Discord said they're not in the server
+_LEFT: dict[tuple[int, int], float] = {}  # (guild id, user id) -> membership miss
 _LEFT_TTL = 6 * 3600
 
 
@@ -51,14 +51,18 @@ async def resolve_name(guild: discord.Guild, discord_id: str) -> str:
     if member:
         return member.display_name
     import time
-    if time.time() - _LEFT.get(int(discord_id), 0) < _LEFT_TTL:
+    key = (getattr(guild, "id", 0), int(discord_id))
+    now = time.time()
+    for expired in [k for k, ts in _LEFT.items() if now - ts >= _LEFT_TTL]:
+        del _LEFT[expired]
+    if now - _LEFT.get(key, 0) < _LEFT_TTL:
         return f"<left server: {discord_id}>"   # asked recently; skip the slow API call
     try:
         member = await guild.fetch_member(int(discord_id))
         return member.display_name
     except discord.NotFound:
         import time
-        _LEFT[int(discord_id)] = time.time()
+        _LEFT[key] = time.time()
         return f"<left server: {discord_id}>"
     except discord.HTTPException as e:
         log.warning(f"fetch_member failed for {discord_id}: {e}")

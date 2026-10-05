@@ -2,6 +2,7 @@
 import json
 import logging
 import time
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -17,10 +18,13 @@ log = logging.getLogger("madboys-bot.session_reports")
 
 
 def report_settings(gid):
-    return {"enabled": get_setting(gid, "reports:enabled") != "0",
-            "dms": get_setting(gid, "reports:dms") != "0",
-            "gap": int(get_setting(gid, "reports:gap") or 120),
-            "channel": get_setting(gid, "reports:channel")}
+    with connect() as conn:
+        saved = {r["key"]: r["value"] for r in conn.execute(
+            "SELECT key,value FROM settings WHERE guild_id=? AND key LIKE 'reports:%'", (gid,))}
+    return {"enabled": saved.get("reports:enabled") != "0",
+            "dms": saved.get("reports:dms") != "0",
+            "gap": int(saved.get("reports:gap") or 120),
+            "channel": saved.get("reports:channel")}
 
 
 def history(gid, session_id=None, offset=0):
@@ -30,12 +34,23 @@ def history(gid, session_id=None, offset=0):
         if session_id is not None:
             query += " AND h.session_id=?"
             args.append(session_id)
-        return [dict(r) for r in conn.execute(query + " ORDER BY s.starts_at DESC LIMIT 20 OFFSET ?", [*args, offset])]
+        return [dict(r) for r in conn.execute(query + " ORDER BY s.starts_at DESC,s.id DESC LIMIT 20 OFFSET ?", [*args, offset])]
+
+
+def latest_personal(gid, discord_id):
+    """Find this player's latest session directly, even beyond the first history page."""
+    with connect() as conn:
+        row = conn.execute("SELECT h.*,s.starts_at,s.note FROM session_history h JOIN sessions s ON s.id=h.session_id "
+            "WHERE h.guild_id=? AND h.outcome='completed' AND EXISTS "
+            "(SELECT 1 FROM json_each(h.players) p, json_each(p.value,'$.discord_ids') d WHERE d.value=?) "
+            "ORDER BY s.starts_at DESC,s.id DESC LIMIT 1", (gid, discord_id)).fetchone()
+    return dict(row) if row else None
 
 
 def archive_sessions(gid, now):
     """Group timestamped matches by planned session and inactivity; atomic snapshots."""
-    gap = report_settings(gid)["gap"] * 60
+    settings = report_settings(gid)
+    gap = settings["gap"] * 60
     baseline = int(get_setting(gid, "reports:since") or now)
     if get_setting(gid, "reports:since") is None:
         set_setting(gid, "reports:since", str(now))
@@ -46,6 +61,7 @@ def archive_sessions(gid, now):
                                 (gid, now)).fetchall()
         if not sessions:
             return
+        links = get_all_links(gid)
         # Matches already given to a session: only recent history can overlap these sessions.
         oldest = min(s["starts_at"] for s in sessions)
         assigned = {mid for r in conn.execute("SELECT match_ids FROM session_history WHERE guild_id=? AND ended_at>=?",
@@ -80,7 +96,6 @@ def archive_sessions(gid, now):
                 players = [dict(p) for p in conn.execute(
                     f"SELECT name,COUNT(*) games,SUM(goals) goals,SUM(assists) assists,AVG(rating) rating,SUM(motm) motm,SUM(saves) saves,SUM(tackles_made) tackles,SUM(passes_made) passes,SUM(pass_attempts) attempts FROM match_players WHERE club_id=? AND match_id IN ({marks}) GROUP BY name COLLATE NOCASE",
                     [CLUB_ID, *ids])]
-            links = get_all_links(gid)
             for player in players:
                 player["discord_ids"] = [did for did, name in links.items() if name.casefold() == player["name"].casefold()]
             rsvps = [dict(r) for r in conn.execute("SELECT discord_id,status,source FROM session_rsvps WHERE session_id=?", (s["id"],))]
@@ -90,7 +105,7 @@ def archive_sessions(gid, now):
             conn.execute("INSERT INTO session_history VALUES (?,?,?,?,?,?,?,?)", (s["id"], gid,
                 matches[-1]["ts"] if matches else now, "cancelled" if cancelled else "completed" if matches else "no games",
                 json.dumps(ids), json.dumps(rsvps), json.dumps(players), message))
-            if message is None and ids and report_settings(gid)["dms"]:
+            if message is None and ids and settings["dms"]:
                 recipients = {did for p in players for did in p["discord_ids"]}
                 conn.executemany("INSERT OR IGNORE INTO session_summary_dms (session_id,discord_id) VALUES (?,?)",
                                  [(s["id"], did) for did in recipients])
@@ -148,9 +163,11 @@ class HistoryView(TrackedView):
         self.user_id, self.guild_id, self.private = user_id, guild_id, private
         self.offset = offset
         self.selected = records[0]["session_id"]
+        from cogs.sessions import _tz
+        zone = _tz(guild_id)
         picker = discord.ui.Select(placeholder="Choose a finished session", custom_id="sessions:history-select",
             options=[discord.SelectOption(label=f"Session #{r['session_id']}", value=str(r["session_id"]),
-                description=f"{r['outcome'].capitalize()} · {len(json.loads(r['match_ids']))} games") for r in records])
+                description=f"{datetime.fromtimestamp(r['starts_at'], zone):%d %b %Y %H:%M} · {r['outcome'].capitalize()} · {len(json.loads(r['match_ids']))} games") for r in records])
         picker.callback = self.choose
         self.add_item(picker)
 
@@ -241,10 +258,11 @@ class SessionReportsCog(commands.Cog):
             pending = conn.execute("SELECT d.session_id,d.discord_id,h.ended_at FROM session_summary_dms d "
                 "JOIN session_history h ON h.session_id=d.session_id WHERE h.guild_id=? AND d.status='pending'", (gid,)).fetchall()
         errors = []
+        enabled = report_settings(gid)["dms"]
         for delivery in pending:
             sid, did = delivery["session_id"], delivery["discord_id"]
             status, message_id = "pending", None
-            if not report_settings(gid)["dms"]:
+            if not enabled:
                 status = "suppressed"
             elif now - delivery["ended_at"] > 86400:
                 status = "expired"
@@ -289,9 +307,9 @@ class SessionReportsCog(commands.Cog):
             view=HistoryView(interaction.user.id, str(interaction.guild_id), records, private) if records else None, ephemeral=True)
 
     async def show_personal(self, interaction):
-        records = [r for r in history(str(interaction.guild_id)) if r["outcome"] == "completed"]
-        await interaction.response.send_message(embed=recap_embed(records[0], str(interaction.user.id)) if records else None,
-            content=None if records else "No completed session yet. Your summary appears after the inactivity gap.", ephemeral=True)
+        record = latest_personal(str(interaction.guild_id), str(interaction.user.id))
+        await interaction.response.send_message(embed=recap_embed(record, str(interaction.user.id)) if record else None,
+            content=None if record else "No finished session is linked to you yet. Link your EA account through Setup before playing; summaries appear after the inactivity gap.", ephemeral=True)
 
     @app_commands.command(name="sessionhistory", description="Browse finished sessions and club results")
     @app_commands.guild_only()

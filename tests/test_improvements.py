@@ -289,6 +289,12 @@ class OnboardingTests(DatabaseCase):
             self.assertIsNotNone(group.get_command("skip"))
             for command in bot.tree.get_commands():
                 command.to_dict(bot.tree)
+            from cogs.misc import HELP_SECTIONS
+            advertised = {name[1:] for _, entries in HELP_SECTIONS for name, _ in entries}
+            actual = {command.qualified_name for command in bot.tree.walk_commands()}
+            self.assertFalse(advertised - actual, f"Help advertises missing commands: {advertised - actual}")
+            for _, entries in HELP_SECTIONS:
+                self.assertLessEqual(len("\n".join(f"`{c}` — {d}" for c, d in entries)), 1024)
 
     async def test_static_decorated_button_callbacks_are_tracked(self):
         class TestView(TrackedView):

@@ -200,7 +200,8 @@ def active_session(guild_id: str, before_minutes: int = 12 * 60) -> Optional[dic
     now = time.time()
     with connect() as conn:
         row = conn.execute("""
-            SELECT * FROM sessions WHERE guild_id=? AND cancelled=0 AND starts_at BETWEEN ? AND ?
+            SELECT * FROM sessions s WHERE guild_id=? AND cancelled=0 AND starts_at BETWEEN ? AND ?
+            AND NOT EXISTS (SELECT 1 FROM session_history h WHERE h.session_id=s.id)
             ORDER BY ABS(starts_at - ?) LIMIT 1
         """, (guild_id, int(now - 3 * 3600), int(now + before_minutes * 60), int(now))).fetchone()
     return dict(row) if row else None
@@ -262,12 +263,7 @@ def current_session_players(guild_id: str) -> Optional[list[str]]:
     starting within 12h). None if there's no such session — callers then fall
     back to everyone.
     """
-    now = time.time()
-    with connect() as conn:
-        row = conn.execute("""
-            SELECT id FROM sessions WHERE guild_id=? AND cancelled=0 AND starts_at BETWEEN ? AND ?
-            ORDER BY ABS(starts_at - ?) LIMIT 1
-        """, (guild_id, int(now - 3 * 3600), int(now + 12 * 3600), int(now))).fetchone()
+    row = active_session(guild_id)
     if not row:
         return None
     return get_rsvps(row["id"])["yes"]

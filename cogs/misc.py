@@ -18,6 +18,7 @@ HELP_SECTIONS = [
         ("/me", "Your stats + your last games (after /link me)"),
         ("/playerstats", "Anyone's season or career stats"),
         ("/leaderboard", "Rank the squad by goals, assists, rating..."),
+        ("/passing", "Passing accuracy and volume by position"),
         ("/compare", "Two players side by side"),
         ("/form", "Recent results"),
         ("/h2h", "Record vs a specific club"),
@@ -31,6 +32,8 @@ HELP_SECTIONS = [
     ]),
     ("🎮 Sessions & lineups", [
         ("/session create", "Post a 'who's on tonight?' sign-up"),
+        ("/session list", "Upcoming sessions and sign-ups"),
+        ("/session cancel", "Manager: cancel the next upcoming session"),
         ("/mysession", "Private personal summary after the session finishes"),
         ("/sessionhistory", "Browse finished sessions and your past summaries"),
         ("/formation show", "Current lineup on a pitch"),

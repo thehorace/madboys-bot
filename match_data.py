@@ -274,6 +274,23 @@ def head_to_head(club_id: int, opp_name: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def rematch_line(club_id: int, match: ParsedMatch) -> Optional[str]:
+    """Only meetings before this match; later catch-up results must not leak in."""
+    if not match.opp_id and match.opp_name in ("Unknown", "", None):
+        return None
+    with connect() as conn:
+        opponent = "opp_id=?" if match.opp_id else "opp_name=? COLLATE NOCASE"
+        rows = conn.execute("SELECT result,our_goals,opp_goals,COUNT(*) OVER () AS meetings FROM matches "
+            f"WHERE club_id=? AND ts<? AND match_id<>? AND {opponent} ORDER BY ts DESC,match_id DESC LIMIT 2",
+            (club_id, match.ts, match.match_id, match.opp_id or match.opp_name)).fetchall()
+    if not rows:
+        return None
+    meeting = rows[0]["meetings"] + 1
+    suffix = "th" if 10 <= meeting % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(meeting % 10, "th")
+    results = " · ".join(f"{RESULT_EMOJI.get(r['result'], '▫️')} {r['our_goals']}–{r['opp_goals']}" for r in reversed(rows))
+    return f"{meeting}{suffix} meeting · Previously: {results}"
+
+
 def streak(results: list[str]) -> str:
     """results newest-first, e.g. ['W','W','L'] -> 'W2'."""
     if not results:

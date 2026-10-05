@@ -65,7 +65,8 @@ Not everyone likes typing slash commands, so there's a menu too:
 - **`/stats`** opens a private menu (only you see it) with buttons and dropdowns
   for everything: last game, club stats, form, recap, any player, leaderboards,
   compare, head-to-head. First-timers link their EA name by picking it from a
-  dropdown. **📢 Share** posts whatever you're looking at to the channel.
+  dropdown. **📢 Share** posts what you're viewing only to a channel where you
+  have View Channel and Send Messages permissions, including any fallback channel.
 - **`/panel`** (managers) posts a pinned message with big buttons. Anyone can
   click it anytime, even after restarts, and never has to type anything.
   **`/panel sticky:True`** keeps it at the bottom of a busy channel instead: once
@@ -190,7 +191,8 @@ posting empty notes. Edits to an already-seen article do not create another post
 Open **`/admin` → Bot status** for the match tracker's current state, last
 successful EA check (saved across restarts), next check, latest game, session
 tasks and next daily post, EA news check, backups, summary settings and recorded
-failures. A service awaiting its first check is shown as unchecked. Refresh
+failures, plus sent/pending/blocked personal DM counts for the latest completed
+session. A service awaiting its first check is shown as unchecked. Refresh
 updates the panel. `/maintenance status` opens the same report; `/matchday status`
 is now restricted to the private `USAGE_VIEWERS` allowlist too.
 
@@ -207,7 +209,10 @@ DM to each linked player recorded by EA as actually playing, regardless of RSVP.
 **Settings → Session summaries** lets you choose a one-hour or two-hour gap, a
 recap channel, and independently enable/disable club posts and personal DMs
 while still saving history. A new game resets the timer; failed EA checks do
-not finish sessions. Games are grouped from the scheduled start up to the first
+not finish sessions. Available match results are stored and posted immediately
+even if another match type fails. Session completion requires fresh results for
+every configured match type; a failed playoff fetch cannot be mistaken for inactivity. Games are
+grouped from the scheduled start up to the first
 inactivity gap or next session. The first game must occur within the configured
 gap after kick-off; later play after a full inactivity gap needs a new session.
 Stats cover games actually stored by the tracker, and can be incomplete if EA
@@ -216,7 +221,8 @@ did not provide a match while the bot was offline.
 The recap's **My session summary** button opens only the clicking player's
 games, goals, assists, average rating, MOTMs, tackles, saves and passing accuracy
 privately. It requires an EA link at completion. **My session** on the main panel
-and `/mysession` show the latest finished club session. Recap buttons survive
+and `/mysession` show your latest finished session that you actually played,
+even if it is older than the first history page. Recap buttons survive
 restarts. Initial historical records are saved without public catch-up posts;
 failed sends retry for up to 24 hours after the last game.
 DM delivery is saved per session and recipient so successful DMs are not resent
@@ -226,11 +232,19 @@ can still open their summaries from the panel. Existing archived sessions are
 not sent retroactively when this feature is deployed or DMs are enabled.
 
 **Session history** on the main panel or `/sessionhistory` browses saved sessions,
-results, cancellations and sessions without games, with a session picker and
+results, cancellations and sessions without games, with dates and local start
+times in the session picker and
 older/newer pages. Each player can open their own past summary. **`/admin` →
 Session history** additionally shows actual EA players and frozen RSVP lists.
 Sign-ups are explicitly separate from actual attendance. History and player
 stats survive restarts and remain tied to the EA links at session completion.
+
+Result posts include a short rematch note when the opponent has been played
+before, using its EA club ID and only meetings before that result. The note shows
+the meeting number and up to two previous scores, even if the club has renamed
+itself. Later games in a catch-up batch are excluded. `/help` includes passing
+stats and the session list/cancel commands; tests check that every advertised
+command exists and fits Discord's embed limits.
 
 ## Guided player setup
 

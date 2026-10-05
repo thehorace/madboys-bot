@@ -327,14 +327,21 @@ class StatsMenu(TrackedView):
                 await interaction.response.send_message(
                     "You can't post in this channel, and no results channel is set to share to.", ephemeral=True)
                 return
+        destination_perms = target.permissions_for(interaction.user) if hasattr(target, "permissions_for") else None
+        if destination_perms is not None and not (destination_perms.view_channel and destination_perms.send_messages):
+            failed(interaction)
+            await interaction.response.send_message("You need permission to view and send messages in the destination channel to share there.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             extra = {"file": S.card_file(self.png)} if self.png else {}
             await target.send(content=f"📢 Shared by {interaction.user.mention}", embed=self.embed,
                               allowed_mentions=discord.AllowedMentions.none(), **extra)
             where = "" if target == interaction.channel else f" in {target.mention}"
-            await interaction.response.send_message(f"Posted{where} ✅", ephemeral=True)
+            await interaction.followup.send(f"Posted{where} ✅", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("I'm not allowed to post there.", ephemeral=True)
+            failed(interaction)
+            await interaction.followup.send("I'm not allowed to post there.", ephemeral=True)
 
 
 class PanelView(TrackedView):

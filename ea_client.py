@@ -62,6 +62,13 @@ def _human_age(seconds: float) -> str:
     return f"{seconds / 86400:.0f} days"
 
 
+class MatchHistory(list):
+    """A normal list with completeness attached to this particular fetch."""
+    def __init__(self, matches, *, complete):
+        super().__init__(matches)
+        self.complete = complete
+
+
 class EAClient:
     def __init__(self, platform: str = "common-gen5"):
         self.platform = platform
@@ -139,7 +146,11 @@ class EAClient:
         # Same request already on its way? Wait for that one instead of sending another.
         pending = self._inflight.get(key)
         if pending is not None and not bypass_cache:
-            data = await asyncio.shield(pending)
+            try:
+                # A tracker request may wait longer than a person should have to.
+                data = await asyncio.wait_for(asyncio.shield(pending), timeout=USER_TIMEOUT)
+            except asyncio.TimeoutError:
+                return fallback()
             return data if data is not None else fallback()
 
         fut = asyncio.get_running_loop().create_future()
@@ -238,9 +249,10 @@ class EAClient:
     ) -> Optional[list]:
         """
         EA partitions match history by matchType, so "leagueMatch" alone misses
-        playoff games. Fetch each type (in parallel), tag each match with its
+        playoff games. Fetch each type, tag each match with its
         type, dedupe, sort newest-first, return the top `count`.
-        Returns None only if *every* request failed.
+        Returns None if every request failed. Available games remain usable when
+        a type fails; complete=False prevents the tracker from closing sessions.
         (Sequential on purpose: the stale-data flag is a context variable, and
         asyncio.gather would run each fetch in a copied context and lose it.)
         """
@@ -263,8 +275,7 @@ class EAClient:
                 if not mid or mid in seen:
                     continue
                 seen.add(mid)
-                m.setdefault("_matchType", mt)
-                merged.append(m)
+                merged.append({**m, "_matchType": m.get("_matchType") or mt})
 
         def ts(m: dict) -> int:
             try:
@@ -273,7 +284,7 @@ class EAClient:
                 return 0
 
         merged.sort(key=ts, reverse=True)
-        return merged[:count]
+        return MatchHistory(merged[:count], complete=all(r is not None for r in results))
 
     async def get_member_stats(self, club_id: int, career: bool = False, bypass_cache: bool = False) -> Optional[list]:
         path = "/members/career" if career else "/members"

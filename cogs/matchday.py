@@ -145,6 +145,7 @@ class MatchdayCog(commands.Cog):
         self.ea = bot.ea
         self.last_poll_at: Optional[float] = None
         self.last_poll_ok: Optional[bool] = None
+        self.last_poll_partial = False
         self.last_success_at: Optional[float] = None
         self.last_new_at: Optional[float] = None
         self._polling = False
@@ -232,10 +233,13 @@ class MatchdayCog(commands.Cog):
             return "played a match recently"
 
         # 4. a /session is on (15 min before kick-off to ~3h after)
+        if not guild:
+            return None
         with connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM sessions WHERE cancelled=0 AND starts_at BETWEEN ? AND ? LIMIT 1",
-                (int(now - window - 3 * 3600), int(now + 15 * 60)),
+                "SELECT 1 FROM sessions s WHERE guild_id=? AND cancelled=0 AND starts_at BETWEEN ? AND ? "
+                "AND NOT EXISTS (SELECT 1 FROM session_history h WHERE h.session_id=s.id) LIMIT 1",
+                (str(guild.id), int(now - window - 3 * 3600), int(now + 15 * 60)),
             ).fetchone()
         return "a session is on" if row else None
 
@@ -296,6 +300,7 @@ class MatchdayCog(commands.Cog):
             return count
         except Exception:
             self.last_poll_ok = False
+            self.last_poll_partial = False
             raise
         finally:
             self._polling = False
@@ -303,7 +308,8 @@ class MatchdayCog(commands.Cog):
     async def _poll_once(self) -> int:
         self.last_poll_at = time.time()
         raw_matches = await self.ea.get_recent_matches_multi(CLUB_ID, count=10, bypass_cache=True, allow_stale=False)
-        self.last_poll_ok = raw_matches is not None
+        self.last_poll_partial = raw_matches is not None and not getattr(raw_matches, "complete", True)
+        self.last_poll_ok = raw_matches is not None and not self.last_poll_partial
         if not raw_matches:
             return 0
 
@@ -396,6 +402,9 @@ class MatchdayCog(commands.Cog):
                 await channel.send(f"📡 Caught up on {len(skipped)} earlier result(s): {clip(summary, 1800)}")
             for i, pm in enumerate(to_post):
                 embed, file = await md.match_post(pm, footer_extra=footer if i == len(to_post) - 1 else "")
+                rematch = md.rematch_line(CLUB_ID, pm)
+                if rematch:
+                    embed.add_field(name="🔁 Rematch", value=rematch, inline=False)
                 await channel.send(content="📡 **Full time!**", embed=embed, **({"file": file} if file else {}))
                 # "where did you play?" for anyone whose exact position isn't known
                 pos_cog = self.bot.get_cog("PositionsCog")
@@ -537,7 +546,7 @@ class MatchdayCog(commands.Cog):
             f"**Mode:** {'🟢 active' if active else '💤 idle'} — checks every "
             f"{POLL_ACTIVE_MINUTES if active else POLL_IDLE_MINUTES:g} min" + (f" ({reason})" if reason else
             " (speeds up when 2+ of the squad are in voice, a /session is on, or you just played)"),
-            "**Last check:** " + (f"<t:{int(self.last_poll_at)}:R> ({'ok' if self.last_poll_ok else 'failed — relay/EA unreachable'})"
+            "**Last check:** " + (f"<t:{int(self.last_poll_at)}:R> ({'partial — some match types unavailable' if getattr(self, 'last_poll_partial', False) else 'ok' if self.last_poll_ok else 'failed — relay/EA unreachable'})"
                                    if self.last_poll_at else "not yet"),
             f"**Next check:** <t:{int(self.next_poll_at)}:R>" if self.next_poll_at else "",
             f"**Matches stored:** {md.match_count(CLUB_ID)}",
@@ -555,7 +564,9 @@ class MatchdayCog(commands.Cog):
             await interaction.followup.send("A check is already running — give it a few seconds.", ephemeral=True)
             return
         n = await self.poll_once()
-        if not self.last_poll_ok:
+        if getattr(self, "last_poll_partial", False):
+            await interaction.followup.send(f"Checked part of EA history — {n} new match(es). Available results post normally; session summaries wait until every match type can be checked.", ephemeral=True)
+        elif not self.last_poll_ok:
             await interaction.followup.send("Couldn't reach EA (the relay may be offline). Try again later.",
                                             ephemeral=True)
         else:
