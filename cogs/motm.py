@@ -31,7 +31,7 @@ from cogs.link import get_link
 from config import CLUB_NAME, MOTM_VOTE_MINUTES
 from db import connect, now_iso
 from interaction_tracking import TrackedView, failed
-from utils import clip, is_manager
+from utils import clip, is_manager, survive
 
 log = logging.getLogger("madboys-bot.motm")
 
@@ -244,6 +244,7 @@ class MotmCog(commands.Cog):
             log.warning(f"Couldn't update MOTM poll {poll['match_id']}")
 
     @tasks.loop(seconds=20)  # short votes should close on time, not up to a minute late
+    @survive
     async def closer(self):
         with connect() as conn:
             due = [dict(r) for r in conn.execute(

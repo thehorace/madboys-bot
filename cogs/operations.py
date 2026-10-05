@@ -13,6 +13,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils import survive
+
 from config import BOT_TZ, DB_PATH, GUILD_ID
 from db import connect, get_setting
 
@@ -179,7 +181,10 @@ class OperationsCog(commands.Cog):
             return await asyncio.to_thread(backup_database, DB_PATH, BACKUP_DIR, date)
 
     @tasks.loop(minutes=30)
+    @survive
     async def backups(self):
+        from cogs.usage import prune_usage
+        prune_usage()   # so the usage log can't grow forever between redeploys
         guild = self.guild()
         now = datetime.now(ZoneInfo(BOT_TZ))
         target = BACKUP_DIR / f"madboys-{now.date().isoformat()}.sqlite3"
@@ -196,6 +201,7 @@ class OperationsCog(commands.Cog):
                 await self.health(str(guild.id), "Database backups")
 
     @tasks.loop(minutes=5)
+    @survive
     async def monitor(self):
         guild = self.guild()
         if not guild:

@@ -70,6 +70,12 @@ def init_usage():
             if column not in have:
                 conn.execute(f"ALTER TABLE usage_log ADD COLUMN {column} {declaration}")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_interaction ON usage_log (interaction_id)")
+    prune_usage()
+
+
+def prune_usage():
+    """Drop usage rows older than USAGE_KEEP_DAYS (run at startup and by the 30-min backups loop)."""
+    with connect() as conn:
         conn.execute("DELETE FROM usage_log WHERE ts < ?", (int(time.time()) - USAGE_KEEP_DAYS * 86400,))
 
 

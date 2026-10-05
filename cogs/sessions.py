@@ -33,7 +33,7 @@ from discord.ext import commands, tasks
 
 from config import BOT_TZ, CLUB_COLOUR, CLUB_NAME, DAILY_SESSIONS, GUILD_ID, SESSION_CHANNEL_ID
 from db import connect, now_iso, set_setting
-from utils import is_manager, resolve_name
+from utils import is_manager, resolve_name, survive
 from interaction_tracking import TrackedView, failed
 from cogs.operations import report_health
 from cogs.usage import can_view
@@ -356,13 +356,16 @@ class SessionsCog(commands.Cog):
                     "AND starts_at>? AND message_id IS NOT NULL",
                     (str(message.guild.id), str(message.channel.id), int(time.time()))).fetchall()
                 due = []
+                cooldown = None
                 for row in rows:
                     # Ignore delayed events from before the latest sign-up.
                     if message.id <= int(row["message_id"]):
                         continue
                     count = min(STICKY_AFTER_MESSAGES, row["sticky_messages"] + 1)
-                    conn.execute("UPDATE sessions SET sticky_messages=? WHERE id=?", (count, row["id"]))
-                    cooldown = session_settings(str(message.guild.id))["cooldown"]
+                    if count != row["sticky_messages"]:   # no write once it's capped
+                        conn.execute("UPDATE sessions SET sticky_messages=? WHERE id=?", (count, row["id"]))
+                    if cooldown is None:
+                        cooldown = session_settings(str(message.guild.id))["cooldown"]
                     if count >= STICKY_AFTER_MESSAGES and time.time() - row["sticky_at"] >= cooldown:
                         due.append(dict(row))
             for s in due:
@@ -542,9 +545,12 @@ class SessionsCog(commands.Cog):
                 hour=h, minute=m, second=0, microsecond=0).timestamp())
             if new != s["starts_at"]:
                 with connect() as conn:
-                    if new > now:   # back to "upcoming": buttons, reminder and started-status all re-arm
-                        conn.execute("UPDATE sessions SET starts_at=?, reminded=0, started_shown=0 WHERE id=?",
-                                     (new, s["id"]))
+                    if new > now:   # back to "upcoming": buttons and started-status re-arm
+                        # Re-send the reminder only if it hasn't gone out, or kick-off moved well away
+                        # (a 10-minute nudge shouldn't ping everyone twice).
+                        rearm = not s["reminded"] or new - now > REMIND_MINUTES * 60
+                        conn.execute("UPDATE sessions SET starts_at=?, reminded=?, started_shown=0 WHERE id=?",
+                                     (new, 0 if rearm else 1, s["id"]))
                     else:
                         conn.execute("UPDATE sessions SET starts_at=? WHERE id=?", (new, s["id"]))
                 notes.append(f"kick-off moved to <t:{new}:t>" + ("" if new > now else " (already passed, so sign-ups are closed)"))
@@ -602,8 +608,9 @@ class SessionsCog(commands.Cog):
         set_setting(gid, "session:skip_date", local.date().isoformat())
         with connect() as conn:
             rows = [dict(r) for r in conn.execute("SELECT * FROM sessions WHERE guild_id=? AND created_by='daily' "
-                                                "AND cancelled=0 AND starts_at>=? AND starts_at<?",
-                                                (gid, int(midnight.timestamp()), int((midnight + timedelta(days=1)).timestamp())))]
+                                                "AND cancelled=0 AND starts_at>=? AND starts_at<? AND starts_at>?",
+                                                (gid, int(midnight.timestamp()), int((midnight + timedelta(days=1)).timestamp()),
+                                                 int(time.time())))]
             for s in rows:
                 conn.execute("UPDATE sessions SET cancelled=1 WHERE id=?", (s["id"],))
         for s in rows:
@@ -623,16 +630,16 @@ class SessionsCog(commands.Cog):
     @app_commands.describe(day="Which day", time="Kick-off time, e.g. 21:00 or 9pm", note="Optional note")
     @app_commands.choices(day=[app_commands.Choice(name=d.capitalize(), value=d) for d in DAYS])
     async def session_create(self, interaction: discord.Interaction, day: app_commands.Choice[str], time: str,
-                             note: Optional[str] = None):
+                             note: Optional[app_commands.Range[str, 1, 500]] = None):
         hm = parse_time(time)
         if not hm:
             failed(interaction)
             await interaction.response.send_message("Couldn't read that time — try `21:00` or `9pm`.", ephemeral=True)
             return
         start = resolve_start(day.value, hm, datetime.now(_tz(str(interaction.guild_id))))
-        if start.timestamp() < datetime.now(_tz()).timestamp() - 3600:
+        if start.timestamp() <= datetime.now(_tz()).timestamp():
             failed(interaction)
-            await interaction.response.send_message("That time has already passed today — pick Tomorrow?",
+            await interaction.response.send_message("That time has already passed — pick a later time or Tomorrow?",
                                                     ephemeral=True)
             return
         with connect() as conn:
@@ -672,21 +679,25 @@ class SessionsCog(commands.Cog):
             failed(interaction)
             await interaction.response.send_message("Managers only.", ephemeral=True)
             return
-        sessions = upcoming_sessions(str(interaction.guild_id), include_recent_hours=1)
+        # Only sessions that haven't kicked off: cancelling tonight's game in progress would
+        # also wipe its recap (session_reports treats cancelled sessions as "no games").
+        now = int(time.time())
+        sessions = [x for x in upcoming_sessions(str(interaction.guild_id)) if x["starts_at"] > now]
         if not sessions:
             await interaction.response.send_message("No upcoming session to cancel.", ephemeral=True)
             return
+        await interaction.response.defer()
         s = sessions[0]
         with connect() as conn:
             conn.execute("UPDATE sessions SET cancelled=1 WHERE id=?", (s["id"],))
         s["cancelled"] = 1
         try:
             ch = self.bot.get_channel(int(s["channel_id"])) or await self.bot.fetch_channel(int(s["channel_id"]))
-            msg = await ch.fetch_message(int(s["message_id"]))
-            await msg.edit(embed=await session_embed(interaction.guild, s), view=None)
+            await ch.get_partial_message(int(s["message_id"])).edit(
+                embed=await session_embed(interaction.guild, s), view=None)
         except (discord.HTTPException, TypeError, ValueError):
             pass
-        await interaction.response.send_message(f"🚫 Cancelled the session at <t:{s['starts_at']}:F>.")
+        await interaction.followup.send(f"🚫 Cancelled the session at <t:{s['starts_at']}:F>.")
 
     async def post_daily_session(self, guild: discord.Guild, starts_at: int):
         settings = session_settings(str(guild.id))
@@ -734,6 +745,7 @@ class SessionsCog(commands.Cog):
         log.info("Posted daily session %s in #%s", s["id"], channel.name)
 
     @tasks.loop(minutes=1)
+    @survive
     async def daily_sessions(self):
         guild = (self.bot.get_guild(int(GUILD_ID)) if GUILD_ID else
                  self.bot.guilds[0] if len(self.bot.guilds) == 1 else None)
@@ -757,6 +769,7 @@ class SessionsCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     @tasks.loop(minutes=1)
+    @survive
     async def session_updates(self):
         now = int(time.time())
         with connect() as conn:
@@ -784,6 +797,7 @@ class SessionsCog(commands.Cog):
 
     # ------------------------------------------------------------------ #
     @tasks.loop(minutes=1)
+    @survive
     async def reminders(self):
         now = int(time.time())
         with connect() as conn:

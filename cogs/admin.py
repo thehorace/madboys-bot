@@ -177,9 +177,24 @@ class AdminView(TrackedView):
         self.render()
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
-    async def refresh_anchor(self):
+    async def refresh_anchor(self, interaction=None):
+        """
+        Re-draw the panel after an action replied with its own message. Uses the current
+        click's token: the /admin command's token expires after 15 minutes, and a panel that's
+        been open that long used to show "Something went wrong" after every action.
+        """
         self.render()
-        await self.anchor.edit_original_response(embed=self.embed(), view=self)
+        message = getattr(interaction, "message", None)
+        if message is not None:
+            try:
+                await interaction.followup.edit_message(message.id, embed=self.embed(), view=self)
+                return
+            except discord.HTTPException:
+                pass
+        try:
+            await self.anchor.edit_original_response(embed=self.embed(), view=self)
+        except discord.HTTPException:
+            pass   # the action itself worked; Refresh re-draws the panel
 
     async def run_command(self, interaction, cog_name, method, **kwargs):
         cog = self.bot.get_cog(cog_name)
@@ -194,7 +209,7 @@ class AdminView(TrackedView):
         if not await self.authorize(interaction):
             return
         await self.run_command(interaction, "SessionsCog", "settings", **kwargs)
-        await self.refresh_anchor()
+        await self.refresh_anchor(interaction)
 
     async def choose_channel(self, interaction):
         if not await self.authorize(interaction):
@@ -249,14 +264,14 @@ class AdminView(TrackedView):
             await self.session_action(interaction, **{key: not settings[key]})
         elif action == "skip":
             await self.run_command(interaction, "SessionsCog", "skip")
-            await self.refresh_anchor()
+            await self.refresh_anchor(interaction)
         elif action == "toggle_patchnotes":
             settings = patch_settings(str(self.guild.id))
             await self.run_command(interaction, "PatchNotesCog", "settings", enabled=not settings["enabled"])
-            await self.refresh_anchor()
+            await self.refresh_anchor(interaction)
         elif action in ("check_patchnotes", "preview_patchnotes"):
             await self.run_command(interaction, "PatchNotesCog", "check_command" if action == "check_patchnotes" else "preview")
-            await self.refresh_anchor()
+            await self.refresh_anchor(interaction)
         else:
             cog, method = {"usage": ("UsageCog", "usage"), "health": ("OperationsCog", "status"),
                            "backup": ("OperationsCog", "backup"), "tracker": ("MatchdayCog", "matchday_status")}[action]
@@ -285,7 +300,7 @@ class AdminView(TrackedView):
             await interaction.response.send_message("Choose a text channel in this server.", ephemeral=True)
             return
         await self.run_command(interaction, "PatchNotesCog", "settings", channel=channel)
-        await self.refresh_anchor()
+        await self.refresh_anchor(interaction)
 
     async def on_timeout(self):
         try:

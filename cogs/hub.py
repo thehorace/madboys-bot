@@ -427,9 +427,23 @@ class HubCog(commands.Cog):
         self._lock = asyncio.Lock()
 
     def _sticky(self, guild_id) -> tuple[Optional[int], Optional[int]]:
-        ch = get_setting(str(guild_id), "panel_channel")
-        msg = get_setting(str(guild_id), "panel_message")
-        return (int(ch) if ch else None), (int(msg) if msg else None)
+        # Read once per server, then kept in memory (on_message runs for every chat message).
+        # Everything that changes these settings goes through _set_sticky below.
+        cache = self.__dict__.setdefault("_sticky_cache", {})
+        guild_id = str(guild_id)
+        if guild_id not in cache:
+            ch = get_setting(str(guild_id), "panel_channel")
+            msg = get_setting(str(guild_id), "panel_message")
+            cache[guild_id] = ((int(ch) if ch else None), (int(msg) if msg else None))
+        return cache[guild_id]
+
+    def _set_sticky(self, guild_id, channel_id=..., message_id=...):
+        if channel_id is not ...:
+            set_setting(str(guild_id), "panel_channel", str(channel_id) if channel_id else None)
+        if message_id is not ...:
+            set_setting(str(guild_id), "panel_message", str(message_id) if message_id else None)
+        cache = self.__dict__.setdefault("_sticky_cache", {})
+        cache.pop(str(guild_id), None)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -452,7 +466,7 @@ class HubCog(commands.Cog):
             new = await channel.send(embed=panel_embed(), view=PanelView(self.bot))
         except discord.HTTPException:
             return
-        set_setting(str(guild_id), "panel_message", str(new.id))
+        self._set_sticky(guild_id, message_id=new.id)
         self._since[channel.id] = 0
         self._last_repost[channel.id] = time.time()
         if old_id:
@@ -482,15 +496,13 @@ class HubCog(commands.Cog):
                     await interaction.channel.get_partial_message(old_msg).delete()
                 except discord.HTTPException:
                     pass
-            set_setting(gid, "panel_channel", str(interaction.channel_id))
-            set_setting(gid, "panel_message", str(msg.id))
+            self._set_sticky(gid, interaction.channel_id, msg.id)
             self._since[interaction.channel_id] = 0
             await interaction.followup.send("📌 Sticky panel on — it'll keep itself at the bottom of this channel.",
                                             ephemeral=True)
             return
         if old_ch == interaction.channel_id:   # a normal panel here turns sticky mode off for this channel
-            set_setting(gid, "panel_channel", None)
-            set_setting(gid, "panel_message", None)
+            self._set_sticky(gid, None, None)
         try:
             await msg.pin(reason="MADBOYS bot panel")
         except discord.HTTPException:

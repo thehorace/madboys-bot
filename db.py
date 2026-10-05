@@ -23,6 +23,7 @@ log = logging.getLogger("madboys-bot.db")
 def connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA synchronous=NORMAL")   # safe with WAL; roughly halves the cost of each write
     try:
         yield conn
         conn.commit()

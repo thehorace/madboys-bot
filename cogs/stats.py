@@ -17,6 +17,7 @@ cogs/hub.py both call the same builders, so they always show the same thing.
   /debug <what>              - Manager: dump raw EA JSON (to spot FC 27 field changes)
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -416,11 +417,27 @@ def build_h2h(opponent: str) -> Screen:
 # --------------------------------------------------------------------------- #
 #  autocomplete
 # --------------------------------------------------------------------------- #
+def quick_squad_names(ea) -> list[str]:
+    """
+    Names for autocomplete without waiting on the relay (autocomplete can't defer, so a
+    slow relay meant an empty list). Uses the cached EA member list, else everyone seen
+    in tracked matches, and refreshes the member list in the background.
+    """
+    names = ea.cached_member_names(CLUB_ID) if ea is not None else None
+    if names is None:
+        if ea is not None and ea.configured:
+            asyncio.get_running_loop().create_task(ea.get_member_stats(CLUB_ID))
+        with connect() as conn:
+            names = [r[0] for r in conn.execute(
+                "SELECT DISTINCT name FROM match_players WHERE club_id=? AND name IS NOT NULL", (CLUB_ID,))]
+    return names
+
+
 async def player_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    members = await interaction.client.ea.get_member_stats(CLUB_ID) or []
     cur = current.lower()
-    names = sorted({m["name"] for m in members if m.get("name") and cur in m["name"].lower()}, key=str.lower)
-    return [app_commands.Choice(name=n, value=n) for n in names][:25]
+    names = sorted({n for n in quick_squad_names(getattr(interaction.client, "ea", None)) if cur in n.lower()},
+                   key=str.lower)
+    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names][:25]
 
 
 async def opponent_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:

@@ -51,7 +51,7 @@ from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, CLUB_NA
                     MATCHDAY_CHANNEL_ID, POLL_ACTIVE_MINUTES, POLL_IDLE_MINUTES, RECAP_HOUR, RECAP_WEEKDAY,
                     VOICE_ACTIVE_PLAYERS)
 from db import connect, get_setting, set_setting
-from utils import clip, is_manager, to_int
+from utils import clip, is_manager, to_int, survive
 from interaction_tracking import failed
 
 log = logging.getLogger("madboys-bot.matchday")
@@ -455,6 +455,7 @@ class MatchdayCog(commands.Cog):
     #  weekly recap
     # ------------------------------------------------------------------ #
     @tasks.loop(minutes=5)
+    @survive
     async def recap_loop(self):
         guild = self.home_guild()
         if not guild:

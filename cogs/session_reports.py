@@ -40,8 +40,16 @@ def archive_sessions(gid, now):
     if get_setting(gid, "reports:since") is None:
         set_setting(gid, "reports:since", str(now))
     with connect() as conn:
-        sessions = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND (starts_at<=? OR cancelled=1) ORDER BY starts_at,id", (gid, now)).fetchall()
-        assigned = {mid for r in conn.execute("SELECT match_ids FROM session_history WHERE guild_id=?", (gid,)) for mid in json.loads(r[0])}
+        # Only sessions not archived yet (this used to re-check every session ever, every poll).
+        sessions = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND (starts_at<=? OR cancelled=1) "
+                                "AND id NOT IN (SELECT session_id FROM session_history) ORDER BY starts_at,id",
+                                (gid, now)).fetchall()
+        if not sessions:
+            return
+        # Matches already given to a session: only recent history can overlap these sessions.
+        oldest = min(s["starts_at"] for s in sessions)
+        assigned = {mid for r in conn.execute("SELECT match_ids FROM session_history WHERE guild_id=? AND ended_at>=?",
+                                              (gid, oldest - 2 * 86400)) for mid in json.loads(r[0])}
         for s in sessions:
             if conn.execute("SELECT 1 FROM session_history WHERE session_id=?", (s["id"],)).fetchone():
                 continue

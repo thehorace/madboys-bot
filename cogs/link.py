@@ -64,11 +64,8 @@ def find_discord_id_by_ea_name(guild_id: str, ea_name: str) -> Optional[str]:
 
 async def roster_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     """Suggest EA persona names from the club's member list (cached, so this is cheap)."""
-    ea = getattr(interaction.client, "ea", None)
-    names: list[str] = []
-    if ea is not None:
-        members = await ea.get_member_stats(CLUB_ID) or []
-        names = [m.get("name") for m in members if m.get("name")]
+    from cogs.stats import quick_squad_names   # cached / DB only: autocomplete can't wait on the relay
+    names = sorted(set(quick_squad_names(getattr(interaction.client, "ea", None))))
     cur = current.lower()
     return [app_commands.Choice(name=n, value=n) for n in sorted(names, key=str.lower) if cur in n.lower()][:25]
 

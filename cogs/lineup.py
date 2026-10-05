@@ -27,6 +27,7 @@ How suggestions work:
     No moving for the sake of it. Solved optimally (Hungarian algorithm), not first-come.
 """
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -258,7 +259,8 @@ async def lineup_message(guild: discord.Guild, formation: str, slots: dict[str, 
     lines = [f"**{strip_number(pos)}**: {names[pos] or '*empty*'}" for pos in slots]
     embed = discord.Embed(title=title, description="\n".join(lines), colour=CLUB_COLOUR)
     embed.set_footer(text=footer)
-    png = render_lineup(formation, names, title=f"{CLUB_NAME} • {formation}")
+    # Drawing takes ~0.1s of CPU; do it off the main loop so the bot doesn't freeze on every builder click
+    png = await asyncio.to_thread(render_lineup, formation, names, title=f"{CLUB_NAME} • {formation}")
     if png:
         embed.set_image(url="attachment://lineup.png")
         return embed, png.read()
@@ -375,8 +377,9 @@ class ManagerBuildsView(TrackedView):
 
     async def _update(self, interaction: discord.Interaction, note: str = ""):
         self.note = note
+        await interaction.response.defer()   # looking up the squad's names can take >3s
         await self.refresh()
-        await interaction.response.edit_message(embed=self.embed, view=self)
+        await interaction.edit_original_response(embed=self.embed, view=self)
 
     async def _pick_player(self, interaction: discord.Interaction):
         uid = int(interaction.data["values"][0])

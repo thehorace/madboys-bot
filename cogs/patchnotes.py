@@ -13,6 +13,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils import survive
+
 from cogs.operations import report_health
 from cogs.usage import can_view
 from config import CLUB_COLOUR, GUILD_ID
@@ -281,9 +283,24 @@ class PatchNotesCog(commands.Cog):
                 seen = {r["url"] for r in conn.execute("SELECT url FROM patchnotes_seen WHERE guild_id=?", (gid,))}
             cutoff = max(int(watch_since), int(now.timestamp()) - MAX_UPDATE_AGE)
             pending = [a for a in articles if a["url"] not in seen and a["published_ts"] > cutoff]
-            posted = 0
+            posted, skipped = 0, 0
             for article in pending:
-                details = article_details(await self.fetch(article["url"]), article["slug"])
+                # One bad article must not block every newer one behind it.
+                try:
+                    page = await self.fetch(article["url"])
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    log.warning("Couldn't download %s; will retry next check", article["url"])
+                    skipped += 1
+                    continue
+                try:
+                    details = article_details(page, article["slug"])
+                except Exception:
+                    log.exception("Couldn't read EA article %s; skipping it", article["url"])
+                    with connect() as conn:   # remember it so it isn't retried every hour
+                        conn.execute("INSERT OR IGNORE INTO patchnotes_seen VALUES (?,?,?,?,NULL)",
+                                     (gid, article["url"], article["title"], article["published_ts"]))
+                    skipped += 1
+                    continue
                 message = await channel.send(embed=patch_embed({**article, **details}),
                                              allowed_mentions=discord.AllowedMentions.none())
                 with connect() as conn:
@@ -292,9 +309,11 @@ class PatchNotesCog(commands.Cog):
                 posted += 1
             set_setting(gid, "patchnotes:last_checked", now.isoformat())
             await report_health(self.bot, gid, "EA patch notes")
-            return f"Posted {posted} new update(s)." if posted else "Checked EA: no new patch notes."
+            note = f" ({skipped} couldn't be read and were skipped.)" if skipped else ""
+            return (f"Posted {posted} new update(s)." if posted else "Checked EA: no new patch notes.") + note
 
     @tasks.loop(hours=1)
+    @survive
     async def ticker(self):
         guild = self.bot.get_guild(int(GUILD_ID)) if GUILD_ID else self.bot.guilds[0] if len(self.bot.guilds) == 1 else None
         if guild:

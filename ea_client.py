@@ -17,6 +17,13 @@ Caching:
     can call ea.stale_note() to tell the user the data is old.
   - Failures are remembered for FAIL_COOLDOWN seconds so ten people spamming
     /lastgame while the relay is down doesn't mean ten 20-second timeouts.
+  - Requests for the same thing at the same time share ONE relay call
+    (in-flight dedupe), so a cache expiry doesn't fan out into 8 identical calls.
+  - Circuit breaker: if the relay times out or can't be reached, user-facing
+    calls skip it for a while (1 min, doubling up to 5) and serve cached data
+    straight away instead of each waiting for their own timeout. The match
+    tracker (bypass_cache=True) keeps probing, and its first success closes it.
+  - User-facing calls time out after USER_TIMEOUT seconds; the tracker waits longer.
 """
 
 import asyncio
@@ -35,6 +42,9 @@ CACHE_TTL = 600          # 10 min
 STALE_MAX = 7 * 24 * 3600
 FAIL_COOLDOWN = 30
 CACHE_MAX_ENTRIES = 200
+USER_TIMEOUT = 10        # people are waiting on these
+TRACKER_TIMEOUT = 20     # background checks (bypass_cache=True) can wait longer
+BREAKER_MIN, BREAKER_MAX = 60, 300
 
 # Per-command record of the oldest stale cache entry served. Each slash command
 # runs in its own asyncio task with a fresh copy of the context, so this starts
@@ -58,6 +68,9 @@ class EAClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._cache: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
         self._fail_until: dict[str, float] = {}
+        self._inflight: dict[str, asyncio.Future] = {}
+        self._down_until = 0.0        # circuit breaker (relay unreachable / timing out)
+        self._down_backoff = BREAKER_MIN
 
         self._base = os.getenv("MIDDLEWARE_URL", "").rstrip("/")
         self._api_key = os.getenv("MIDDLEWARE_API_KEY", "")
@@ -120,30 +133,70 @@ class EAClient:
 
         if self._fail_until.get(key, 0) > now:
             return fallback()
+        if not bypass_cache and self._down_until > now:
+            return fallback()   # relay is down/slow: answer from cache now, don't make people wait
 
+        # Same request already on its way? Wait for that one instead of sending another.
+        pending = self._inflight.get(key)
+        if pending is not None and not bypass_cache:
+            data = await asyncio.shield(pending)
+            return data if data is not None else fallback()
+
+        fut = asyncio.get_running_loop().create_future()
+        self._inflight[key] = fut
+        data = None
+        try:
+            data = await self._fetch(key, path, params, TRACKER_TIMEOUT if bypass_cache else USER_TIMEOUT)
+        finally:
+            if self._inflight.get(key) is fut:
+                del self._inflight[key]
+            if not fut.done():
+                fut.set_result(data)
+        return data if data is not None else fallback()
+
+    async def _fetch(self, key: str, path: str, params: dict, timeout: float) -> Optional[Any]:
+        """One relay request. Returns the data, or None (and records why) on failure."""
         session = await self._get_session()
         url = f"{self._base}{path}"
+        unreachable = False
         try:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
                     self._remember(key, data)
                     self._fail_until.pop(key, None)
                     self.last_ok_at = time.time()
+                    self._down_until, self._down_backoff = 0.0, BREAKER_MIN   # relay is fine again
                     return data
                 body = await resp.text()
                 err = f"HTTP {resp.status} — {body[:200]}"
         except asyncio.TimeoutError:
-            err = "timed out"
+            err, unreachable = "timed out", True
         except aiohttp.ClientError as e:
-            err = f"{type(e).__name__}: {e}"
+            err, unreachable = f"{type(e).__name__}: {e}", True
         except Exception as e:  # bad JSON etc.
             err = f"{type(e).__name__}: {e}"
 
         log.warning(f"Middleware request failed ({err}): {url}")
         self.last_error, self.last_error_at = err, time.time()
         self._fail_until[key] = time.time() + FAIL_COOLDOWN
-        return fallback()
+        if unreachable:
+            self._down_until = time.time() + self._down_backoff
+            self._down_backoff = min(BREAKER_MAX, self._down_backoff * 2)
+        return None
+
+    def cached_member_names(self, club_id: int) -> Optional[list[str]]:
+        """Squad names from whatever member list is cached (even old), without calling the relay."""
+        for path in ("/members", "/members/career"):
+            key = path + "?" + "&".join(f"{k}={v}" for k, v in
+                                        sorted({"clubId": str(club_id), "platform": self.platform}.items()))
+            cached = self._cache.get(key)
+            if cached:
+                data = cached[1]
+                members = data.get("members") if isinstance(data, dict) else data
+                if isinstance(members, list):
+                    return [m.get("name") for m in members if isinstance(m, dict) and m.get("name")]
+        return None
 
     async def ping(self) -> tuple[bool, float, str]:
         """Round-trip check of the relay (bypasses cache). Returns (ok, ms, detail)."""
