@@ -117,6 +117,9 @@ class AdminView(TrackedView):
                         "reminder, channel). Use the channel picker to change where they post.")
 
     def button(self, label, action, row=0, style=discord.ButtonStyle.secondary):
+        # Discord rejects a whole message if two components share an id ("Something went wrong").
+        if any(getattr(c, "custom_id", None) == "admin:" + action for c in self.children):
+            return
         button = discord.ui.Button(label=label, row=row, style=style, custom_id="admin:" + action)
         async def callback(interaction):
             await self.act(interaction, action)
@@ -130,7 +133,7 @@ class AdminView(TrackedView):
                                   ("💾 Backup", "backup"), ("🗓️ Session history", "history")):
                 self.button(label, action)
         elif self.page == "status":
-            self.button("Settings", "settings")
+            pass   # "All settings" on the bottom row already links there
         elif self.page == "settings":
             for label, action in (("Sessions", "sessions"), ("Match tracker", "tracker_settings"),
                                   ("Session summaries", "reports"), ("EA News", "patchnotes")):

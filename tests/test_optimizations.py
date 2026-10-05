@@ -187,6 +187,26 @@ class AdminPanelRefreshTests(unittest.IsolatedAsyncioTestCase):
         anchor.edit_original_response.assert_not_awaited()
 
 
+class AdminPagesTests(unittest.TestCase):
+    def test_no_admin_page_repeats_a_component_id(self):
+        """Discord refuses the whole message if two buttons share an id (Bot status used to)."""
+        from collections import Counter
+        from cogs.admin import AdminView
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with patch.object(db, "DB_PATH", str(Path(temp.name) / "a.db")):
+            db.init_all()
+            with patch("cogs.admin.AdminView.embed", return_value=None):
+                view = AdminView(SimpleNamespace(get_cog=lambda n: None), SimpleNamespace(id=1),
+                                 SimpleNamespace(id=10), None)
+            for page in ("home", "settings", "status", "sessions", "patchnotes", "reports", "tracker_settings"):
+                view.page = page
+                view.render()
+                ids = Counter(c.custom_id for c in view.children)
+                self.assertEqual([i for i, n in ids.items() if n > 1], [], page)
+                self.assertTrue(all(sum(c.row == r for c in view.children) <= 5 for r in range(5)), page)
+
+
 class PatchNotesSkipTests(TP.MonitorTests):
     """Reuses MonitorTests' fake EA site; only the test below runs here."""
 
