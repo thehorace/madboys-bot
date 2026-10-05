@@ -69,14 +69,14 @@ class AdminView(TrackedView):
                             "🩺 **Health** — failures and saved backups\n"
                             "💾 **Backup** — create and download a database snapshot\n"
                             "📡 **Tracker status** — latest match check and posting state\n"
-                            "📰 **Patch notes** — official FC 27 update posts, preview and channel")
+                            "📰 **EA News** — FC 27 patch notes, Pro Clubs and The Grounds")
         if self.page == "patchnotes":
             settings = patch_settings(str(self.guild.id))
             channel = f"<#{settings['channel_id']}>" if settings["channel_id"] else "#general"
-            return discord.Embed(title="📰 Official FC 27 patch notes", colour=CLUB_COLOUR,
+            return discord.Embed(title="📰 Official FC 27 news & patch notes", colour=CLUB_COLOUR,
                 description=f"Automatic posts: **{'On' if settings['enabled'] else 'Off'}**\nChannel: {channel}\n"
                             f"Checks every hour. Last successful check: {settings['last_checked']}\n\n"
-                            "New updates post once, with EA's change details and the official link. No everyone ping.\n"
+                            "Patch notes, Pro Clubs and Grounds news post once, with details and the official link. No everyone ping.\n"
                             "First check posts only the newest current update. Preview latest is private.\n\n"
                             f"[Official EA source]({SOURCE})")
         settings = session_settings(str(self.guild.id))
@@ -105,7 +105,7 @@ class AdminView(TrackedView):
             for label, action in (("📊 Usage", "usage"), ("🎮 Sessions", "sessions"), ("🩺 Health", "health"),
                                   ("💾 Backup", "backup"), ("📡 Tracker status", "tracker")):
                 self.button(label, action)
-            self.button("📰 Patch notes", "patchnotes", row=1)
+            self.button("📰 EA News", "patchnotes", row=1)
         elif self.page == "patchnotes":
             settings = patch_settings(str(self.guild.id))
             self.button("Disable patch posts" if settings["enabled"] else "Enable patch posts", "toggle_patchnotes")

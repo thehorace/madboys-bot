@@ -23,6 +23,19 @@ def article(slug="title-update-v1", year=2020, title="EA SPORTS FC 27 | Title Up
 
 
 class ParserTests(unittest.TestCase):
+    def test_clubs_and_grounds_news_without_update_in_title(self):
+        items = [
+            article("fc-27-the-grounds-developer-launch-update", title="EA SPORTS FC 27 | The Grounds Developer Launch Update"),
+            article("getting-started-in-clubs", title="How to get started in Pro Clubs"),
+            article("the-grounds-new-event", title="The Grounds: a new weekend event"),
+            {**article("season-news", title="Season news"), "summary": "New rewards for Pro Clubs players."},
+            {**article("feature-guide", title="New feature guide"), "tags": [{"slug": "the-grounds"}]},
+            article("unrelated", title="Ultimate Team pack rewards"),
+        ]
+        found = P.update_articles(html({"initialNewsData": {"items": items}}))
+        self.assertEqual(len(found), 5)
+        self.assertNotIn("unrelated", [a["slug"] for a in found])
+
     def test_filters_news_old_games_bad_slugs_and_future_notes(self):
         items = [article(), article("promo", title="New kits available"),
                  article("future", 2099), article("../../bad"), article("old", title="EA SPORTS FC 26 | Title Update")]

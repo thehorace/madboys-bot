@@ -66,7 +66,7 @@ def update_articles(html: str) -> list[dict]:
             continue
         if re.search(r"\bFC\s*(?:25|26|28)\b", title, re.I):
             continue
-        if not re.search(r"title[ -]*update|patch[ -]*notes|(?:developer|gameplay|clubs|grounds).*update|launch update", title, re.I):
+        if not relevant_news(item):
             continue
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
             continue
@@ -83,6 +83,20 @@ def update_articles(html: str) -> list[dict]:
         article["published_ts"] = int(published.timestamp())
         found[article["url"]] = article
     return sorted(found.values(), key=lambda a: (a["published_ts"], a["url"]))
+
+
+def relevant_news(item: dict) -> bool:
+    title = str(item.get("title", ""))
+    if re.search(r"title[ -]*update|patch[ -]*notes|(?:developer|gameplay|clubs|grounds).*update|launch update", title, re.I):
+        return True
+    tags = []
+    for tag in item.get("tags") or []:
+        if isinstance(tag, dict):
+            tags.extend(str(tag.get(key, "")) for key in ("name", "label", "slug"))
+        elif isinstance(tag, str):
+            tags.append(tag)
+    text = " ".join([title, str(item.get("slug", "")), str(item.get("summary", "")), *tags])
+    return bool(re.search(r"\bclubs\b|\bgrounds\b", text, re.I))
 
 
 def article_details(html: str, expected_slug: str) -> dict:
@@ -103,9 +117,9 @@ def patch_embed(article: dict) -> discord.Embed:
     if len(body) > 3400:
         excerpt = excerpt.rsplit("\n", 1)[0] + "\n\n*More changes in the full notes below.*"
     embed = discord.Embed(title=str(article["title"])[:256], url=article["url"],
-                          description=excerpt + f"\n\n[Read the full official EA notes]({article['url']})",
+                          description=excerpt + f"\n\n[Read the full official EA article]({article['url']})",
                           colour=CLUB_COLOUR)
-    embed.set_footer(text="Official EA FC 27 update • excerpt from EA's notes • no @everyone ping")
+    embed.set_footer(text="Official EA FC 27 news • excerpt from EA's article • no @everyone ping")
     embed.timestamp = datetime.fromtimestamp(article["published_ts"], timezone.utc)
     return embed
 
@@ -213,7 +227,7 @@ class PatchNotesCog(commands.Cog):
     async def before(self):
         await self.bot.wait_until_ready()
 
-    patchnotes = app_commands.Group(name="patchnotes", description="Private controls for official FC 27 patch notes")
+    patchnotes = app_commands.Group(name="patchnotes", description="Private controls for FC 27 updates, Clubs and Grounds news")
 
     @patchnotes.command(name="settings", description="Private: enable patch notes or choose their channel")
     async def settings(self, interaction: discord.Interaction, enabled: bool = None, channel: discord.TextChannel = None):
@@ -244,7 +258,7 @@ class PatchNotesCog(commands.Cog):
             text = "Couldn't check/post EA notes. No update has been marked as posted; you can retry."
         await interaction.followup.send(text, ephemeral=True)
 
-    @patchnotes.command(name="latest", description="Private: preview the latest official patch notes")
+    @patchnotes.command(name="latest", description="Private: preview the latest official update, Clubs or Grounds news")
     async def preview(self, interaction: discord.Interaction):
         if not can_view(interaction.user, interaction.guild):
             await interaction.response.send_message("Patch-note controls are private.", ephemeral=True)

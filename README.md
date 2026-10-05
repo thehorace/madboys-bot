@@ -159,14 +159,17 @@ but do not count as confirmed successes. Normal chat content is never stored.
 ## Official FC 27 patch-note posts
 
 The bot checks [EA's official FC 27 news page](https://www.ea.com/games/ea-sports-fc/fc-27/news)
-hourly for title updates, patch notes and developer/gameplay launch updates.
+hourly for title updates, patch notes and developer/gameplay launch updates,
+plus all Pro Clubs and The Grounds articles identified by their title, summary,
+URL slug or EA tags. This includes guides, feature announcements and events,
+even when the title does not say "update".
 New articles post once in **#general**, with an excerpt of EA's change details,
 publication time and a link to the full official notes. No mentions are sent.
 On first deployment only the newest current update is announced; older articles
 are recorded as seen. Failed fetches or sends are retried without marking the
 unsent update as posted. The seen list survives restarts with the database.
 
-Private **`/admin` → Patch notes** controls offer enable/disable, a channel picker,
+Private **`/admin` → EA News** controls offer enable/disable, a channel picker,
 Check EA now and Preview latest. The equivalent `/patchnotes settings`,
 `/patchnotes check` and `/patchnotes latest` commands use the same private allowlist.
 `PATCHNOTES_CHANNEL_ID` sets the initial channel default. If EA blocks the bot or
