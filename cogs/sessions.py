@@ -15,7 +15,7 @@ Extras:
   - While a session is on, the match tracker checks EA more often.
   - Buttons keep working after a bot restart (persistent view).
 
-Times are entered in BOT_TZ (default Asia/Singapore) and shown to everyone
+Times are entered in the session timezone (admin panel; defaults to BOT_TZ) and shown to everyone
 with Discord timestamps, which display in each viewer's own timezone.
 """
 
@@ -47,11 +47,41 @@ STATUS_LABEL = {"yes": "✅ In", "maybe": "🤔 Maybe", "no": "❌ Out"}
 DAYS = ["today", "tomorrow", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
-def _tz() -> ZoneInfo:
+TZ_ALIASES = {"sydney": "Australia/Sydney", "melbourne": "Australia/Melbourne", "brisbane": "Australia/Brisbane",
+              "singapore": "Asia/Singapore", "sg": "Asia/Singapore", "uk": "Europe/London", "london": "Europe/London"}
+
+
+def parse_tz(text: str) -> Optional[str]:
+    """'sydney' / 'Australia/Sydney' -> 'Australia/Sydney', or None if it isn't a real timezone."""
+    name = TZ_ALIASES.get(text.strip().lower(), text.strip())
     try:
-        return ZoneInfo(BOT_TZ)
+        ZoneInfo(name)
+        return name
     except Exception:
-        return ZoneInfo("UTC")
+        return None
+
+
+def _tz(guild_id: Optional[str] = None) -> ZoneInfo:
+    """
+    The timezone sign-up times are in. Set it with the admin panel / /session settings
+    (e.g. Australia/Sydney) and daylight saving is handled automatically: 20:30 stays
+    20:30 there all year. Falls back to BOT_TZ.
+    """
+    gid = guild_id or GUILD_ID
+    name = None
+    if gid:
+        try:
+            with connect() as conn:
+                row = conn.execute("SELECT value FROM settings WHERE guild_id=? AND key='session:timezone'",
+                                   (str(gid),)).fetchone()
+            name = row["value"] if row else None
+        except Exception:
+            name = None
+    for candidate in (name, BOT_TZ, "UTC"):
+        try:
+            return ZoneInfo(candidate)
+        except Exception:
+            continue
 
 
 def parse_time(text: str) -> Optional[tuple[int, int]]:
@@ -100,12 +130,14 @@ def session_settings(guild_id: str) -> dict:
         "cooldown": int(setting("cooldown", "300")),
         "waitlist": setting("waitlist", "1") == "1",
         "skip_date": setting("skip_date", ""),
+        "timezone": setting("timezone", BOT_TZ),
     }
 
 
 def daily_start(now: datetime, settings: Optional[dict] = None) -> Optional[int]:
-    """Today's 18:30 session is due from 11:00 until kick-off, in BOT_TZ."""
-    now = now.astimezone(_tz())
+    """Today's session is due from post time until kick-off, in the session timezone."""
+    tz = ZoneInfo(parse_tz(settings["timezone"]) or BOT_TZ) if settings and settings.get("timezone") else _tz()
+    now = now.astimezone(tz)
     settings = settings or {"enabled": True, "post_time": "11:00", "kickoff_time": "18:30",
                             "days": DAYS[2:], "skip_date": ""}
     if not settings["enabled"] or DAYS[now.weekday() + 2] not in settings["days"] or settings["skip_date"] == now.date().isoformat():
@@ -410,12 +442,13 @@ class SessionsCog(commands.Cog):
     @app_commands.describe(post_time="Daily posting time, e.g. 11am", kickoff_time="Kick-off, e.g. 6:30pm",
                            days="Comma-separated weekdays, e.g. monday,wednesday,friday (or all)",
                            cooldown="Minimum seconds between sticky moves (default 300)",
-                           waitlist="Queue extra sign-ups once 11 players are In")
+                           waitlist="Queue extra sign-ups once 11 players are In",
+                           timezone="Timezone the times are in, e.g. Australia/Sydney (handles daylight saving)")
     async def settings(self, interaction: discord.Interaction, enabled: Optional[bool] = None,
                        channel: Optional[discord.TextChannel] = None, post_time: Optional[str] = None,
                        kickoff_time: Optional[str] = None, days: Optional[str] = None,
                        cooldown: Optional[app_commands.Range[int, 30, 3600]] = None,
-                       waitlist: Optional[bool] = None):
+                       waitlist: Optional[bool] = None, timezone: Optional[str] = None):
         if not can_view(interaction.user, interaction.guild):
             failed(interaction)
             await interaction.response.send_message("Session settings are private to the bot's authorized users.", ephemeral=True)
@@ -435,6 +468,15 @@ class SessionsCog(commands.Cog):
             failed(interaction)
             await interaction.response.send_message("Posting time must be earlier than kick-off on the same day.", ephemeral=True)
             return
+        if timezone is not None and timezone.strip():
+            tzname = parse_tz(timezone)
+            if not tzname:
+                failed(interaction)
+                await interaction.response.send_message(
+                    "Couldn't find that timezone — try `Australia/Sydney` or `Asia/Singapore`.", ephemeral=True)
+                return
+            if tzname != current["timezone"]:
+                changes["timezone"] = tzname
         if days is not None:
             selected = DAYS[2:] if days.strip().lower() == "all" else [d.strip().lower() for d in days.split(",")]
             if not selected or any(d not in DAYS[2:] for d in selected):
@@ -457,7 +499,7 @@ class SessionsCog(commands.Cog):
         today_note, today_id = self.update_today_in_db(gid, changes, current)
         embed = discord.Embed(title="🎮 Session settings", colour=CLUB_COLOUR,
             description=f"Daily posts: **{'On' if current['enabled'] else 'Off'}**\n"
-                        f"Post **{current['post_time']}** · Kick-off **{current['kickoff_time']}** ({BOT_TZ})\n"
+                        f"Post **{current['post_time']}** · Kick-off **{current['kickoff_time']}** ({current['timezone']})\n"
                         f"Days: {', '.join(d.capitalize() for d in current['days'])}\n"
                         f"Channel: {('<#' + current['channel_id'] + '>') if current['channel_id'] else '#general'}\n"
                         f"Sticky: every 10 messages, at least **{current['cooldown']} seconds** apart\n"
@@ -474,7 +516,7 @@ class SessionsCog(commands.Cog):
     #  Keep today's already-posted daily sign-up in step with the settings
     # ------------------------------------------------------------------ #
     def todays_daily_session(self, guild_id: str) -> Optional[dict]:
-        midnight = datetime.now(_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = datetime.now(_tz(guild_id)).replace(hour=0, minute=0, second=0, microsecond=0)
         with connect() as conn:
             row = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND created_by='daily' AND cancelled=0 "
                                "AND message_id IS NOT NULL AND starts_at>=? AND starts_at<? "
@@ -488,15 +530,15 @@ class SessionsCog(commands.Cog):
         Apply kick-off / channel / waitlist changes to today's posted daily sign-up.
         -> (what changed, for the reply; session id to refresh on Discord) or ("", None) if nothing to do.
         """
-        if not any(k in changes for k in ("kickoff_time", "channel_id", "waitlist")):
+        if not any(k in changes for k in ("kickoff_time", "timezone", "channel_id", "waitlist")):
             return "", None
         s = self.todays_daily_session(guild_id)
         if not s:
             return "", None
         now, notes = int(time.time()), []
-        if "kickoff_time" in changes:
+        if "kickoff_time" in changes or "timezone" in changes:
             h, m = parse_time(settings["kickoff_time"])
-            new = int(datetime.fromtimestamp(s["starts_at"], _tz()).replace(
+            new = int(datetime.fromtimestamp(s["starts_at"], _tz(guild_id)).replace(
                 hour=h, minute=m, second=0, microsecond=0).timestamp())
             if new != s["starts_at"]:
                 with connect() as conn:
@@ -554,8 +596,8 @@ class SessionsCog(commands.Cog):
             await interaction.response.send_message("Skipping daily sessions is private to the bot's authorized users.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        local = datetime.now(_tz())
         gid = str(interaction.guild_id)
+        local = datetime.now(_tz(gid))
         midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
         set_setting(gid, "session:skip_date", local.date().isoformat())
         with connect() as conn:
@@ -587,7 +629,7 @@ class SessionsCog(commands.Cog):
             failed(interaction)
             await interaction.response.send_message("Couldn't read that time — try `21:00` or `9pm`.", ephemeral=True)
             return
-        start = resolve_start(day.value, hm)
+        start = resolve_start(day.value, hm, datetime.now(_tz(str(interaction.guild_id))))
         if start.timestamp() < datetime.now(_tz()).timestamp() - 3600:
             failed(interaction)
             await interaction.response.send_message("That time has already passed today — pick Tomorrow?",
@@ -661,7 +703,7 @@ class SessionsCog(commands.Cog):
             # Include cancelled sessions: cancelling today must not recreate it.
             rows = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND starts_at=?",
                                 (str(guild.id), starts_at)).fetchall()
-            start = datetime.fromtimestamp(starts_at, _tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+            start = datetime.fromtimestamp(starts_at, _tz(str(guild.id))).replace(hour=0, minute=0, second=0, microsecond=0)
             # Changing kick-off settings must not create a second daily session today.
             other = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND created_by='daily' "
                                  "AND starts_at>=? AND starts_at<? AND starts_at<>?",
@@ -698,7 +740,7 @@ class SessionsCog(commands.Cog):
         if guild is None:
             log.warning("Daily session: set GUILD_ID to select the server")
             return
-        starts_at = daily_start(datetime.now(_tz()), session_settings(str(guild.id)))
+        starts_at = daily_start(datetime.now(_tz(str(guild.id))), session_settings(str(guild.id)))
         if starts_at is None:
             return
         try:

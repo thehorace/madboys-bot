@@ -27,6 +27,17 @@ class DailyTimeTests(unittest.TestCase):
             self.assertEqual(sessions.daily_start(datetime(2026, 10, 3, 3, tzinfo=timezone.utc)), expected)
             self.assertEqual(sessions.daily_start(datetime(2026, 10, 4, 11, tzinfo=tz)), expected + 86400)
 
+    def test_sydney_timezone_keeps_kickoff_through_daylight_saving(self):
+        syd = ZoneInfo("Australia/Sydney")
+        settings = {"enabled": True, "post_time": "14:00", "kickoff_time": "20:30", "days": sessions.DAYS[2:],
+                    "skip_date": "", "timezone": "Australia/Sydney"}
+        for day in (3, 4):   # 4 Oct 2026: Sydney goes from UTC+10 to UTC+11
+            start = sessions.daily_start(datetime(2026, 10, day, 15, tzinfo=syd), settings)
+            local = datetime.fromtimestamp(start, syd)
+            self.assertEqual((local.day, local.hour, local.minute), (day, 20, 30))
+        self.assertEqual(sessions.parse_tz("sydney"), "Australia/Sydney")
+        self.assertIsNone(sessions.parse_tz("not/a_zone"))
+
 
 class DailyPostTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -265,6 +276,24 @@ class DailyPostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows()[0]["reminded"], 1)
         self.assertFalse(embed.fields)
         self.channel.get_partial_message.return_value.edit.assert_not_awaited()
+
+    async def test_switching_to_sydney_time_moves_todays_session(self):
+        sid, start = self.todays_posted_session()
+        with patch.object(sessions, "GUILD_ID", "10"):
+            embed = await self._settings(timezone="sydney", kickoff_time="20:30", post_time="00:05")
+            self.assertEqual(sessions.session_settings("10")["timezone"], "Australia/Sydney")
+            self.assertEqual(str(sessions._tz()), "Australia/Sydney")
+        local = datetime.fromtimestamp(self.rows()[0]["starts_at"], ZoneInfo("Australia/Sydney"))
+        self.assertEqual((local.hour, local.minute), (20, 30))
+        self.assertIn("Australia/Sydney", embed.description)
+
+    async def test_bad_timezone_is_rejected(self):
+        interaction = SimpleNamespace(guild_id=10, guild=self.guild, user=SimpleNamespace(id=1, name="fauz"),
+                                      extras={}, response=SimpleNamespace(send_message=AsyncMock()))
+        with patch.object(sessions, "can_view", return_value=True):
+            await sessions.SessionsCog.settings.callback(self.cog, interaction, timezone="Mars/Base")
+        self.assertIn("timezone", interaction.response.send_message.await_args.args[0])
+        self.assertEqual(sessions.session_settings("10")["timezone"], sessions.BOT_TZ)
 
 
 if __name__ == "__main__":

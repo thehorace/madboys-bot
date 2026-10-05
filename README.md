@@ -156,6 +156,23 @@ failed and unfinished attempts. CSV includes category and outcome, including
 historical entries whose outcome is unknown. Those older entries are preserved
 but do not count as confirmed successes. Normal chat content is never stored.
 
+## Official FC 27 patch-note posts
+
+The bot checks [EA's official FC 27 news page](https://www.ea.com/games/ea-sports-fc/fc-27/news)
+hourly for title updates, patch notes and developer/gameplay launch updates.
+New articles post once in **#general**, with an excerpt of EA's change details,
+publication time and a link to the full official notes. No mentions are sent.
+On first deployment only the newest current update is announced; older articles
+are recorded as seen. Failed fetches or sends are retried without marking the
+unsent update as posted. The seen list survives restarts with the database.
+
+Private **`/admin` → Patch notes** controls offer enable/disable, a channel picker,
+Check EA now and Preview latest. The equivalent `/patchnotes settings`,
+`/patchnotes check` and `/patchnotes latest` commands use the same private allowlist.
+`PATCHNOTES_CHANNEL_ID` sets the initial channel default. If EA blocks the bot or
+changes its page format, the bot reports the problem privately and avoids
+posting empty notes. Edits to an already-seen article do not create another post.
+
 ## Guided player setup
 
 **`/setup`**, or the panel's **Setup** button, opens a private three-step flow:

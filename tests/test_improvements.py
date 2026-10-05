@@ -274,7 +274,7 @@ class OnboardingTests(DatabaseCase):
         self.assertIn("CB, ST", ready.embed().description)
 
     async def test_all_cogs_load_with_commands_and_persistent_views(self):
-        names = ["link", "rotation", "stats", "lineup", "sessions", "motm", "positions", "matchday", "hub", "misc", "usage", "operations", "onboarding", "admin"]
+        names = ["link", "rotation", "stats", "lineup", "sessions", "motm", "positions", "matchday", "hub", "misc", "usage", "operations", "onboarding", "admin", "patchnotes"]
         async with commands.Bot(command_prefix="!", intents=discord.Intents.none()) as bot:
             bot.ea = Mock()
             for name in names:

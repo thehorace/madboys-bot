@@ -176,13 +176,16 @@ class StatsMenu(TrackedView):
         if self.screen_failed:
             failed(interaction)
         if self.page in {"lastgame", "club", "form", "recap", "me", "player", "compare", "leaderboard", "h2h"}:
-            detail = self.player or ""
+            detail = (self.player or "") if self.page in {"player", "me"} else ""
             if self.page == "compare":
                 detail = f"{self.player} vs {self.compare_with}"
             elif self.page == "leaderboard":
                 detail = f"{self.stat}, {self.position}, {'career' if self.career else 'season'}"
             elif self.page == "h2h":
                 detail = self.opponent or ""
+            elif self.page in {"club", "lastgame", "form", "recap"}:
+                detail = {"club": "Club overview", "lastgame": "Latest match",
+                          "form": "Last 10 matches", "recap": "Last 7 days"}[self.page]
             interaction.extras["usage_lookup"] = ("Stats: " + self.page, detail)
 
     # ------------------------------------------------------------------ #

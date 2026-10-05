@@ -158,7 +158,7 @@ def log_interaction(interaction: discord.Interaction, outcome: str = "pending"):
     data = interaction.data or {}
     if interaction.type == discord.InteractionType.application_command:
         kind, (action, detail) = "command", describe_command(data, interaction.guild)
-        if action.startswith(("/usage", "/maintenance", "/admin")):
+        if action.startswith(("/usage", "/maintenance", "/admin", "/patchnotes")):
             return
     elif interaction.type == discord.InteractionType.component:
         if str(data.get("custom_id", "")).startswith(("usage:", "admin:")):
@@ -323,11 +323,25 @@ def build_lookups(rows: list[dict], period: str) -> discord.Embed:
         return e
     by_action: dict[str, Counter] = {}
     for r in looked:
-        by_action.setdefault(r["action"], Counter())[r["detail"]] += 1
+        by_action.setdefault(r["action"], Counter())[lookup_detail(r)] += 1
     for action, c in sorted(by_action.items(), key=lambda kv: -sum(kv[1].values()))[:12]:
         e.add_field(name=f"{action} ({sum(c.values())})", inline=False,
                     value="\n".join(f"`{n:>3}` {d}" for d, n in c.most_common(5))[:1024])
     return e
+
+
+def lookup_detail(row: dict) -> str:
+    """Whole-screen lookups need a label, never a carried-over player name."""
+    fixed = {"Stats: club": "Club overview", "Stats: lastgame": "Latest match",
+             "Stats: form": "Last 10 matches", "Stats: recap": "Last 7 days"}
+    if row["action"] in fixed:
+        return fixed[row["action"]]
+    detail = (row.get("detail") or "").strip()
+    if detail:
+        return detail
+    return {"/clubstats": "Club overview", "/lastgame": "Latest match", "/form": "Recent form",
+            "/recap": "Weekly recap", "/me": "Own player stats", "Stats: me": "Own player stats"}.get(
+                row["action"], "No specific target recorded")
 
 
 def build_person(rows: list[dict], period: str, name: str) -> discord.Embed:
@@ -341,7 +355,7 @@ def build_person(rows: list[dict], period: str, name: str) -> discord.Embed:
     feats = Counter(r["action"] for r in rows)
     e.add_field(name="🧭 Uses", inline=False,
                 value="\n".join(f"`{n:>3}` {a}" for a, n in feats.most_common(8)))
-    looks = Counter(f"{r['action']} → {r['detail']}" for r in rows if is_lookup(r))
+    looks = Counter(f"{r['action']} → {lookup_detail(r)}" for r in rows if is_lookup(r))
     if looks:
         e.add_field(name="🔎 Looked up", inline=False,
                     value="\n".join(f"`{n:>3}` {d}" for d, n in looks.most_common(8))[:1024])
