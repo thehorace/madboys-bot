@@ -1,5 +1,6 @@
 """Durable session recaps; private player summaries never use RSVP as attendance."""
 import json
+import logging
 import time
 
 import discord
@@ -12,9 +13,12 @@ from cogs.link import get_all_links
 from cogs.operations import report_health
 from interaction_tracking import TrackedView
 
+log = logging.getLogger("madboys-bot.session_reports")
+
 
 def report_settings(gid):
     return {"enabled": get_setting(gid, "reports:enabled") != "0",
+            "dms": get_setting(gid, "reports:dms") != "0",
             "gap": int(get_setting(gid, "reports:gap") or 120),
             "channel": get_setting(gid, "reports:channel")}
 
@@ -78,6 +82,10 @@ def archive_sessions(gid, now):
             conn.execute("INSERT INTO session_history VALUES (?,?,?,?,?,?,?,?)", (s["id"], gid,
                 matches[-1]["ts"] if matches else now, "cancelled" if cancelled else "completed" if matches else "no games",
                 json.dumps(ids), json.dumps(rsvps), json.dumps(players), message))
+            if message is None and ids and report_settings(gid)["dms"]:
+                recipients = {did for p in players for did in p["discord_ids"]}
+                conn.executemany("INSERT OR IGNORE INTO session_summary_dms (session_id,discord_id) VALUES (?,?)",
+                                 [(s["id"], did) for did in recipients])
 
 
 def recap_embed(record, personal_id=None):
@@ -98,6 +106,12 @@ def recap_embed(record, personal_id=None):
         if rows:
             embed.add_field(name="Results (latest 10)", value="\n".join(
                 f"{r['result']} · {r['our_goals']}–{r['opp_goals']} vs {r['opp_name'] or 'Opponent'}" for r in rows[-10:])[:1024], inline=False)
+        if players:
+            lines = []
+            for p in sorted(players, key=lambda p: (-(p["goals"] or 0), -(p["assists"] or 0))):
+                rating = f"{p['rating']:.2f}" if p["rating"] is not None else "—"
+                lines.append(f"**{p['name'][:40]}** · {p['games']} games · {p['goals']}G {p['assists']}A · {rating} rating")
+            embed.add_field(name="Squad performance", value="\n".join(lines)[:1024], inline=False)
         players = []
     for p in players[:10]:
         rating = f"{p['rating']:.2f}" if p["rating"] is not None else "—"
@@ -187,9 +201,9 @@ class SessionReportsCog(commands.Cog):
         if not report_settings(gid)["enabled"]:
             with connect() as conn:
                 conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))
-            return
         with connect() as conn:
             pending = conn.execute("SELECT session_id FROM session_history WHERE guild_id=? AND message_id IS NULL", (gid,)).fetchall()
+        errors = []
         for r in pending:
             record = history(gid, r[0])[0]
             if record["outcome"] != "completed" or now - record["ended_at"] > 86400:
@@ -197,16 +211,52 @@ class SessionReportsCog(commands.Cog):
                     conn.execute("UPDATE session_history SET message_id='suppressed' WHERE session_id=?", (r[0],))
                 continue
             channel_id = report_settings(gid)["channel"]
-            if not channel_id:
+            choices = [c for c in guild.text_channels if c.name.lower() == "general"] if not channel_id else []
+            channel = guild.get_channel(int(channel_id)) if channel_id else choices[0] if len(choices) == 1 else None
+            try:
+                if channel is None:
+                    raise RuntimeError("Session recap channel is unavailable. Choose General in the summary settings.")
+                message = await channel.send(embed=recap_embed(record), view=SummaryView(), allowed_mentions=discord.AllowedMentions.none())
                 with connect() as conn:
-                    channel_id = conn.execute("SELECT channel_id FROM sessions WHERE id=?", (r[0],)).fetchone()[0]
-            channel = guild.get_channel(int(channel_id))
-            if channel is None:
-                raise RuntimeError("Session recap channel is unavailable")
-            message = await channel.send(embed=recap_embed(record), view=SummaryView(), allowed_mentions=discord.AllowedMentions.none())
-            with connect() as conn:
-                conn.execute("UPDATE session_history SET message_id=? WHERE session_id=?", (str(message.id), r[0]))
+                    conn.execute("UPDATE session_history SET message_id=? WHERE session_id=?", (str(message.id), r[0]))
+            except Exception as exc:
+                errors.append(exc)
+        errors.extend(await self.send_personal_summaries(guild, now))
+        if errors:
+            raise errors[0]
         await report_health(self.bot, gid, "Session summaries")
+
+    async def send_personal_summaries(self, guild, now):
+        """Retry transient failures per recipient; never replay delivered or old DMs."""
+        gid = str(guild.id)
+        with connect() as conn:
+            pending = conn.execute("SELECT d.session_id,d.discord_id,h.ended_at FROM session_summary_dms d "
+                "JOIN session_history h ON h.session_id=d.session_id WHERE h.guild_id=? AND d.status='pending'", (gid,)).fetchall()
+        errors = []
+        for delivery in pending:
+            sid, did = delivery["session_id"], delivery["discord_id"]
+            status, message_id = "pending", None
+            if not report_settings(gid)["dms"]:
+                status = "suppressed"
+            elif now - delivery["ended_at"] > 86400:
+                status = "expired"
+            else:
+                try:
+                    member = guild.get_member(int(did)) or await guild.fetch_member(int(did))
+                    record = history(gid, sid)[0]
+                    message = await member.send(embed=recap_embed(record, did), allowed_mentions=discord.AllowedMentions.none())
+                    status, message_id = "sent", str(message.id)
+                except discord.Forbidden:
+                    status = "blocked"
+                    log.info("Session %s DM blocked for %s; summary remains in the panel", sid, did)
+                except discord.NotFound:
+                    status = "unavailable"
+                except Exception as exc:
+                    errors.append(exc)
+                    log.warning("Session %s DM failed for %s; will retry", sid, did)
+            with connect() as conn:
+                conn.execute("UPDATE session_summary_dms SET status=?,message_id=? WHERE session_id=? AND discord_id=?", (status, message_id, sid, did))
+        return errors
 
     async def show_history(self, interaction, private=False):
         if private:

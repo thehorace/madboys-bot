@@ -78,7 +78,7 @@ def status_embed(bot, gid):
         saved = conn.execute("SELECT COUNT(*) FROM session_history WHERE guild_id=?", (gid,)).fetchone()[0]
         has_health = conn.execute("SELECT 1 FROM sqlite_master WHERE name='service_health'").fetchone()
         problems = conn.execute("SELECT service,problem FROM service_health WHERE guild_id=? AND problem IS NOT NULL", (gid,)).fetchall() if has_health else []
-    embed.add_field(name="Session summaries", value=f"Posts: {'On' if reports['enabled'] else 'Off'} · Finish gap: {reports['gap']} minutes\n{saved} sessions saved · Only closes after a successful EA check", inline=False)
+    embed.add_field(name="Session summaries", value=f"Club posts: {'On' if reports['enabled'] else 'Off'} · Personal DMs: {'On' if reports['dms'] else 'Off'}\nFinish gap: {reports['gap']} minutes · {saved} sessions saved\nOnly closes after a successful EA check", inline=False)
     embed.add_field(name="Needs attention", value=("\n".join(f"**{r['service']}**: {r['problem']}" for r in problems)[:1024] or "No recorded failures. Check the service states above."), inline=False)
     embed.set_footer(text="Private • Refresh to update these values")
     return embed

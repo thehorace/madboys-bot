@@ -201,8 +201,11 @@ toggles and summary finish gap are saved in SQLite.
 
 After a planned session has no recorded game for **two hours** (default), the
 next successful EA poll saves its history and posts one club recap in the
-session's channel, with no pings. **Settings → Session summaries** lets you
-choose a one-hour or two-hour gap, a recap channel, or disable public recaps
+#general (or the configured recap channel), with no pings. The club recap includes
+the club record, scores and squad performance. A personal summary is also sent by
+DM to each linked player recorded by EA as actually playing, regardless of RSVP.
+**Settings → Session summaries** lets you choose a one-hour or two-hour gap, a
+recap channel, and independently enable/disable club posts and personal DMs
 while still saving history. A new game resets the timer; failed EA checks do
 not finish sessions. Games are grouped from the scheduled start up to the first
 inactivity gap or next session. The first game must occur within the configured
@@ -216,6 +219,11 @@ privately. It requires an EA link at completion. **My session** on the main pane
 and `/mysession` show the latest finished club session. Recap buttons survive
 restarts. Initial historical records are saved without public catch-up posts;
 failed sends retry for up to 24 hours after the last game.
+DM delivery is saved per session and recipient so successful DMs are not resent
+after restarts or another recipient's failure. Temporary failures retry for up
+to 24 hours; blocked DMs or unavailable members are skipped, and those players
+can still open their summaries from the panel. Existing archived sessions are
+not sent retroactively when this feature is deployed or DMs are enabled.
 
 **Session history** on the main panel or `/sessionhistory` browses saved sessions,
 results, cancellations and sessions without games, with a session picker and

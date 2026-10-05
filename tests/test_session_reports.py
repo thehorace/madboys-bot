@@ -31,8 +31,11 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
             conn.execute("INSERT INTO session_rsvps VALUES (?,'42','yes','now','button')", (self.sid,))
             conn.execute("INSERT INTO session_rsvps VALUES (?,'43','yes','now','button')", (self.sid,))
         set_link("10", "42", "Fauz", "self")
-        self.channel = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=99)))
-        self.guild = SimpleNamespace(id=10, get_channel=lambda cid: self.channel if cid == 20 else None)
+        self.channel = SimpleNamespace(id=20, name="general", send=AsyncMock(return_value=SimpleNamespace(id=99)))
+        self.member = SimpleNamespace(id=42, send=AsyncMock(return_value=SimpleNamespace(id=1001)))
+        self.guild = SimpleNamespace(id=10, text_channels=[self.channel],
+            get_channel=lambda cid: self.channel if cid == 20 else None,
+            get_member=lambda uid: self.member if uid == 42 else None, fetch_member=AsyncMock())
         self.bot = SimpleNamespace(get_cog=lambda name: None)
         self.cog = reports.SessionReportsCog(self.bot)
 
@@ -55,15 +58,18 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.game("a", self.start + 600)
         await self.poll(self.start + 7700)
         self.channel.send.assert_not_awaited()
+        self.member.send.assert_not_awaited()
         self.game("b", self.start + 7500)
         await self.poll(self.start + 8000)
         self.channel.send.assert_not_awaited()
         await self.poll(self.start + 14700)
         self.channel.send.assert_awaited_once()
+        self.member.send.assert_awaited_once()
         self.assertEqual(len(json.loads(reports.history("10")[0]["match_ids"])), 2)
         self.cog = reports.SessionReportsCog(self.bot)
         await self.poll(self.start + 15000)
         self.channel.send.assert_awaited_once()
+        self.member.send.assert_awaited_once()
         self.assertFalse(self.channel.send.call_args.kwargs["allowed_mentions"].everyone)
 
     async def test_personal_summary_uses_actual_matches_and_stays_private(self):
@@ -107,6 +113,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.game("a", self.start + 600)
         await self.poll(self.start + 86400)
         self.channel.send.assert_not_awaited()
+        self.member.send.assert_not_awaited()
         self.assertEqual(reports.history("10")[0]["message_id"], "suppressed")
         with db.connect() as conn:
             conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by) VALUES ('10','20',?,'daily')", (self.start + 90000,))
@@ -208,3 +215,94 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(operations.next_session_post("10", now), int(expected.timestamp()) + 86400)
         db.set_setting("10", "session:enabled", "0")
         self.assertIsNone(operations.next_session_post("10", now))
+
+    async def test_club_recap_defaults_to_general_and_dms_only_actual_players(self):
+        with db.connect() as conn:
+            conn.execute("UPDATE sessions SET channel_id='999' WHERE id=?", (self.sid,))
+            conn.execute("DELETE FROM session_rsvps WHERE discord_id='42'")
+        set_link("10", "43", "DidNotPlay", "self")
+        self.game("a", self.start + 600)
+        await self.poll(self.start + 8000)
+        self.channel.send.assert_awaited_once()
+        self.member.send.assert_awaited_once()
+        self.guild.fetch_member.assert_not_awaited()
+        embed = self.channel.send.call_args.kwargs["embed"]
+        self.assertIn("Squad performance", [f.name for f in embed.fields])
+        personal = self.member.send.call_args.kwargs["embed"]
+        self.assertEqual(personal.title, "My session summary")
+        self.assertIn("1 goals", personal.fields[0].value)
+        with db.connect() as conn:
+            deliveries = conn.execute("SELECT * FROM session_summary_dms").fetchall()
+        self.assertEqual([(d["discord_id"], d["status"]) for d in deliveries], [("42", "sent")])
+
+    async def test_blocked_dm_does_not_block_other_players_or_repeat(self):
+        set_link("10", "44", "PlayerTwo", "self")
+        other = SimpleNamespace(id=44, send=AsyncMock(return_value=SimpleNamespace(id=2001)))
+        self.guild.get_member = lambda uid: {42: self.member, 44: other}.get(uid)
+        self.member.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Cannot send messages")
+        self.game("a", self.start + 600)
+        self.game("b", self.start + 1200, "PlayerTwo")
+        await self.poll(self.start + 9000)
+        other.send.assert_awaited_once()
+        await self.poll(self.start + 9100)
+        self.member.send.assert_awaited_once()
+        other.send.assert_awaited_once()
+        with db.connect() as conn:
+            state = conn.execute("SELECT status FROM session_summary_dms WHERE discord_id='42'").fetchone()[0]
+        self.assertEqual(state, "blocked")
+
+    async def test_dm_retry_does_not_repeat_successful_club_post_or_other_dms(self):
+        set_link("10", "44", "PlayerTwo", "self")
+        other = SimpleNamespace(id=44, send=AsyncMock(return_value=SimpleNamespace(id=2001)))
+        self.guild.get_member = lambda uid: {42: self.member, 44: other}.get(uid)
+        self.member.send.side_effect = RuntimeError("Temporary failure")
+        self.game("a", self.start + 600)
+        self.game("b", self.start + 1200, "PlayerTwo")
+        with self.assertRaises(RuntimeError):
+            await self.poll(self.start + 9000)
+        self.member.send.side_effect = None
+        self.cog = reports.SessionReportsCog(self.bot)
+        await self.poll(self.start + 9100)
+        self.channel.send.assert_awaited_once()
+        other.send.assert_awaited_once()
+        self.assertEqual(self.member.send.await_count, 2)
+
+    async def test_disabled_dms_not_sent_when_enabled_later(self):
+        db.set_setting("10", "reports:dms", "0")
+        self.game("a", self.start + 600)
+        await self.poll(self.start + 8000)
+        self.channel.send.assert_awaited_once()
+        self.member.send.assert_not_awaited()
+        db.set_setting("10", "reports:dms", "1")
+        await self.poll(self.start + 8100)
+        self.member.send.assert_not_awaited()
+
+    async def test_old_archived_sessions_never_gain_dm_jobs(self):
+        self.game("a", self.start + 600)
+        await self.poll(self.start + 8000)
+        with db.connect() as conn:
+            conn.execute("DELETE FROM session_summary_dms")
+        self.member.send.reset_mock()
+        await self.poll(self.start + 9000)
+        self.member.send.assert_not_awaited()
+
+    async def test_failed_club_post_does_not_delay_personal_dm(self):
+        self.channel.send.side_effect = RuntimeError("General is unavailable")
+        self.game("a", self.start + 600)
+        with self.assertRaises(RuntimeError):
+            await self.poll(self.start + 8000)
+        self.member.send.assert_awaited_once()
+        self.channel.send.side_effect = None
+        await self.poll(self.start + 8100)
+        self.member.send.assert_awaited_once()
+
+    async def test_pending_dms_expire_after_24_hours(self):
+        self.member.send.side_effect = RuntimeError("Temporary failure")
+        self.game("a", self.start + 600)
+        with self.assertRaises(RuntimeError):
+            await self.poll(self.start + 8000)
+        await self.poll(self.start + 90000)
+        self.member.send.assert_awaited_once()
+        with db.connect() as conn:
+            status = conn.execute("SELECT status FROM session_summary_dms WHERE discord_id='42'").fetchone()[0]
+        self.assertEqual(status, "expired")

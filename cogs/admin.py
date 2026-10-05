@@ -83,10 +83,10 @@ class AdminView(TrackedView):
                     "**EA News** — automatic news and channel\n\nThese controls are private to your allowlist.")
         if self.page == "reports":
             settings = report_settings(str(self.guild.id))
-            channel = f"<#{settings['channel']}>" if settings["channel"] else "The session's channel"
+            channel = f"<#{settings['channel']}>" if settings["channel"] else "#general"
             return discord.Embed(title="Session summary settings", colour=CLUB_COLOUR,
-                description=f"Automatic recaps: **{'On' if settings['enabled'] else 'Off'}**\nFinish after **{settings['gap']} minutes** without a game\nChannel: {channel}\n\n"
-                    "One recap with a private My session summary button. No pings. History saves even when posts are off. "
+                description=f"Club recaps: **{'On' if settings['enabled'] else 'Off'}**\nPersonal DMs: **{'On' if settings['dms'] else 'Off'}**\nFinish after **{settings['gap']} minutes** without a game\nChannel: {channel}\n\n"
+                    "One club recap and a personal DM for each linked player who played. No pings. Blocked DMs stay available in the panel. History saves even when posts are off. "
                     "Finishing waits for a successful EA check. First game must be within the selected gap after kick-off.")
         if self.page == "tracker_settings":
             tracker = self.bot.get_cog("MatchdayCog")
@@ -139,9 +139,10 @@ class AdminView(TrackedView):
             if self.page == "reports":
                 settings = report_settings(str(self.guild.id))
                 self.button("Disable recaps" if settings["enabled"] else "Enable recaps", "toggle_reports")
+                self.button("Disable personal DMs" if settings["dms"] else "Enable personal DMs", "toggle_report_dms")
                 self.button("Finish gap: 1 hour", "gap60")
                 self.button("Finish gap: 2 hours", "gap120")
-                self.button("Use session channel", "reset_report_channel")
+                self.button("Use #general", "reset_report_channel")
             else:
                 self.button("Disable result posts" if get_setting(str(self.guild.id), "matchday_enabled") != "0" else "Enable result posts", "toggle_tracker")
             picker = discord.ui.ChannelSelect(placeholder="Summary channel" if self.page == "reports" else "Match result channel",
@@ -217,7 +218,7 @@ class AdminView(TrackedView):
                 await reports.show_history(interaction, private=True)
             else:
                 await interaction.response.send_message("Session history is unavailable.", ephemeral=True)
-        elif action in ("toggle_reports", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
+        elif action in ("toggle_reports", "toggle_report_dms", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
             gid = str(self.guild.id)
             if action == "toggle_reports":
                 enabled = not report_settings(gid)["enabled"]
@@ -226,6 +227,13 @@ class AdminView(TrackedView):
                     from db import connect
                     with connect() as conn:
                         conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))
+            elif action == "toggle_report_dms":
+                enabled = not report_settings(gid)["dms"]
+                set_setting(gid, "reports:dms", "1" if enabled else "0")
+                if not enabled:
+                    from db import connect
+                    with connect() as conn:
+                        conn.execute("UPDATE session_summary_dms SET status='suppressed' WHERE status='pending' AND session_id IN (SELECT session_id FROM session_history WHERE guild_id=?)", (gid,))
             elif action.startswith("gap"):
                 set_setting(gid, "reports:gap", action[3:])
             elif action == "reset_report_channel":

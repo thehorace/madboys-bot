@@ -239,6 +239,14 @@ CREATE TABLE IF NOT EXISTS session_history (
     message_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_session_history_guild ON session_history(guild_id, ended_at);
+
+CREATE TABLE IF NOT EXISTS session_summary_dms (
+    session_id INTEGER NOT NULL,
+    discord_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    message_id TEXT,
+    PRIMARY KEY (session_id, discord_id)
+);
 """
 
 
