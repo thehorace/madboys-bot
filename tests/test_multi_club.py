@@ -58,6 +58,10 @@ class MultiClubTests(unittest.IsolatedAsyncioTestCase):
         self.seed()
         self.tracker.ea.get_recent_matches_multi.side_effect = lambda cid, **kw: [self.raw(clubs.club_for(cid),'same',200)]
         self.assertEqual(await self.tracker.poll_once(),2)
+        # Milestone checks receive exactly the new games for their scoped club.
+        self.assertEqual(self.tracker.check_milestones.await_count,2)
+        for call, club in zip(self.tracker.check_milestones.call_args_list, clubs.monitored_clubs()):
+            self.assertEqual([m.club_id for m in call.kwargs['matches']], [club['club_id']])
         self.assertEqual(self.channel.send.await_count,2)
         for club, call in zip(clubs.monitored_clubs(),self.channel.send.call_args_list):
             self.assertIn(club['name'],call.kwargs['content'])

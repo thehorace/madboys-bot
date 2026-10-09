@@ -278,8 +278,16 @@ class DailyPostTests(unittest.IsolatedAsyncioTestCase):
         self.channel.get_partial_message.return_value.edit.assert_not_awaited()
 
     async def test_switching_to_sydney_time_moves_todays_session(self):
-        sid, start = self.todays_posted_session()
-        with patch.object(sessions, "GUILD_ID", "10"):
+        # Late-night runs can put the fixture's +2h kick-off on tomorrow's
+        # Sydney date. Use a fixed midday clock for this same-day settings test.
+        fixed = datetime(2026, 10, 9, 12, tzinfo=ZoneInfo("Asia/Singapore"))
+        with patch(__name__ + ".datetime", wraps=datetime) as fixture_clock, \
+                patch.object(sessions, "datetime", wraps=datetime) as bot_clock, \
+                patch.object(sessions.time, "time", return_value=fixed.timestamp()), \
+                patch.object(sessions, "GUILD_ID", "10"):
+            fixture_clock.now.side_effect = lambda tz=None: fixed.astimezone(tz)
+            bot_clock.now.side_effect = lambda tz=None: fixed.astimezone(tz)
+            sid, start = self.todays_posted_session()
             embed = await self._settings(timezone="sydney", kickoff_time="20:30", post_time="00:05")
             self.assertEqual(sessions.session_settings("10")["timezone"], "Australia/Sydney")
             self.assertEqual(str(sessions._tz()), "Australia/Sydney")

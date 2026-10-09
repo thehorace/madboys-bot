@@ -382,7 +382,7 @@ class MatchdayCog(commands.Cog):
             ids -= {did for p in pending_by_match.values() for did in p}
             await pos_cog.check_notes(guild, sorted(ids))
 
-        await self.check_milestones(guild, announce=True)
+        await self.check_milestones(guild, announce=True, matches=new)
         return len(new)
 
     def _log_rotation(self, guild_id: str, pm: md.ParsedMatch) -> dict[str, str]:
@@ -452,7 +452,16 @@ class MatchdayCog(commands.Cog):
         if motm and guild_id and to_post:
             await motm.open_poll(channel, guild_id, to_post[-1])
 
-    async def check_milestones(self, guild: Optional[discord.Guild], announce: bool):
+    async def check_milestones(self, guild: Optional[discord.Guild], announce: bool,
+                               matches: Optional[list[md.ParsedMatch]] = None):
+        # Bind eligibility to this poll's actual match participants, not the roster.
+        # Catch-up polls can contain several games: keep each player's latest one.
+        latest = {}
+        for pm in sorted(matches or [], key=lambda m: (m.ts, m.match_id)):
+            if pm.club_id != club_id():
+                continue
+            for player in pm.players:
+                latest[player.name.casefold()] = pm
         members = await self.ea.get_member_stats(club_id(), career=True, bypass_cache=True)
         if not members:
             return
@@ -464,15 +473,23 @@ class MatchdayCog(commands.Cog):
                 if not name:
                     continue
                 for stat, (label, thresholds) in MILESTONES.items():
+                    if m.get(stat) is None:
+                        continue  # Missing EA totals must not reset a saved baseline to zero.
                     new_val = to_int(m.get(stat))
                     row = conn.execute(
                         "SELECT value FROM stat_snapshots WHERE club_id=? AND player_name=? AND stat=?",
                         (club_id(), name, stat)).fetchone()
-                    if row is not None and announce:
+                    played = latest.get(name.casefold())
+                    if row is not None and announce and played is not None:
                         hit = crossed(row["value"], new_val, thresholds)
                         if hit:
                             who = f"<@{links[name.lower()]}>" if name.lower() in links else f"**{name}**"
-                            announcements.append(f"🎉 **{club_name()}** · {who} just hit **{hit} {label}**!")
+                            announcements.append(
+                                f"🎉 **{club_name()}** · {who} reached **{hit} {label}**. "
+                                f"Latest detected game: **{played.our_goals}–{played.opp_goals} vs {clip(played.opp_name, 80)}** "
+                                f"(<t:{played.ts}:R> · Match {clip(played.match_id, 40)}).")
+                    # Refresh absent players silently so historical increases don't
+                    # become announcements when they next appear in a match.
                     conn.execute(
                         "INSERT INTO stat_snapshots (club_id, player_name, stat, value) VALUES (?,?,?,?) "
                         "ON CONFLICT(club_id, player_name, stat) DO UPDATE SET value=excluded.value",
