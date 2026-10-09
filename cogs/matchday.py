@@ -31,6 +31,7 @@ Commands:
   /recap [days]              - Summary of the last N days (default 7)
 """
 
+from clubs import club_id, club_name, club_scope, club_scoped, monitored_clubs
 import asyncio
 import logging
 import re
@@ -96,7 +97,7 @@ def _tz() -> ZoneInfo:
 def build_recap_embed(days: int = 7, end: Optional[datetime] = None) -> Optional[discord.Embed]:
     end = end or datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    rows = md.matches_between(CLUB_ID, int(start.timestamp()), int(end.timestamp()) + 1)
+    rows = md.matches_between(club_id(), int(start.timestamp()), int(end.timestamp()) + 1)
     if not rows:
         return None
 
@@ -108,13 +109,13 @@ def build_recap_embed(days: int = 7, end: Optional[datetime] = None) -> Optional
     newest_first = list(reversed(rows))
 
     embed = discord.Embed(
-        title=f"🗓️ {CLUB_NAME} — {'Weekly' if days == 7 else f'{days}-day'} Recap",
+        title=f"🗓️ {club_name()} — {'Weekly' if days == 7 else f'{days}-day'} Recap",
         description=f"**{len(rows)} games** • W{w} D{d} L{l} • {gf} scored, {ga} conceded\n"
                     f"{md.form_string(newest_first[:15])}",
         colour=CLUB_COLOUR,
     )
 
-    totals = md.player_totals(CLUB_ID, int(start.timestamp()), int(end.timestamp()) + 1)
+    totals = md.player_totals(club_id(), int(start.timestamp()), int(end.timestamp()) + 1)
 
     def top(key: str, fmt, min_games: int = 1):
         pool = [t for t in totals if (t["games"] or 0) >= min_games and t[key]]
@@ -135,7 +136,7 @@ def build_recap_embed(days: int = 7, end: Optional[datetime] = None) -> Optional
         big = max(wins, key=lambda r: (r["our_goals"] - r["opp_goals"], r["our_goals"]))
         embed.add_field(name="💥 Biggest win", value=f"{big['our_goals']}–{big['opp_goals']} vs {big['opp_name']}",
                         inline=True)
-    embed.set_footer(text=f"{CLUB_NAME} • from matches tracked by the bot")
+    embed.set_footer(text=f"{club_name()} • from matches tracked by the bot")
     return embed
 
 
@@ -178,7 +179,7 @@ class MatchdayCog(commands.Cog):
             return
         with connect() as conn:
             row = conn.execute("SELECT channel_id FROM matchday_poll WHERE guild_id=? AND club=?",
-                               (guild_id, CLUB_NAME)).fetchone()
+                               (guild_id, club_name())).fetchone()
         if row:
             set_setting(guild_id, K_CHANNEL, row["channel_id"])
             log.info(f"Migrated matchday channel {row['channel_id']} from old matchday_poll table")
@@ -228,7 +229,7 @@ class MatchdayCog(commands.Cog):
                     return f"{m.display_name} is playing EA FC"
 
         # 3. a match finished recently (you're probably mid-session)
-        last = md.latest_match_ts(CLUB_ID)
+        last = max((md.latest_match_ts(c['club_id']) or 0 for c in monitored_clubs()), default=0)
         if last and now - last < window:
             return "played a match recently"
 
@@ -282,6 +283,8 @@ class MatchdayCog(commands.Cog):
 
     async def poll_once(self) -> int:
         """Fetch, store, log rotation, post, milestones. Returns number of new matches."""
+        if getattr(self, '_polling', False):
+            return 0
         self._polling = True
         try:
             count = await self._poll_once()
@@ -306,8 +309,32 @@ class MatchdayCog(commands.Cog):
             self._polling = False
 
     async def _poll_once(self) -> int:
+        """A failed club never prevents checking the remaining clubs."""
         self.last_poll_at = time.time()
-        raw_matches = await self.ea.get_recent_matches_multi(CLUB_ID, count=10, bypass_cache=True, allow_stale=False)
+        self.club_status = getattr(self, "club_status", {})
+        total = 0
+        states = []
+        for club in monitored_clubs():
+            state = self.club_status.setdefault(club['club_id'], {})
+            state.update(name=club['name'], checked_at=time.time())
+            try:
+                with club_scope(club):
+                    total += await self._poll_club()
+                    ok, partial = self.last_poll_ok, self.last_poll_partial
+                state.update(ok=ok, partial=partial, error=None if ok else "EA/relay match check incomplete")
+                if ok:
+                    state['success_at'] = time.time()
+            except Exception as exc:
+                log.exception("Club check failed: %s", club['name'])
+                state.update(ok=False, partial=False, error=type(exc).__name__)
+            states.append(state)
+        self.last_poll_ok = bool(states) and all(s['ok'] for s in states)
+        self.last_poll_partial = not self.last_poll_ok and any(s['ok'] or s['partial'] for s in states)
+        return total
+
+    async def _poll_club(self) -> int:
+        self.last_poll_at = time.time()
+        raw_matches = await self.ea.get_recent_matches_multi(club_id(), count=10, bypass_cache=True, allow_stale=False)
         self.last_poll_partial = raw_matches is not None and not getattr(raw_matches, "complete", True)
         self.last_poll_ok = raw_matches is not None and not self.last_poll_partial
         if not raw_matches:
@@ -318,20 +345,20 @@ class MatchdayCog(commands.Cog):
         if guild_id:
             self._migrate_old_poll_channel(guild_id)
 
-        first_run = md.match_count(CLUB_ID) == 0
+        first_run = md.match_count(club_id()) == 0
         self._linked_in.clear()
         self._unlinked.clear()
 
         new: list[md.ParsedMatch] = []
         for raw in sorted(raw_matches, key=lambda m: to_int(m.get("timestamp"))):  # oldest first
-            pm = md.parse_match(raw, CLUB_ID)
-            if pm and md.store_match(CLUB_ID, pm, raw):
+            pm = md.parse_match(raw, club_id())
+            if pm and md.store_match(club_id(), pm, raw):
                 new.append(pm)
 
         if not new:
             return 0
         self.last_new_at = time.time()
-        log.info(f"[{CLUB_NAME}] {len(new)} new match(es){' (initial backfill, not posting)' if first_run else ''}")
+        log.info(f"[{club_name()}] {len(new)} new match(es){' (initial backfill, not posting)' if first_run else ''}")
 
         pending_by_match: dict[str, dict[str, str]] = {}
         if guild_id:
@@ -364,7 +391,7 @@ class MatchdayCog(commands.Cog):
         lineup a manager posted (if EA's role agrees); otherwise EA's broad role is logged
         and the player is returned in `pending` ({discord_id: EA bucket}) to be asked.
         """
-        if is_match_processed(guild_id, CLUB_NAME, pm.match_id):
+        if is_match_processed(guild_id, club_name(), pm.match_id):
             return {}  # already logged (e.g. by the old rotation poller)
         import positions as POS
         plan = POS.plan_for_match(guild_id, pm.ts)
@@ -380,9 +407,9 @@ class MatchdayCog(commands.Cog):
                 if not confirmed:
                     pending[did] = (p.pos or "").lower()
         when = datetime.fromtimestamp(pm.ts, timezone.utc).isoformat() if pm.ts else None
-        log_positions(guild_id, CLUB_NAME, entries, source="lineup" if plan else "auto", logged_at=when,
+        log_positions(guild_id, club_name(), entries, source="lineup" if plan else "auto", logged_at=when,
                       match_id=pm.match_id)
-        mark_match_processed(guild_id, CLUB_NAME, pm.match_id)
+        mark_match_processed(guild_id, club_name(), pm.match_id)
         if unmatched:
             log.info(f"Match {pm.match_id}: not linked — {', '.join(unmatched)}")
         self._linked_in[pm.match_id] = [did for did, _ in entries]
@@ -391,7 +418,7 @@ class MatchdayCog(commands.Cog):
 
     async def _post_results(self, channel: discord.abc.Messageable, new: list[md.ParsedMatch],
                             guild_id: Optional[str] = None, pending_by_match: Optional[dict] = None):
-        recent = md.recent_results(CLUB_ID, 5)
+        recent = md.recent_results(club_id(), 5)
         footer = f"Form {md.form_string(recent)} • Streak {md.streak([r['result'] for r in recent])}"
         to_post = new[-MAX_POSTS_PER_POLL:]
         skipped = new[:-MAX_POSTS_PER_POLL]
@@ -402,17 +429,17 @@ class MatchdayCog(commands.Cog):
                 await channel.send(f"📡 Caught up on {len(skipped)} earlier result(s): {clip(summary, 1800)}")
             for i, pm in enumerate(to_post):
                 embed, file = await md.match_post(pm, footer_extra=footer if i == len(to_post) - 1 else "")
-                rematch = md.rematch_line(CLUB_ID, pm)
+                rematch = md.rematch_line(club_id(), pm)
                 if rematch:
                     embed.add_field(name="🔁 Rematch", value=rematch, inline=False)
-                await channel.send(content="📡 **Full time!**", embed=embed, **({"file": file} if file else {}))
+                await channel.send(content=f"📡 **{club_name()} — Full time!**", embed=embed, **({"file": file} if file else {}))
                 # "where did you play?" for anyone whose exact position isn't known
                 pos_cog = self.bot.get_cog("PositionsCog")
                 pending = (pending_by_match or {}).get(pm.match_id)
                 # only ask about the newest game if the bot is catching up on several
                 if pos_cog and guild_id and i == len(to_post) - 1:
                     await pos_cog.open_prompt(channel, guild_id, pm.match_id,
-                                              f"{pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}", pending or {},
+                                              f"{club_name()} · {pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}", pending or {},
                                               unlinked=self._unlinked.get(pm.match_id, []))
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
@@ -426,7 +453,7 @@ class MatchdayCog(commands.Cog):
             await motm.open_poll(channel, guild_id, to_post[-1])
 
     async def check_milestones(self, guild: Optional[discord.Guild], announce: bool):
-        members = await self.ea.get_member_stats(CLUB_ID, career=True, bypass_cache=True)
+        members = await self.ea.get_member_stats(club_id(), career=True, bypass_cache=True)
         if not members:
             return
         announcements = []
@@ -440,16 +467,16 @@ class MatchdayCog(commands.Cog):
                     new_val = to_int(m.get(stat))
                     row = conn.execute(
                         "SELECT value FROM stat_snapshots WHERE club_id=? AND player_name=? AND stat=?",
-                        (CLUB_ID, name, stat)).fetchone()
+                        (club_id(), name, stat)).fetchone()
                     if row is not None and announce:
                         hit = crossed(row["value"], new_val, thresholds)
                         if hit:
                             who = f"<@{links[name.lower()]}>" if name.lower() in links else f"**{name}**"
-                            announcements.append(f"🎉 {who} just hit **{hit} {label}**!")
+                            announcements.append(f"🎉 **{club_name()}** · {who} just hit **{hit} {label}**!")
                     conn.execute(
                         "INSERT INTO stat_snapshots (club_id, player_name, stat, value) VALUES (?,?,?,?) "
                         "ON CONFLICT(club_id, player_name, stat) DO UPDATE SET value=excluded.value",
-                        (CLUB_ID, name, stat, new_val))
+                        (club_id(), name, stat, new_val))
 
         if announcements and guild and self.posting_enabled(str(guild.id)):
             cid = self.channel_id_for(str(guild.id))
@@ -474,19 +501,23 @@ class MatchdayCog(commands.Cog):
         if local.weekday() != RECAP_WEEKDAY or local.hour < RECAP_HOUR:
             return
         week_key = f"{local.isocalendar().year}-W{local.isocalendar().week}"
-        if get_setting(gid, K_LAST_RECAP) == week_key:
-            return
-        set_setting(gid, K_LAST_RECAP, week_key)
         if not self.posting_enabled(gid):
             return
-        embed = build_recap_embed(7)
         cid = self.channel_id_for(gid)
         channel = await self._channel(cid) if cid else None
-        if embed and channel:
+        for club in monitored_clubs():
+            key = K_LAST_RECAP if club['club_id'] == CLUB_ID else f"{K_LAST_RECAP}:{club['club_id']}"
+            if get_setting(gid, key) == week_key:
+                continue
             try:
-                await channel.send(embed=embed)
-            except discord.Forbidden:
-                pass
+                with club_scope(club):
+                    embed = build_recap_embed(7)
+                if embed and channel:
+                    await channel.send(embed=embed)
+                if channel:
+                    set_setting(gid, key, week_key)
+            except discord.HTTPException:
+                log.warning("Couldn't post recap for %s", club['name'])
 
     @recap_loop.before_loop
     async def _before_recap(self):
@@ -499,6 +530,7 @@ class MatchdayCog(commands.Cog):
 
     @matchday_group.command(name="start", description="Post match results in this channel automatically (stays on)")
     @app_commands.describe(channel="Where to post (defaults to this channel)")
+    @club_scoped
     async def matchday_start(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
         if not is_manager(interaction.user):
             failed(interaction)
@@ -515,11 +547,12 @@ class MatchdayCog(commands.Cog):
         set_setting(gid, K_CHANNEL, str(channel.id))
         set_setting(gid, K_ENABLED, "1")
         await interaction.response.send_message(
-            f"📡 Match results for **{CLUB_NAME}** will post in {channel.mention} automatically — "
+            f"📡 Match results for **{club_name()}** will post in {channel.mention} automatically — "
             f"no need to run this again after restarts. Checking every {POLL_ACTIVE_MINUTES:g} min while you're "
             f"playing and every {POLL_IDLE_MINUTES:g} min otherwise. Weekly recap goes here too.")
 
     @matchday_group.command(name="stop", description="Stop posting results (matches are still tracked)")
+    @club_scoped
     async def matchday_stop(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
             failed(interaction)
@@ -531,6 +564,7 @@ class MatchdayCog(commands.Cog):
             "/form and rotation stay up to date. `/matchday start` turns posting back on.")
 
     @matchday_group.command(name="status", description="Show what the match tracker is doing")
+    @club_scoped
     async def matchday_status(self, interaction: discord.Interaction):
         from cogs.usage import can_view
         if not can_view(interaction.user, interaction.guild):
@@ -549,15 +583,17 @@ class MatchdayCog(commands.Cog):
             "**Last check:** " + (f"<t:{int(self.last_poll_at)}:R> ({'partial — some match types unavailable' if getattr(self, 'last_poll_partial', False) else 'ok' if self.last_poll_ok else 'failed — relay/EA unreachable'})"
                                    if self.last_poll_at else "not yet"),
             f"**Next check:** <t:{int(self.next_poll_at)}:R>" if self.next_poll_at else "",
-            f"**Matches stored:** {md.match_count(CLUB_ID)}",
+            "**Clubs monitored:** " + ', '.join(c['name'] for c in monitored_clubs()),
+            f"**{club_name()} matches stored:** {md.match_count(club_id())}",
         ]
-        last_ts = md.latest_match_ts(CLUB_ID)
+        last_ts = md.latest_match_ts(club_id())
         if last_ts:
             lines.append(f"**Latest match:** <t:{last_ts}:R>")
         await interaction.response.send_message("\n".join(l for l in lines if l), ephemeral=True)
 
     @matchday_group.command(name="check", description="Check EA for new matches right now")
     @app_commands.checks.cooldown(1, 60, key=lambda i: i.guild_id)
+    @club_scoped
     async def matchday_check(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         if self._polling:
@@ -575,6 +611,7 @@ class MatchdayCog(commands.Cog):
 
     @app_commands.command(name="recap", description="Summary of recent games (default: last 7 days)")
     @app_commands.describe(days="How many days back (1–90)")
+    @club_scoped
     async def recap(self, interaction: discord.Interaction, days: app_commands.Range[int, 1, 90] = 7):
         embed = build_recap_embed(days)
         if embed is None:

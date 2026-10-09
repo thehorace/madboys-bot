@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator, Optional
 
-from config import DB_PATH, migrate_legacy_club
+from config import DB_PATH, INITIAL_CLUBS, migrate_legacy_club
 
 log = logging.getLogger("madboys-bot.db")
 
@@ -39,6 +39,11 @@ def now_iso() -> str:
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS monitored_clubs (
+    club_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1
+);
 -- ---------- existing tables (unchanged, so old databases keep working) ----------
 CREATE TABLE IF NOT EXISTS ea_links (
     guild_id   TEXT NOT NULL,
@@ -286,6 +291,8 @@ def init_all():
             conn.execute("ALTER TABLE rotation_log ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
         _migrate_active_formation_pk(conn)
         conn.executescript(SCHEMA)
+        conn.executemany("INSERT OR IGNORE INTO monitored_clubs (club_id,name) VALUES (?,?)",
+                         [(c["club_id"], c["name"]) for c in INITIAL_CLUBS])
         # columns added to match_players after it first shipped
         have = {r["name"] for r in conn.execute("PRAGMA table_info(match_players)")}
         for col in ("archetype_id", "seconds_played", "clean_sheet", "goals_conceded"):
@@ -304,6 +311,9 @@ def init_all():
         for column in ("sticky_at", "started_shown"):
             if column not in have_sessions:
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        for table in ("position_prompts", "motm_polls"):
+            if "club_id" not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN club_id INTEGER NOT NULL DEFAULT {INITIAL_CLUBS[0]['club_id']}")
         for table in ("rotation_log", "processed_matches", "matchday_poll", "active_formation", "lineup_slots"):
             migrate_legacy_club(conn, table)
     log.info(f"Database ready at {DB_PATH}")

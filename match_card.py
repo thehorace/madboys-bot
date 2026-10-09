@@ -13,6 +13,7 @@ Shareable result card image (PNG), attached to every full-time post and to
   └─────────────────────────────────────────────────────────┘
 """
 
+from clubs import club_name
 import io
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,6 +23,7 @@ from PIL import Image, ImageDraw
 from config import BOT_TZ, CLUB_NAME
 from fonts import font
 from match_data import MATCH_TYPE_LABEL, POS_SHORT, ParsedMatch, motm_of
+from clubs import match_scoped
 
 W, H = 1200, 630
 
@@ -76,6 +78,7 @@ def _when(ts: int) -> str:
     return dt.strftime("%d %b %Y").upper()
 
 
+@match_scoped
 def render_match_card(pm: ParsedMatch) -> io.BytesIO:
     img = Image.new("RGB", (W, H), BG_TOP)
     d = ImageDraw.Draw(img)
@@ -99,7 +102,7 @@ def render_match_card(pm: ParsedMatch) -> io.BytesIO:
     d.text((W / 2, cy), score, font=f_score, fill=TEXT, anchor="mm")
     score_half = d.textlength(score, font=f_score) / 2
     name_w = int(W / 2 - score_half - 80)
-    ours, f_ours = _fit_font(d, CLUB_NAME.upper(), name_w, 44)
+    ours, f_ours = _fit_font(d, club_name().upper(), name_w, 44)
     theirs, f_theirs = _fit_font(d, pm.opp_name.upper(), name_w, 44)
     d.text((W / 2 - score_half - 40, cy), ours, font=f_ours, fill=TEXT, anchor="rm")
     d.text((W / 2 + score_half + 40, cy), theirs, font=f_theirs, fill=MUTED, anchor="lm")
@@ -158,7 +161,7 @@ def render_match_card(pm: ParsedMatch) -> io.BytesIO:
         if ga:
             d.text((right, y + (row_h - 8) / 2), ga, font=f_small, fill=TEXT, anchor="rm")
 
-    d.text((W - 40, H - 22), f"{CLUB_NAME} • EA FC Pro Clubs", font=font(16), fill=MUTED, anchor="rm")
+    d.text((W - 40, H - 22), f"{club_name()} • EA FC Pro Clubs", font=font(16), fill=MUTED, anchor="rm")
 
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)

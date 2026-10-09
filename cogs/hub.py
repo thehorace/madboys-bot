@@ -20,6 +20,7 @@ All screens come from the same build_* functions the slash commands use
 (cogs/stats.py), so the menu and the commands always agree.
 """
 
+from clubs import club_id, club_name, club_scope, club_scoped, monitored_clubs
 import asyncio
 import logging
 import time
@@ -72,6 +73,7 @@ class StatsMenu(TrackedView):
 
     # ------------------------------------------------------------------ #
     @classmethod
+    @club_scoped
     async def open(cls, bot: commands.Bot, interaction: discord.Interaction, page: str = "home"):
         """Send a new private menu in reply to a slash command or a panel button."""
         from cogs.lineup import get_prefs
@@ -82,7 +84,7 @@ class StatsMenu(TrackedView):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         roster = await S.roster_names(bot.ea)
-        menu = cls(bot, interaction.user, str(interaction.guild_id), roster, md.opponents(CLUB_ID, limit=25))
+        menu = cls(bot, interaction.user, str(interaction.guild_id), roster, md.opponents(club_id(), limit=25))
         await menu.go(page)
         menu.record_result(interaction)
         menu.message_interaction = interaction
@@ -109,11 +111,11 @@ class StatsMenu(TrackedView):
     # ------------------------------------------------------------------ #
     def home_embed(self) -> discord.Embed:
         embed = discord.Embed(
-            title=f"📊 {CLUB_NAME} — Stats",
+            title=f"📊 {club_name()} — Stats",
             description="Tap a button or pick from a dropdown below.\n*Only you can see this menu — "
                         "use 📢 Share to post something to the channel.*",
             colour=CLUB_COLOUR)
-        recent = md.recent_results(CLUB_ID, 5)
+        recent = md.recent_results(club_id(), 5)
         if recent:
             r = recent[0]
             embed.add_field(name="Last result",
@@ -259,6 +261,9 @@ class StatsMenu(TrackedView):
                                   disabled=self.page in ("home", "link"))
         share.callback = self._share
         self.add_item(share)
+        switch = discord.ui.Button(label="Switch club", emoji="🔁", row=4)
+        switch.callback = self._switch_club
+        self.add_item(switch)
 
         # position filter for leaderboards (cycles All -> DEF -> MID -> FWD -> GK)
         if self.page == "leaderboard" and self.stat != "squad_motm":
@@ -268,6 +273,24 @@ class StatsMenu(TrackedView):
                                         else discord.ButtonStyle.secondary)
             pos_btn.callback = self._cycle_position
             self.add_item(pos_btn)
+
+    async def _switch_club(self, interaction):
+        clubs = monitored_clubs()
+        if not clubs:
+            await interaction.response.send_message("No clubs are enabled.", ephemeral=True)
+            return
+        index = next((i for i,c in enumerate(clubs) if c['club_id']==self.club_id), -1)
+        club = clubs[(index+1) % len(clubs)]
+        self.club_id = club['club_id']
+        set_setting(self.guild_id, f"club:{self.user.id}", str(self.club_id))
+        await interaction.response.defer()
+        with club_scope(club):
+            self.roster = await S.roster_names(self.ea)
+            self.opponents = md.opponents(self.club_id, limit=25)
+            self.player = self.compare_with = self.opponent = None
+            await self.go('home')
+        self.message_interaction = interaction
+        await interaction.edit_original_response(embed=self.embed, view=self, attachments=[])
 
     async def _update(self, interaction: discord.Interaction, page: str):
         await interaction.response.defer()  # EA can take a few seconds; Discord wants an answer within 3
@@ -406,7 +429,7 @@ class PanelView(TrackedView):
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
-        title=f"⚽ {CLUB_NAME} Bot",
+        title=f"⚽ {club_name()} Bot",
         description="**Tap a button — no commands needed.**\n"
                     "Your menu opens privately (only you see it), and you can 📢 Share anything to the channel.\n\n"
                     "📊 **Stats** — everything: results, players, leaderboards, head-to-heads\n"
@@ -483,11 +506,13 @@ class HubCog(commands.Cog):
                 pass
 
     @app_commands.command(name="stats", description="Open the stats menu — buttons and dropdowns, no typing")
+    @club_scoped
     async def stats(self, interaction: discord.Interaction):
         await StatsMenu.open(self.bot, interaction)
 
     @app_commands.command(name="panel", description="Manager: post a button panel in this channel")
     @app_commands.describe(sticky="Keep it at the bottom of the channel (re-posts itself as the chat moves on)")
+    @club_scoped
     async def panel(self, interaction: discord.Interaction, sticky: bool = False):
         if not is_manager(interaction.user):
             failed(interaction)

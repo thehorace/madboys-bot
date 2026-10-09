@@ -14,6 +14,7 @@ History comes from every tracked match (cogs/matchday.py + positions.py):
     at that broad level (see current_streak()).
 """
 
+from clubs import club_name, club_scoped
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -181,12 +182,13 @@ class RotationCog(commands.Cog):
     rotation_group = app_commands.Group(name="rotation", description="Rotation tracking")
 
     @rotation_group.command(name="check", description="Flag players who've been stuck in the same role")
+    @club_scoped
     async def rotation_check(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
-        history = get_all_recent(guild_id, CLUB_NAME, limit_per_player=10)
+        history = get_all_recent(guild_id, club_name(), limit_per_player=10)
         if not history:
             await interaction.response.send_message(
-                f"No rotation history for {CLUB_NAME} yet. It fills in automatically after matches "
+                f"No rotation history for {club_name()} yet. It fills in automatically after matches "
                 f"once players have used `/link me`.", ephemeral=True)
             return
 
@@ -203,7 +205,7 @@ class RotationCog(commands.Cog):
             else:
                 healthy.append(f"✅ {name} — {spots}")
 
-        embed = discord.Embed(title=f"🔄 {CLUB_NAME} — Rotation Check", colour=0xFF4444 if flagged else 0x2ECC71)
+        embed = discord.Embed(title=f"🔄 {club_name()} — Rotation Check", colour=0xFF4444 if flagged else 0x2ECC71)
         if flagged:
             embed.add_field(name=f"Needs rotation ({len(flagged)})", value=clip("\n".join(flagged)), inline=False)
         else:
@@ -217,9 +219,10 @@ class RotationCog(commands.Cog):
 
     @rotation_group.command(name="history", description="Show recent position history for a player")
     @app_commands.describe(player="The player (leave blank for yourself)")
+    @club_scoped
     async def rotation_history(self, interaction: discord.Interaction, player: Optional[discord.Member] = None):
         player = player or interaction.user
-        history = get_recent_positions(str(interaction.guild_id), CLUB_NAME, str(player.id), limit=10)
+        history = get_recent_positions(str(interaction.guild_id), club_name(), str(player.id), limit=10)
         if not history:
             await interaction.response.send_message(
                 f"No rotation history for **{player.display_name}** yet.", ephemeral=True)
@@ -239,10 +242,11 @@ class RotationCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     @rotation_group.command(name="stats", description="Show how many games each player has played per role")
+    @club_scoped
     async def rotation_stats(self, interaction: discord.Interaction):
-        counts = get_position_counts(str(interaction.guild_id), CLUB_NAME)
+        counts = get_position_counts(str(interaction.guild_id), club_name())
         if not counts:
-            await interaction.response.send_message(f"No rotation data for {CLUB_NAME} yet.", ephemeral=True)
+            await interaction.response.send_message(f"No rotation data for {club_name()} yet.", ephemeral=True)
             return
         await interaction.response.defer()
         lines = []
@@ -255,7 +259,7 @@ class RotationCog(commands.Cog):
             total = sum(merged.values())
             breakdown = ", ".join(f"{p} ×{c}" for p, c in sorted(merged.items(), key=lambda x: -x[1]))
             lines.append((name.lower(), f"**{name}** ({total}): {breakdown}"))
-        embed = discord.Embed(title=f"📊 {CLUB_NAME} — Games per Position (All Time)",
+        embed = discord.Embed(title=f"📊 {club_name()} — Games per Position (All Time)",
                               description=clip("\n".join(l for _, l in sorted(lines)), 4096), colour=CLUB_COLOUR)
         await interaction.followup.send(embed=embed)
 

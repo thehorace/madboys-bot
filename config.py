@@ -1,11 +1,13 @@
 """
-Single-club configuration for MADBOYS FC (EA FC 27).
+Club and bot configuration for EA FC 27.
 
 Everything tunable lives here and reads from env vars (all optional).
 
 Club / EA
   CLUB_NAME              Display name + DB key for the club          (default "MADBOYS FC")
   CLUB_ID                EA Pro Clubs club ID (falls back to the old MADBOYS_CLUB_ID var)
+  GRAYSBOYS_CLUB_ID       Secondary club ID (default 754785, supplied EA page)
+  CLUBS_JSON             Optional list of extra clubs, seeded into the saved registry
   EA_PLATFORM            EA platform string                          (default "common-gen5")
   MATCH_TYPES            Comma list of EA match types to track       (default "leagueMatch,playoffMatch")
 
@@ -40,12 +42,32 @@ Misc
 """
 
 import os
+import json
 import sqlite3
 
 CLUB_NAME = os.getenv("CLUB_NAME", "MADBOYS FC")
 CLUB_ID = int(os.getenv("CLUB_ID") or os.getenv("MADBOYS_CLUB_ID") or "24342")  # MADBOYS FC on EA (FC 27)
 PLATFORM = os.getenv("EA_PLATFORM", "common-gen5")
 CLUB_COLOUR = 0x1E90FF
+
+# Extra clubs; GRAYSBOYS ID comes from the supplied EA club page.
+INITIAL_CLUBS = [{"club_id": CLUB_ID, "name": CLUB_NAME}]
+if os.getenv("CLUBS_JSON"):
+    for club in json.loads(os.environ["CLUBS_JSON"]):
+        cid = int(club.get("club_id") or club.get("clubId"))
+        name = str(club["name"]).strip()
+        if cid <= 0 or not name or len(name) > 80:
+            raise ValueError("CLUBS_JSON requires positive club IDs and names of 1–80 characters")
+        if cid != CLUB_ID:
+            INITIAL_CLUBS.append({"club_id": cid, "name": name})
+else:
+    secondary = int(os.getenv("GRAYSBOYS_CLUB_ID", "754785"))
+    if secondary <= 0 or secondary == CLUB_ID:
+        raise ValueError("GRAYSBOYS_CLUB_ID must be a distinct positive EA club ID")
+    INITIAL_CLUBS.append({"club_id": secondary, "name": "GRAYSBOYS"})
+
+if len(INITIAL_CLUBS) > 10 or len({c['club_id'] for c in INITIAL_CLUBS}) != len(INITIAL_CLUBS) or len({c['name'].casefold() for c in INITIAL_CLUBS}) != len(INITIAL_CLUBS):
+    raise ValueError('Configure at most 10 clubs with distinct IDs and display names')
 
 MATCH_TYPES = [t.strip() for t in os.getenv("MATCH_TYPES", "leagueMatch,playoffMatch").split(",") if t.strip()]
 

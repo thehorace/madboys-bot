@@ -1,4 +1,5 @@
 """A private, resumable EA link → positions → buttons setup flow."""
+from clubs import club_scoped, monitored_clubs
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -128,8 +129,11 @@ class SetupView(TrackedView):
 
 async def open_setup(bot, interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
-    members = await bot.ea.get_member_stats(CLUB_ID) or []
-    view = SetupView(bot, interaction.user, str(interaction.guild_id), [m["name"] for m in members if m.get("name")])
+    names = set()
+    for club in monitored_clubs():
+        members = await bot.ea.get_member_stats(club['club_id']) or []
+        names.update(m['name'] for m in members if m.get('name'))
+    view = SetupView(bot, interaction.user, str(interaction.guild_id), sorted(names, key=str.casefold))
     await interaction.followup.send(embed=view.embed(), view=view, ephemeral=True)
 
 
@@ -139,6 +143,7 @@ class OnboardingCog(commands.Cog):
 
     @app_commands.command(name="setup", description="Link your EA player, choose positions and learn the buttons")
     @app_commands.guild_only()
+    @club_scoped
     async def onboarding(self, interaction: discord.Interaction):
         await open_setup(self.bot, interaction)
 

@@ -16,6 +16,8 @@ message it's on), so votes keep working after a restart, and polls whose time
 ran out while the bot was down get closed as soon as it's back.
 """
 
+from clubs import club_id, club_name, club_scoped, match_key
+from clubs import club_for
 import json
 import logging
 import time
@@ -68,8 +70,9 @@ def season_table(since_ts: int = 0) -> list[tuple[str, int, int]]:
     votes: Counter = Counter()
     with connect() as conn:
         polls = conn.execute("""
-            SELECT p.match_id, p.winners FROM motm_polls p JOIN matches m ON m.match_id = p.match_id
-            WHERE p.closed=1 AND m.ts>=?""", (since_ts,)).fetchall()
+            SELECT p.match_id, p.winners FROM motm_polls p JOIN matches m ON m.club_id=p.club_id
+              AND m.match_id=CASE WHEN instr(p.match_id,':')>0 THEN substr(p.match_id,instr(p.match_id,':')+1) ELSE p.match_id END
+            WHERE p.closed=1 AND p.club_id=? AND m.ts>=?""", (club_id(), since_ts)).fetchall()
         for p in polls:
             for w in json.loads(p["winners"] or "[]"):
                 awards[w] += 1
@@ -121,7 +124,7 @@ def build_table_embed() -> discord.Embed:
     medals = ["🥇", "🥈", "🥉"]
     lines = [f"{medals[i] if i < 3 else f'`{i + 1:>2}.`'} **{n}** — {a} award{'s' if a != 1 else ''} "
              f"({v} vote{'s' if v != 1 else ''})" for i, (n, a, v) in enumerate(rows[:15])]
-    embed = discord.Embed(title=f"🏆 {CLUB_NAME} — Squad MOTM awards", description="\n".join(lines), colour=GOLD)
+    embed = discord.Embed(title=f"🏆 {club_name()} — Squad MOTM awards", description="\n".join(lines), colour=GOLD)
     embed.set_footer(text="Voted by the squad after each match • ties share the award")
     return embed
 
@@ -195,17 +198,17 @@ class MotmCog(commands.Cog):
             return  # nothing to vote on
         ea = md.motm_of(pm)
         poll = {
-            "match_id": pm.match_id, "guild_id": guild_id, "channel_id": str(getattr(channel, "id", "")),
-            "title": f"{pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}",
+            "match_id": match_key(pm.match_id, pm.club_id), "club_id": pm.club_id, "guild_id": guild_id, "channel_id": str(getattr(channel, "id", "")),
+            "title": f"{club_for(pm.club_id)['name']} · {pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}",
             "candidates": json.dumps([o.value for o in options]),
             "ea_motm": ea.name if ea else None,
             "closes_at": int(time.time() + MOTM_VOTE_MINUTES * 60),
         }
         with connect() as conn:
-            if conn.execute("SELECT 1 FROM motm_polls WHERE match_id=?", (pm.match_id,)).fetchone():
+            if conn.execute("SELECT 1 FROM motm_polls WHERE match_id=?", (poll['match_id'],)).fetchone():
                 return
-            conn.execute("""INSERT INTO motm_polls (match_id, guild_id, channel_id, title, candidates, ea_motm, closes_at)
-                            VALUES (:match_id, :guild_id, :channel_id, :title, :candidates, :ea_motm, :closes_at)""", poll)
+            conn.execute("""INSERT INTO motm_polls (match_id, guild_id, channel_id, title, candidates, ea_motm, closes_at, club_id)
+                            VALUES (:match_id, :guild_id, :channel_id, :title, :candidates, :ea_motm, :closes_at, :club_id)""", poll)
         try:
             msg = await channel.send(embed=open_embed(poll, 0), view=MotmView(options))
         except discord.HTTPException:
@@ -214,7 +217,7 @@ class MotmCog(commands.Cog):
         if msg is None:
             return
         with connect() as conn:
-            conn.execute("UPDATE motm_polls SET message_id=? WHERE match_id=?", (str(msg.id), pm.match_id))
+            conn.execute("UPDATE motm_polls SET message_id=? WHERE match_id=?", (str(msg.id), poll['match_id']))
 
     async def close_poll(self, poll: dict):
         votes = get_votes(poll["match_id"])
@@ -259,18 +262,20 @@ class MotmCog(commands.Cog):
     motm_group = app_commands.Group(name="motm", description="Squad Man of the Match votes")
 
     @motm_group.command(name="table", description="Season table of squad MOTM awards")
+    @club_scoped
     async def motm_table(self, interaction: discord.Interaction):
         await interaction.response.send_message(embed=build_table_embed())
 
     @motm_group.command(name="close", description="Manager: close the open MOTM vote now")
+    @club_scoped
     async def motm_close(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
             failed(interaction)
             await interaction.response.send_message("Managers only.", ephemeral=True)
             return
         with connect() as conn:
-            row = conn.execute("SELECT * FROM motm_polls WHERE closed=0 AND guild_id=? ORDER BY closes_at DESC LIMIT 1",
-                               (str(interaction.guild_id),)).fetchone()
+            row = conn.execute("SELECT * FROM motm_polls WHERE closed=0 AND guild_id=? AND club_id=? ORDER BY closes_at DESC LIMIT 1",
+                               (str(interaction.guild_id), club_id())).fetchone()
         if not row:
             await interaction.response.send_message("No open vote.", ephemeral=True)
             return

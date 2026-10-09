@@ -17,6 +17,7 @@ cogs/hub.py both call the same builders, so they always show the same thing.
   /debug <what>              - Manager: dump raw EA JSON (to spot FC 27 field changes)
 """
 
+from clubs import club_id, club_name, club_scoped
 import asyncio
 import io
 import json
@@ -123,14 +124,14 @@ def find_member(members: list[dict], query: str) -> tuple[Optional[dict], list[s
 
 def footer(embed: discord.Embed, ea, extra: str = "") -> discord.Embed:
     note = ea.stale_note() if ea else None
-    parts = [f"{CLUB_NAME} • EA FC Pro Clubs"] + ([extra] if extra else []) + ([note] if note else [])
+    parts = [f"{club_name()} • EA FC Pro Clubs"] + ([extra] if extra else []) + ([note] if note else [])
     embed.set_footer(text=" • ".join(parts))
     return embed
 
 
 async def roster_names(ea, limit: int = 25) -> list[str]:
     """Squad names, most games this season first (Discord dropdowns hold 25)."""
-    members = await ea.get_member_stats(CLUB_ID) or []
+    members = await ea.get_member_stats(club_id()) or []
     members = [m for m in members if m.get("name")]
     members.sort(key=lambda m: -to_int(m.get("gamesPlayed")))
     names, seen = [], set()
@@ -148,7 +149,7 @@ def recent_player_games(name: str, limit: int) -> list[str]:
             SELECT m.result, m.our_goals, m.opp_goals, m.opp_name, m.ts, mp.goals, mp.assists, mp.rating, mp.pos
             FROM match_players mp JOIN matches m ON m.club_id=mp.club_id AND m.match_id=mp.match_id
             WHERE mp.club_id=? AND mp.name=? COLLATE NOCASE ORDER BY m.ts DESC LIMIT ?
-        """, (CLUB_ID, name, limit)).fetchall()
+        """, (club_id(), name, limit)).fetchall()
     out = []
     for r in rows:
         rating = f"{r['rating']:.1f}" if r["rating"] is not None else "-"
@@ -162,39 +163,39 @@ def recent_player_games(name: str, limit: int) -> list[str]:
 #  screen builders (shared by slash commands and the menu)
 # --------------------------------------------------------------------------- #
 async def build_lastgame(ea, bot=None) -> Screen:
-    raw_list = await ea.get_recent_matches_multi(CLUB_ID, count=1)
-    raw = raw_list[0] if raw_list else md.get_raw_match(CLUB_ID)  # fall back to our own history
+    raw_list = await ea.get_recent_matches_multi(club_id(), count=1)
+    raw = raw_list[0] if raw_list else md.get_raw_match(club_id())  # fall back to our own history
     if not raw:
         return "Couldn't fetch the last game — EA or the relay may be down."
     # Safety net: if someone looks up a game the tracker hasn't posted yet, post it now
     # instead of waiting for the next scheduled check.
     mid = str(raw.get("matchId") or raw.get("timestamp") or "")
-    if bot is not None and raw_list and mid and not md.is_stored(CLUB_ID, mid):
+    if bot is not None and raw_list and mid and not md.is_stored(club_id(), mid):
         tracker = bot.get_cog("MatchdayCog")
         if tracker:
             tracker.poll_soon("someone opened Last game")
     try:
-        pm = md.parse_match(raw, CLUB_ID)
+        pm = md.parse_match(raw, club_id())
         embed, file = await md.match_post(pm)
     except Exception:
         log.exception("Error building last-game embed")
         return ("Got data from EA but couldn't read it — the format may have changed "
                 "(a manager can run `/debug` to check).")
     if not raw_list:
-        embed.set_footer(text=f"{CLUB_NAME} • ⚠️ EA unreachable — from the bot's saved history")
+        embed.set_footer(text=f"{club_name()} • ⚠️ EA unreachable — from the bot's saved history")
     elif ea.stale_note():
-        embed.set_footer(text=f"{CLUB_NAME} • {ea.stale_note()}")
+        embed.set_footer(text=f"{club_name()} • {ea.stale_note()}")
     if file:
         return embed, file.fp.read()
     return embed
 
 
 async def build_clubstats(ea) -> Screen:
-    stats = await ea.get_overall_stats(CLUB_ID)
+    stats = await ea.get_overall_stats(club_id())
     if not stats:
-        return f"Couldn't fetch stats for {CLUB_NAME} right now."
+        return f"Couldn't fetch stats for {club_name()} right now."
     g = stats.get
-    embed = discord.Embed(title=f"📊 {CLUB_NAME} — Season Stats", colour=CLUB_COLOUR)
+    embed = discord.Embed(title=f"📊 {club_name()} — Season Stats", colour=CLUB_COLOUR)
     embed.add_field(name="Record", value=f"W{g('wins', '?')} D{g('ties', '?')} L{g('losses', '?')}", inline=True)
     embed.add_field(name="Games Played", value=str(g("gamesPlayed", "?")), inline=True)
     embed.add_field(name="Goals", value=f"{g('goals', '?')} scored / {g('goalsAgainst', '?')} conceded", inline=True)
@@ -206,7 +207,7 @@ async def build_clubstats(ea) -> Screen:
                     inline=True)
     if g("gamesPlayedPlayoff") not in (None, "", "0"):
         embed.add_field(name="Playoff Games", value=str(g("gamesPlayedPlayoff")), inline=True)
-    recent = md.recent_results(CLUB_ID, 10)
+    recent = md.recent_results(club_id(), 10)
     if recent:
         embed.add_field(name="Form (last 10)",
                         value=f"{md.form_string(recent)}  streak **{md.streak([r['result'] for r in recent])}**",
@@ -215,15 +216,15 @@ async def build_clubstats(ea) -> Screen:
 
 
 async def build_player(ea, name: str, career: bool = False, with_recent: bool = True) -> Screen:
-    members = await ea.get_member_stats(CLUB_ID, career=career)
+    members = await ea.get_member_stats(club_id(), career=career)
     if not members:
-        return f"Couldn't fetch player stats for {CLUB_NAME} right now."
+        return f"Couldn't fetch player stats for {club_name()} right now."
     p, candidates = find_member(members, name)
     if not p:
         return (f"**{name}** matches several players: {', '.join(candidates[:10])}. Be more specific."
-                if candidates else f"No player matching **{name}** in {CLUB_NAME}.")
+                if candidates else f"No player matching **{name}** in {club_name()}.")
 
-    embed = discord.Embed(title=f"👤 {p.get('name', 'Unknown')} — {CLUB_NAME}",
+    embed = discord.Embed(title=f"👤 {p.get('name', 'Unknown')} — {club_name()}",
                           description="Career (All-Time)" if career else "This Season", colour=CLUB_COLOUR)
 
     def add(label: str, key: str, suffix: str = ""):
@@ -265,7 +266,7 @@ async def build_player(ea, name: str, career: bool = False, with_recent: bool = 
 
 
 async def build_leaderboard(ea, stat: str, career: bool = False, position: str = "all") -> Screen:
-    members = await ea.get_member_stats(CLUB_ID, career=career)
+    members = await ea.get_member_stats(club_id(), career=career)
     if not members:
         return "Couldn't fetch player stats right now."
     label, fmt = LEADERBOARD_STATS[stat]
@@ -283,7 +284,7 @@ async def build_leaderboard(ea, stat: str, career: bool = False, position: str =
     show_games = stat in RATE_STATS
     lines = [f"{medals[i] if i < 3 else f'`{i + 1:>2}.`'} **{n}** — {fmt.format(v)}" + (f"  ·  {g} games" if show_games else "")
              for i, (n, v, g) in enumerate(ranked[:15])]
-    title = f"🏆 {CLUB_NAME} — {label}" + (f" ({pos_label})" if position != "all" else "")
+    title = f"🏆 {club_name()} — {label}" + (f" ({pos_label})" if position != "all" else "")
     embed = discord.Embed(title=title, description="\n".join(lines), colour=CLUB_COLOUR)
     return footer(embed, ea, ("Career" if career else "This season") + (f" • min {min_games} games" if min_games > 1 else ""))
 
@@ -294,8 +295,8 @@ async def build_passing(ea, position: str = "all") -> Screen:
     (EA has no "touches" stat, so passes attempted per game is the involvement
     measure), per player, per position played, and for the team per match.
     """
-    members = await ea.get_member_stats(CLUB_ID)
-    embed = discord.Embed(title=f"🎯 {CLUB_NAME} — Passing", colour=CLUB_COLOUR,
+    members = await ea.get_member_stats(club_id())
+    embed = discord.Embed(title=f"🎯 {club_name()} — Passing", colour=CLUB_COLOUR,
                           description="**Acc** = pass accuracy • **Att/g** = passes attempted per game "
                                       "(how involved you are — EA doesn't track touches)")
     if members:
@@ -323,12 +324,12 @@ async def build_passing(ea, position: str = "all") -> Screen:
         by_role = conn.execute("""
             SELECT LOWER(pos) AS pos, COUNT(*) AS apps, SUM(passes_made) AS made, SUM(pass_attempts) AS att
             FROM match_players WHERE club_id=? AND pos IS NOT NULL GROUP BY LOWER(pos)
-        """, (CLUB_ID,)).fetchall()
+        """, (club_id(),)).fetchall()
         per_match = conn.execute("""
             SELECT m.result, SUM(mp.passes_made) AS made, SUM(mp.pass_attempts) AS att
             FROM matches m JOIN match_players mp ON mp.club_id=m.club_id AND mp.match_id=m.match_id
             WHERE m.club_id=? GROUP BY m.match_id ORDER BY m.ts DESC LIMIT 20
-        """, (CLUB_ID,)).fetchall()
+        """, (club_id(),)).fetchall()
     if by_role:
         order = {"goalkeeper": 0, "defender": 1, "midfielder": 2, "forward": 3}
         lines = []
@@ -354,7 +355,7 @@ async def build_passing(ea, position: str = "all") -> Screen:
 
 
 async def build_compare(ea, a_name: str, b_name: str, career: bool = False) -> Screen:
-    members = await ea.get_member_stats(CLUB_ID, career=career)
+    members = await ea.get_member_stats(club_id(), career=career)
     if not members:
         return "Couldn't fetch player stats right now."
     a, _ = find_member(members, a_name)
@@ -382,7 +383,7 @@ async def build_compare(ea, a_name: str, b_name: str, career: bool = False) -> S
 
 
 def build_form(games: int = 10) -> Screen:
-    rows = md.recent_results(CLUB_ID, games)
+    rows = md.recent_results(club_id(), games)
     if not rows:
         return "No matches tracked yet — they're recorded automatically from now on."
     w = sum(r["result"] == "W" for r in rows)
@@ -393,7 +394,7 @@ def build_form(games: int = 10) -> Screen:
     lines = [f"{md.RESULT_EMOJI[r['result']]} **{r['our_goals']}–{r['opp_goals']}** {r['opp_name']} "
              f"• {md.MATCH_TYPE_LABEL.get(r['match_type'], r['match_type'])} • <t:{r['ts']}:R>" for r in rows]
     return discord.Embed(
-        title=f"📈 {CLUB_NAME} — Last {len(rows)} games",
+        title=f"📈 {club_name()} — Last {len(rows)} games",
         description=f"{md.form_string(rows)}\n**W{w} D{d} L{l}** • {gf} scored, {ga} conceded "
                     f"({gf / len(rows):.1f} / {ga / len(rows):.1f} per game) • "
                     f"streak **{md.streak([r['result'] for r in rows])}**\n\n" + "\n".join(lines),
@@ -401,14 +402,14 @@ def build_form(games: int = 10) -> Screen:
 
 
 def build_h2h(opponent: str) -> Screen:
-    rows = md.head_to_head(CLUB_ID, opponent)
+    rows = md.head_to_head(club_id(), opponent)
     if not rows:
         return f"No tracked matches against **{opponent}**."
     w = sum(r["result"] == "W" for r in rows)
     d = sum(r["result"] == "D" for r in rows)
     l = sum(r["result"] == "L" for r in rows)
     lines = [f"{md.RESULT_EMOJI[r['result']]} {r['our_goals']}–{r['opp_goals']} • <t:{r['ts']}:d>" for r in rows[:10]]
-    return discord.Embed(title=f"🤝 {CLUB_NAME} vs {rows[0]['opp_name']}",
+    return discord.Embed(title=f"🤝 {club_name()} vs {rows[0]['opp_name']}",
                          description=f"**W{w} D{d} L{l}** • {sum(r['our_goals'] for r in rows)}–"
                                      f"{sum(r['opp_goals'] for r in rows)} on aggregate\n\n" + "\n".join(lines),
                          colour=CLUB_COLOUR)
@@ -423,16 +424,17 @@ def quick_squad_names(ea) -> list[str]:
     slow relay meant an empty list). Uses the cached EA member list, else everyone seen
     in tracked matches, and refreshes the member list in the background.
     """
-    names = ea.cached_member_names(CLUB_ID) if ea is not None else None
+    names = ea.cached_member_names(club_id()) if ea is not None else None
     if names is None:
         if ea is not None and ea.configured:
-            asyncio.get_running_loop().create_task(ea.get_member_stats(CLUB_ID))
+            asyncio.get_running_loop().create_task(ea.get_member_stats(club_id()))
         with connect() as conn:
             names = [r[0] for r in conn.execute(
-                "SELECT DISTINCT name FROM match_players WHERE club_id=? AND name IS NOT NULL", (CLUB_ID,))]
+                "SELECT DISTINCT name FROM match_players WHERE club_id=? AND name IS NOT NULL", (club_id(),))]
     return names
 
 
+@club_scoped
 async def player_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     cur = current.lower()
     names = sorted({n for n in quick_squad_names(getattr(interaction.client, "ea", None)) if cur in n.lower()},
@@ -440,8 +442,9 @@ async def player_autocomplete(interaction: discord.Interaction, current: str) ->
     return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names][:25]
 
 
+@club_scoped
 async def opponent_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in md.opponents(CLUB_ID, current)]
+    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in md.opponents(club_id(), current)]
 
 
 def card_file(png: bytes) -> discord.File:
@@ -470,11 +473,13 @@ class StatsCog(commands.Cog):
         self.started_at = time.time()
 
     @app_commands.command(name="lastgame", description="Latest match result (league or playoffs)")
+    @club_scoped
     async def lastgame(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await send_screen(interaction, await build_lastgame(self.ea, self.bot))
 
     @app_commands.command(name="clubstats", description="Season record, division and recent form")
+    @club_scoped
     async def clubstats(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await send_screen(interaction, await build_clubstats(self.ea))
@@ -484,12 +489,14 @@ class StatsCog(commands.Cog):
                            scope="This season (default) or career")
     @app_commands.choices(scope=SCOPES)
     @app_commands.autocomplete(player=player_autocomplete)
+    @club_scoped
     async def playerstats(self, interaction: discord.Interaction, player: Optional[str] = None,
                           scope: Optional[app_commands.Choice[str]] = None):
         await self._player(interaction, player, scope is not None and scope.value == "career")
 
     @app_commands.command(name="me", description="Your own stats and your last few games")
     @app_commands.choices(scope=SCOPES)
+    @club_scoped
     async def me(self, interaction: discord.Interaction, scope: Optional[app_commands.Choice[str]] = None):
         await self._player(interaction, None, scope is not None and scope.value == "career")
 
@@ -514,6 +521,7 @@ class StatsCog(commands.Cog):
     @app_commands.choices(stat=[app_commands.Choice(name=v[0], value=k) for k, v in LEADERBOARD_STATS.items()],
                           scope=SCOPES,
                           position=[app_commands.Choice(name=v[0], value=k) for k, v in POSITION_FILTERS.items()])
+    @club_scoped
     async def leaderboard(self, interaction: discord.Interaction, stat: app_commands.Choice[str],
                           scope: Optional[app_commands.Choice[str]] = None,
                           position: Optional[app_commands.Choice[str]] = None):
@@ -524,6 +532,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="passing", description="Pass accuracy vs involvement — per player, position and team")
     @app_commands.choices(position=[app_commands.Choice(name=v[0], value=k) for k, v in POSITION_FILTERS.items()])
+    @club_scoped
     async def passing(self, interaction: discord.Interaction, position: Optional[app_commands.Choice[str]] = None):
         await interaction.response.defer()
         await send_screen(interaction, await build_passing(self.ea, position.value if position else "all"))
@@ -531,6 +540,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="compare", description="Compare two players side by side")
     @app_commands.choices(scope=SCOPES)
     @app_commands.autocomplete(player_a=player_autocomplete, player_b=player_autocomplete)
+    @club_scoped
     async def compare(self, interaction: discord.Interaction, player_a: str, player_b: str,
                       scope: Optional[app_commands.Choice[str]] = None):
         await interaction.response.defer()
@@ -539,17 +549,20 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="form", description="Recent results from the bot's match history")
     @app_commands.describe(games="How many games (default 10)")
+    @club_scoped
     async def form(self, interaction: discord.Interaction, games: app_commands.Range[int, 1, 25] = 10):
         await interaction.response.defer()
         await send_screen(interaction, build_form(games))
 
     @app_commands.command(name="h2h", description="Your record against a specific club")
     @app_commands.autocomplete(opponent=opponent_autocomplete)
+    @club_scoped
     async def h2h(self, interaction: discord.Interaction, opponent: str):
         await interaction.response.defer()
         await send_screen(interaction, build_h2h(opponent))
 
     @app_commands.command(name="status", description="Bot + EA relay health")
+    @club_scoped
     async def status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         ok, ms, detail = await self.ea.ping()
@@ -561,7 +574,7 @@ class StatsCog(commands.Cog):
         ]
         if self.ea.last_ok_at:
             lines.append(f"**Last successful EA fetch:** <t:{int(self.ea.last_ok_at)}:R>")
-        lines.append(f"**Matches in history:** {md.match_count(CLUB_ID)}")
+        lines.append(f"**Matches in history:** {md.match_count(club_id())}")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="debug", description="Manager: raw EA data as a file (to check FC 27 field names)")
@@ -571,6 +584,7 @@ class StatsCog(commands.Cog):
         app_commands.Choice(name="Career member stats", value="career"),
         app_commands.Choice(name="Club overall stats", value="overall"),
     ])
+    @club_scoped
     async def debug(self, interaction: discord.Interaction, what: app_commands.Choice[str]):
         if not is_manager(interaction.user):
             failed(interaction)
@@ -578,12 +592,12 @@ class StatsCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         if what.value == "match":
-            data = await self.ea.get_recent_matches_multi(CLUB_ID, count=1)
-            data = data[0] if data else md.get_raw_match(CLUB_ID)
+            data = await self.ea.get_recent_matches_multi(club_id(), count=1)
+            data = data[0] if data else md.get_raw_match(club_id())
         elif what.value in ("members", "career"):
-            data = await self.ea.get_member_stats(CLUB_ID, career=what.value == "career")
+            data = await self.ea.get_member_stats(club_id(), career=what.value == "career")
         else:
-            data = await self.ea.get_overall_stats(CLUB_ID)
+            data = await self.ea.get_overall_stats(club_id())
         if data is None:
             await interaction.followup.send("No data came back.", ephemeral=True)
             return

@@ -27,6 +27,7 @@ How suggestions work:
     No moving for the sake of it. Solved optimally (Hungarian algorithm), not first-come.
 """
 
+from clubs import club_name, club_scoped
 import asyncio
 import json
 import logging
@@ -245,11 +246,11 @@ def auto_suggest(guild: discord.Guild, formation: str) -> tuple[dict[str, Option
     guild_id = str(guild.id)
     pool, _ = available_players(guild)
     result = suggest_lineup(FORMATIONS[formation], get_all_prefs(guild_id),
-                            get_all_recent(guild_id, CLUB_NAME, limit_per_player=10), pool)
-    clear_slots(guild_id, CLUB_NAME)   # old picks must not linger in slots we couldn't fill
+                            get_all_recent(guild_id, club_name(), limit_per_player=10), pool)
+    clear_slots(guild_id, club_name())   # old picks must not linger in slots we couldn't fill
     for pos, did in result.items():
         if did:
-            set_slot(guild_id, CLUB_NAME, pos, did)
+            set_slot(guild_id, club_name(), pos, did)
     return result, pool
 
 
@@ -260,7 +261,7 @@ async def lineup_message(guild: discord.Guild, formation: str, slots: dict[str, 
     embed = discord.Embed(title=title, description="\n".join(lines), colour=CLUB_COLOUR)
     embed.set_footer(text=footer)
     # Drawing takes ~0.1s of CPU; do it off the main loop so the bot doesn't freeze on every builder click
-    png = await asyncio.to_thread(render_lineup, formation, names, title=f"{CLUB_NAME} • {formation}")
+    png = await asyncio.to_thread(render_lineup, formation, names, title=f"{club_name()} • {formation}")
     if png:
         embed.set_image(url="attachment://lineup.png")
         return embed, png.read()
@@ -277,7 +278,7 @@ async def post_lineup(channel: discord.abc.Messageable, guild: discord.Guild, fo
     """Save the lineup as the source of exact positions for the next matches, and post it with pings."""
     import positions as POS
     POS.save_plan(str(guild.id), formation, slots, posted_by)
-    embed, png = await lineup_message(guild, formation, slots, f"📋 {CLUB_NAME} — Lineup ({formation})",
+    embed, png = await lineup_message(guild, formation, slots, f"📋 {club_name()} — Lineup ({formation})",
                                       "Positions from this lineup are logged automatically after each game")
     pings = " · ".join(f"{strip_number(pos)} <@{did}>" for pos, did in slots.items() if did)
     await channel.send(content=f"📋 **Lineup is up!**\n{pings}", embed=embed, files=png_file(png),
@@ -449,9 +450,9 @@ class LineupBuilder(TrackedView):
         super().__init__(timeout=14 * 60)
         self.bot, self.guild, self.user = bot, guild, user
         self.gid = str(guild.id)
-        self.formation = get_formation(self.gid, CLUB_NAME) or "4-3-3"
-        if not get_formation(self.gid, CLUB_NAME):
-            set_formation(self.gid, CLUB_NAME, self.formation)
+        self.formation = get_formation(self.gid, club_name()) or "4-3-3"
+        if not get_formation(self.gid, club_name()):
+            set_formation(self.gid, club_name(), self.formation)
         self.slot: Optional[str] = None
         self.note = ""
         self.embed = discord.Embed()
@@ -466,7 +467,7 @@ class LineupBuilder(TrackedView):
         return True
 
     def slots(self) -> dict[str, Optional[str]]:
-        return get_slots(self.gid, CLUB_NAME)
+        return get_slots(self.gid, club_name())
 
     async def candidates(self) -> list[str]:
         """People who are here first (✅ / 🎧 / 🎮), then the rest of the squad, so anyone can be picked."""
@@ -563,7 +564,7 @@ class LineupBuilder(TrackedView):
     async def _pick_formation(self, interaction: discord.Interaction):
         await interaction.response.defer()
         self.formation = interaction.data["values"][0]
-        set_formation(self.gid, CLUB_NAME, self.formation)
+        set_formation(self.gid, club_name(), self.formation)
         self.slot = None
         await self._update(interaction, f"Formation set to **{self.formation}** (slots cleared) — try ✨ Auto-suggest.")
 
@@ -579,15 +580,15 @@ class LineupBuilder(TrackedView):
             await self._update(interaction, "Pick a slot first.")
             return
         if choice == "_empty":
-            clear_slots(self.gid, CLUB_NAME, self.slot)
+            clear_slots(self.gid, club_name(), self.slot)
             await self._update(interaction, f"Emptied **{strip_number(self.slot)}**.")
             return
         slots = self.slots()
         old_slot = next((s for s, d in slots.items() if d == choice), None)
         displaced = slots.get(self.slot)
-        set_slot(self.gid, CLUB_NAME, self.slot, choice)
+        set_slot(self.gid, club_name(), self.slot, choice)
         if old_slot and displaced and old_slot != self.slot:
-            set_slot(self.gid, CLUB_NAME, old_slot, displaced)   # swap the two players
+            set_slot(self.gid, club_name(), old_slot, displaced)   # swap the two players
             note = f"Swapped **{self.names.get(choice)}** ↔ **{self.names.get(displaced)}**."
         else:
             note = f"**{self.names.get(choice)}** → **{strip_number(self.slot)}**."
@@ -610,7 +611,7 @@ class LineupBuilder(TrackedView):
 
     async def _clear(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        clear_slots(self.gid, CLUB_NAME)
+        clear_slots(self.gid, club_name())
         await self._update(interaction, "🧹 Cleared.")
 
     async def _post(self, interaction: discord.Interaction):
@@ -655,6 +656,7 @@ class LineupBuilder(TrackedView):
                                         f"(keep this a managers-only channel).")
 
 
+@club_scoped
 async def open_builder(bot: commands.Bot, interaction: discord.Interaction):
     if not is_manager(interaction.user):
         failed(interaction)
@@ -666,8 +668,9 @@ async def open_builder(bot: commands.Bot, interaction: discord.Interaction):
     await interaction.followup.send(embed=view.embed, view=view, files=png_file(view.png), ephemeral=True)
 
 
+@club_scoped
 async def slot_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    formation = get_formation(str(interaction.guild_id), CLUB_NAME)
+    formation = get_formation(str(interaction.guild_id), club_name())
     slots = FORMATIONS.get(formation, [])
     return [app_commands.Choice(name=s, value=s) for s in slots if current.upper() in s][:25]
 
@@ -689,33 +692,36 @@ class LineupCog(commands.Cog):
     # ------------------------------------------------------------------ #
     @formation_group.command(name="set", description="Set the active formation (manager only)")
     @app_commands.choices(formation=[app_commands.Choice(name=f, value=f) for f in FORMATIONS])
+    @club_scoped
     async def formation_set(self, interaction: discord.Interaction, formation: app_commands.Choice[str]):
         if not is_manager(interaction.user):
             failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role to set the formation.", ephemeral=True)
             return
-        set_formation(str(interaction.guild_id), CLUB_NAME, formation.value)
+        set_formation(str(interaction.guild_id), club_name(), formation.value)
         await interaction.response.send_message(
-            f"✅ **{CLUB_NAME}** formation set to **{formation.value}** ({', '.join(FORMATIONS[formation.value])}).\n"
+            f"✅ **{club_name()}** formation set to **{formation.value}** ({', '.join(FORMATIONS[formation.value])}).\n"
             f"Use `/lineup builder` (or the 🧑‍💼 Manager button) to fill it.")
 
     @formation_group.command(name="show", description="Show the current formation and lineup")
+    @club_scoped
     async def formation_show(self, interaction: discord.Interaction):
         gid = str(interaction.guild_id)
-        formation = get_formation(gid, CLUB_NAME)
+        formation = get_formation(gid, club_name())
         if not formation:
             await interaction.response.send_message("No formation set yet. Use `/formation set` first.", ephemeral=True)
             return
         await interaction.response.defer()
-        slots = get_slots(gid, CLUB_NAME)
+        slots = get_slots(gid, club_name())
         filled = sum(1 for v in slots.values() if v)
-        embed, png = await lineup_message(interaction.guild, formation, slots, f"⚽ {CLUB_NAME} — {formation}",
+        embed, png = await lineup_message(interaction.guild, formation, slots, f"⚽ {club_name()} — {formation}",
                                           f"{filled}/{len(slots)} positions filled")
         await self._send(interaction, embed, png)
 
     # ------------------------------------------------------------------ #
     @app_commands.command(name="builds", description="Tick the positions you have a build for")
     @app_commands.describe(player="Managers: set someone else's builds")
+    @club_scoped
     async def builds(self, interaction: discord.Interaction, player: Optional[discord.Member] = None):
         if player and player.id != interaction.user.id:
             await open_manager_builds(interaction, player)
@@ -725,22 +731,25 @@ class LineupCog(commands.Cog):
                                                 ephemeral=True)
 
     @app_commands.command(name="prefer", description="Same as /builds — the positions you can play")
+    @club_scoped
     async def position_prefer(self, interaction: discord.Interaction):
         await self.builds.callback(self, interaction)
 
     # ------------------------------------------------------------------ #
     @lineup_group.command(name="builder", description="Manager: build and post the lineup with buttons")
+    @club_scoped
     async def lineup_builder(self, interaction: discord.Interaction):
         await open_builder(self.bot, interaction)
 
     @lineup_group.command(name="suggest", description="Manager: auto-fill the lineup (session RSVPs, builds, rotation)")
+    @club_scoped
     async def lineup_suggest(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
             failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         gid = str(interaction.guild_id)
-        formation = get_formation(gid, CLUB_NAME)
+        formation = get_formation(gid, club_name())
         if not formation:
             await interaction.response.send_message("No formation set. Use `/formation set` first.", ephemeral=True)
             return
@@ -750,7 +759,7 @@ class LineupCog(commands.Cog):
         source = (f"{len(pool)} players who are here" if pool is not None else "everyone with builds set")
         bench = [did for did in (pool or []) if did not in result.values()]
         embed, png = await lineup_message(
-            interaction.guild, formation, result, f"📋 {CLUB_NAME} — Suggested Lineup ({formation})",
+            interaction.guild, formation, result, f"📋 {club_name()} — Suggested Lineup ({formation})",
             f"{filled}/{len(result)} filled from {source} • rotation-aware • /lineup post to send it")
         if bench:
             bench_names = [await resolve_name(interaction.guild, b) for b in bench]
@@ -760,13 +769,14 @@ class LineupCog(commands.Cog):
     @lineup_group.command(name="assign", description="Manager: put a player in a slot")
     @app_commands.describe(position="Slot to fill", player="Who plays there")
     @app_commands.autocomplete(position=slot_autocomplete)
+    @club_scoped
     async def lineup_assign(self, interaction: discord.Interaction, position: str, player: discord.Member):
         if not is_manager(interaction.user):
             failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
         gid = str(interaction.guild_id)
-        formation = get_formation(gid, CLUB_NAME)
+        formation = get_formation(gid, club_name())
         if not formation:
             await interaction.response.send_message("No formation set. Use `/formation set` first.", ephemeral=True)
             return
@@ -778,18 +788,19 @@ class LineupCog(commands.Cog):
         if player.bot:
             await interaction.response.send_message("Bots don't play Pro Clubs 🙂", ephemeral=True)
             return
-        set_slot(gid, CLUB_NAME, position, str(player.id))
+        set_slot(gid, club_name(), position, str(player.id))
         await interaction.response.send_message(f"✅ **{player.display_name}** → **{position}**")
 
     @lineup_group.command(name="clear", description="Manager: empty one slot, or the whole lineup")
     @app_commands.describe(position="Leave blank to clear everything")
     @app_commands.autocomplete(position=slot_autocomplete)
+    @club_scoped
     async def lineup_clear(self, interaction: discord.Interaction, position: Optional[str] = None):
         if not is_manager(interaction.user):
             failed(interaction)
             await interaction.response.send_message("You need the Manager/Admin role for this.", ephemeral=True)
             return
-        clear_slots(str(interaction.guild_id), CLUB_NAME, position.upper() if position else None)
+        clear_slots(str(interaction.guild_id), club_name(), position.upper() if position else None)
         await interaction.response.send_message(f"🧹 Cleared {position.upper() if position else 'the lineup'}.")
 
     async def _post(self, interaction: discord.Interaction):
@@ -798,8 +809,8 @@ class LineupCog(commands.Cog):
             await interaction.response.send_message("You need the Manager/Admin role to post a lineup.", ephemeral=True)
             return
         gid = str(interaction.guild_id)
-        formation = get_formation(gid, CLUB_NAME)
-        slots = get_slots(gid, CLUB_NAME) if formation else {}
+        formation = get_formation(gid, club_name())
+        slots = get_slots(gid, club_name()) if formation else {}
         if not any(slots.values()):
             await interaction.response.send_message(
                 "No players assigned yet. Use `/lineup builder` or `/lineup suggest` first.", ephemeral=True)
@@ -808,10 +819,12 @@ class LineupCog(commands.Cog):
         await post_lineup(interaction.channel, interaction.guild, formation, slots, str(interaction.user.id))
 
     @lineup_group.command(name="post", description="Manager: post the lineup here (sets everyone's exact positions)")
+    @club_scoped
     async def lineup_post(self, interaction: discord.Interaction):
         await self._post(interaction)
 
     @lineup_group.command(name="confirm", description="Same as /lineup post")
+    @club_scoped
     async def lineup_confirm(self, interaction: discord.Interaction):
         await self._post(interaction)
 

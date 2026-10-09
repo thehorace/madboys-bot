@@ -20,6 +20,8 @@ def failed(interaction):
 
 class TrackedView(discord.ui.View):
     def __init__(self, **kwargs):
+        from clubs import bound_club_id
+        self.club_id = bound_club_id()
         super().__init__(**kwargs)
         for child in self.children:
             self._track(child)
@@ -32,7 +34,13 @@ class TrackedView(discord.ui.View):
         async def tracked(interaction):
             record(interaction, "pending")
             try:
-                await callback(interaction)
+                from clubs import club_scope, selected_club
+                cid = self.club_id
+                if hasattr(self, "resolve_club"):
+                    cid = self.resolve_club(interaction)
+                club = cid or selected_club(interaction.guild_id, interaction.user.id)
+                with club_scope(club):
+                    await callback(interaction)
             except Exception:
                 failed(interaction)
                 record(interaction, "failed")

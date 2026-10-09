@@ -64,6 +64,13 @@ def status_embed(bot, gid):
         cid = tracker.channel_id_for(gid)
         successful = getattr(tracker, "last_success_at", None) or get_setting(gid, "matchday:last_success")
         embed.add_field(name="Match tracker", value=f"**{state}**\nLast attempt: {stamp(tracker.last_poll_at)}\nLast successful check: {stamp(successful)}\nNext check: {stamp(tracker.next_poll_at)}\nResults: {'On' if tracker.posting_enabled(gid) else 'Off'} · {f'<#{cid}>' if cid else 'No channel'}\nLatest game: {stamp(match_data.latest_match_ts(CLUB_ID))}", inline=False)
+        from clubs import monitored_clubs
+        lines = []
+        for club in monitored_clubs():
+            check = getattr(tracker, 'club_status', {}).get(club['club_id'], {})
+            health = 'OK' if check.get('ok') else 'Partial' if check.get('partial') else 'Failed' if check.get('ok') is False else 'Waiting'
+            lines.append(f"**{club['name']}** · {health} · Last check: {stamp(check.get('checked_at'))}\nLatest game: {stamp(match_data.latest_match_ts(club['club_id']))}")
+        embed.add_field(name="Monitored clubs", value='\n'.join(lines)[:1024] or 'None enabled', inline=False)
     else:
         embed.add_field(name="Match tracker", value="Unavailable", inline=False)
     sessions = bot.get_cog("SessionsCog")

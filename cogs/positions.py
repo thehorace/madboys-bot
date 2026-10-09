@@ -24,6 +24,7 @@ Delivery: by DM to managers who tapped "📩 DM me rotation notes" in the
 or MANAGER_CHANNEL_ID). Nobody opted in = no notes.
 """
 
+from clubs import club_id, club_name, club_scoped
 import json
 import logging
 import os
@@ -83,7 +84,7 @@ def _save_pending(message_id: str, pending: dict):
 
 def _match_time_iso(match_id: str) -> Optional[str]:
     with connect() as conn:
-        row = conn.execute("SELECT ts FROM matches WHERE match_id=?", (match_id,)).fetchone()
+        row = conn.execute("SELECT ts FROM matches WHERE club_id=? AND match_id=?", (club_id(), match_id)).fetchone()
     return datetime.fromtimestamp(row["ts"], timezone.utc).isoformat() if row and row["ts"] else None
 
 
@@ -96,6 +97,10 @@ def prompt_text(title: str, pending: dict) -> str:
 
 
 class PositionPromptView(TrackedView):
+    def resolve_club(self, interaction):
+        prompt = get_prompt(interaction.message.id)
+        return prompt['club_id'] if prompt else None
+
     def __init__(self):
         super().__init__(timeout=None)
         sel = discord.ui.Select(custom_id="madboys:pos:pick", placeholder="📍 Pick your position…",
@@ -135,7 +140,7 @@ class PositionPromptView(TrackedView):
 
     async def _record(self, interaction: discord.Interaction, prompt: dict, position: str):
         uid = str(interaction.user.id)
-        set_match_position(prompt["guild_id"], CLUB_NAME, prompt["match_id"], uid, position,
+        set_match_position(prompt["guild_id"], club_name(), prompt["match_id"], uid, position,
                            logged_at=_match_time_iso(prompt["match_id"]))
         prompt["pending"].pop(uid, None)
         _save_pending(prompt["message_id"], prompt["pending"])
@@ -157,21 +162,22 @@ class PositionsCog(commands.Cog):
 
     @app_commands.command(name="position", description="Set (or fix) where you played in your last game")
     @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in P.ALL_POSITIONS])
+    @club_scoped
     async def position(self, interaction: discord.Interaction, position: app_commands.Choice[str]):
         gid, uid = str(interaction.guild_id), str(interaction.user.id)
         with connect() as conn:
             row = conn.execute("""
                 SELECT r.match_id, m.our_goals, m.opp_goals, m.opp_name FROM rotation_log r
                 JOIN matches m ON m.match_id = r.match_id
-                WHERE r.guild_id=? AND r.club=? AND r.discord_id=? ORDER BY m.ts DESC LIMIT 1""",
-                (gid, CLUB_NAME, uid)).fetchone()
-            prompts = conn.execute("SELECT message_id, pending FROM position_prompts WHERE guild_id=? AND match_id=?",
-                                   (gid, row["match_id"] if row else "")).fetchall()
+                WHERE m.club_id=? AND r.guild_id=? AND r.club=? AND r.discord_id=? ORDER BY m.ts DESC LIMIT 1""",
+                (club_id(), gid, club_name(), uid)).fetchone()
+            prompts = conn.execute("SELECT message_id, pending FROM position_prompts WHERE guild_id=? AND club_id=? AND match_id=?",
+                                   (gid, club_id(), row["match_id"] if row else "")).fetchall()
         if not row:
             await interaction.response.send_message(
                 "I haven't tracked a game for you yet (are you linked? tap 👤 My stats on the panel).", ephemeral=True)
             return
-        set_match_position(gid, CLUB_NAME, row["match_id"], uid, position.value,
+        set_match_position(gid, club_name(), row["match_id"], uid, position.value,
                            logged_at=_match_time_iso(row["match_id"]))
         for pr in prompts:   # take them off that game's "where did you play?" list too
             pending = json.loads(pr["pending"])
@@ -218,9 +224,9 @@ class PositionsCog(commands.Cog):
         if msg is None:
             return
         with connect() as conn:
-            conn.execute("INSERT OR REPLACE INTO position_prompts (message_id, guild_id, match_id, title, pending, created_at) "
-                         "VALUES (?,?,?,?,?,?)", (str(msg.id), guild_id, match_id, title, json.dumps(pending),
-                                                  int(time.time())))
+            conn.execute("INSERT OR REPLACE INTO position_prompts (message_id, guild_id, match_id, title, pending, created_at, club_id) "
+                         "VALUES (?,?,?,?,?,?,?)", (str(msg.id), guild_id, match_id, title, json.dumps(pending),
+                                                  int(time.time()), club_id()))
 
     def manager_channel_id(self, guild_id: str) -> Optional[int]:
         cid = get_setting(guild_id, K_MANAGER_CHANNEL) or os.getenv("MANAGER_CHANNEL_ID")
@@ -242,13 +248,14 @@ class PositionsCog(commands.Cog):
             if not note:
                 continue
             key, text = note
-            if get_setting(gid, f"rotnote:{did}") == key:
+            setting_key = f"rotnote:{club_id()}:{did}"
+            if get_setting(gid, setting_key) == key:
                 continue  # already told the managers about this streak
-            set_setting(gid, f"rotnote:{did}", key)
+            set_setting(gid, setting_key, key)
             lines.append(f"• **{await resolve_name(guild, did)}** — {text}")
         if not lines:
             return
-        text = (f"🔄 **Rotation notes — {CLUB_NAME}**\n" + "\n".join(lines))[:1900]
+        text = (f"🔄 **Rotation notes — {club_name()}**\n" + "\n".join(lines))[:1900]
         for uid in dms:   # private DMs to the managers who opted in
             try:
                 user = self.bot.get_user(int(uid)) or await self.bot.fetch_user(int(uid))

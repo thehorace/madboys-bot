@@ -22,6 +22,9 @@ class FinalReviewTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.patcher.stop)
         db.init_all()
         self.club = matchday.CLUB_ID
+        # These fixtures exercise a single-club partial-check regression.
+        with db.connect() as conn:
+            conn.execute("UPDATE monitored_clubs SET enabled=0 WHERE club_id<>?", (self.club,))
         self.channel = SimpleNamespace(send=AsyncMock())
         self.guild = SimpleNamespace(id=10)
         self.reports = SimpleNamespace(after_poll=AsyncMock())

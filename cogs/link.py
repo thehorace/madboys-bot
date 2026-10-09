@@ -11,6 +11,7 @@ Commands:
   /link list                    - Manager: list all links
 """
 
+from clubs import club_id, club_name, club_scope, club_scoped, monitored_clubs
 import logging
 from typing import Optional
 
@@ -62,10 +63,14 @@ def find_discord_id_by_ea_name(guild_id: str, ea_name: str) -> Optional[str]:
     return row["discord_id"] if row else None
 
 
+@club_scoped
 async def roster_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     """Suggest EA persona names from the club's member list (cached, so this is cheap)."""
     from cogs.stats import quick_squad_names   # cached / DB only: autocomplete can't wait on the relay
-    names = sorted(set(quick_squad_names(getattr(interaction.client, "ea", None))))
+    names = set()
+    for club in monitored_clubs():
+        with club_scope(club):
+            names.update(quick_squad_names(getattr(interaction.client, "ea", None)))
     cur = current.lower()
     return [app_commands.Choice(name=n, value=n) for n in sorted(names, key=str.lower) if cur in n.lower()][:25]
 
@@ -78,15 +83,16 @@ class LinkCog(commands.Cog):
 
     async def _roster_note(self, ea_name: str) -> str:
         ea = getattr(self.bot, "ea", None)
-        members = await ea.get_member_stats(CLUB_ID) if ea else None
+        members = await ea.get_member_stats(club_id()) if ea else None
         if members and not any((m.get("name") or "").lower() == ea_name.lower() for m in members):
-            return (f"\n⚠️ **{ea_name}** isn't in {CLUB_NAME}'s current EA roster — double-check the spelling, "
+            return (f"\n⚠️ **{ea_name}** isn't in {club_name()}'s current EA roster — double-check the spelling, "
                     f"or ignore this if they just joined.")
         return ""
 
     @link_group.command(name="me", description="Link your own EA Pro Clubs persona name")
     @app_commands.describe(ea_name="Your EA persona name — start typing to pick from the club roster")
     @app_commands.autocomplete(ea_name=roster_autocomplete)
+    @club_scoped
     async def link_me(self, interaction: discord.Interaction, ea_name: str):
         await interaction.response.defer(ephemeral=True)
         set_link(str(interaction.guild_id), str(interaction.user.id), ea_name, linked_by="self")
@@ -98,6 +104,7 @@ class LinkCog(commands.Cog):
     @link_group.command(name="set", description="Manager: link a member to an EA persona")
     @app_commands.describe(member="The Discord member", ea_name="Their EA persona name")
     @app_commands.autocomplete(ea_name=roster_autocomplete)
+    @club_scoped
     async def link_set(self, interaction: discord.Interaction, member: discord.Member, ea_name: str):
         if not is_manager(interaction.user):
             failed(interaction)
@@ -111,6 +118,7 @@ class LinkCog(commands.Cog):
 
     @link_group.command(name="remove", description="Remove an EA link (yours, or anyone's if you're a manager)")
     @app_commands.describe(member="Leave blank for yourself")
+    @club_scoped
     async def link_remove(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
         target = member or interaction.user
         if target.id != interaction.user.id and not is_manager(interaction.user):
@@ -124,6 +132,7 @@ class LinkCog(commands.Cog):
 
     @link_group.command(name="show", description="Show the linked EA persona for yourself or someone else")
     @app_commands.describe(member="Leave blank to check yourself")
+    @club_scoped
     async def link_show(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
         target = member or interaction.user
         ea_name = get_link(str(interaction.guild_id), str(target.id))
@@ -132,6 +141,7 @@ class LinkCog(commands.Cog):
         await interaction.response.send_message(msg, ephemeral=True)
 
     @link_group.command(name="list", description="Manager: list all EA persona links, and who in the roster isn't linked")
+    @club_scoped
     async def link_list(self, interaction: discord.Interaction):
         if not is_manager(interaction.user):
             failed(interaction)
@@ -143,7 +153,7 @@ class LinkCog(commands.Cog):
         embed = discord.Embed(title="🔗 EA Persona Links", description=clip("\n".join(lines) or "No links yet.", 4096),
                               colour=CLUB_COLOUR)
 
-        members = await self.bot.ea.get_member_stats(CLUB_ID) if getattr(self.bot, "ea", None) else None
+        members = await self.bot.ea.get_member_stats(club_id()) if getattr(self.bot, "ea", None) else None
         if members:
             linked = {n.lower() for n in links.values()}
             missing = [m["name"] for m in members if m.get("name") and m["name"].lower() not in linked]

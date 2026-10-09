@@ -64,6 +64,10 @@ class AdminView(TrackedView):
         return await self.authorize(interaction)
 
     def embed(self):
+        if self.page == 'clubs':
+            from cogs.clubs import registry
+            return discord.Embed(title='Monitored clubs', colour=CLUB_COLOUR, description='\n'.join(
+                f"**{c['name']}** · ID {c['club_id']} · {'Enabled' if c['enabled'] else 'Disabled'}" for c in registry()) + '\n\nClubs are checked automatically. Toggle tracking below; history is retained. Changes apply on the next check without restarting.')
         if self.page == "home":
             return discord.Embed(title="🔒 Private admin panel", colour=CLUB_COLOUR,
                 description="Your bot controls, visible only to you.\n\n"
@@ -136,8 +140,15 @@ class AdminView(TrackedView):
             pass   # "All settings" on the bottom row already links there
         elif self.page == "settings":
             for label, action in (("Sessions", "sessions"), ("Match tracker", "tracker_settings"),
-                                  ("Session summaries", "reports"), ("EA News", "patchnotes")):
+                                  ("Session summaries", "reports"), ("EA News", "patchnotes"), ("Clubs", "clubs")):
                 self.button(label, action)
+        elif self.page == 'clubs':
+            from cogs.clubs import registry
+            self.button('Add club', 'add_club')
+            picker = discord.ui.Select(placeholder='Toggle tracking for a club', row=1, options=[
+                discord.SelectOption(label=c['name'][:100], value=str(c['club_id']), description='Enabled' if c['enabled'] else 'Disabled') for c in registry()])
+            picker.callback = self.toggle_club
+            self.add_item(picker)
         elif self.page in ("reports", "tracker_settings"):
             if self.page == "reports":
                 settings = report_settings(str(self.guild.id))
@@ -179,6 +190,17 @@ class AdminView(TrackedView):
     async def show(self, interaction):
         self.render()
         await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def toggle_club(self, interaction):
+        if not await self.authorize(interaction):
+            return
+        from cogs.clubs import toggle_club
+        try:
+            toggle_club(int(interaction.data['values'][0]))
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await self.show(interaction)
 
     async def refresh_anchor(self, interaction=None):
         """
@@ -226,7 +248,10 @@ class AdminView(TrackedView):
     async def act(self, interaction, action):
         if not await self.authorize(interaction):
             return
-        if action in ("sessions", "patchnotes", "home", "refresh", "settings", "status", "reports", "tracker_settings"):
+        if action == 'add_club':
+            from cogs.clubs import ClubModal
+            await interaction.response.send_modal(ClubModal(self))
+        elif action in ("sessions", "patchnotes", "home", "refresh", "settings", "status", "reports", "tracker_settings", "clubs"):
             if action != "refresh":
                 self.page = action
             await self.show(interaction)

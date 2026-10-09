@@ -13,6 +13,7 @@ from config import BUILDS_URL, CLUB_COLOUR, CLUB_NAME
 HELP_SECTIONS = [
     ("📊 Stats", [
         ("/stats", "Button menu for everything below"),
+        ("/club", "Choose your stats/lineup club, or auto-follow latest activity"),
         ("/lastgame", "Latest result with full player ratings"),
         ("/clubstats", "Season record, division, form"),
         ("/me", "Your stats + your last games (after /link me)"),

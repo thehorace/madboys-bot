@@ -16,9 +16,12 @@ EA match payload shape (the parts we use):
   }
 """
 
+from clubs import club_id, club_name
 import json
 import logging
 from dataclasses import dataclass, field
+from clubs import match_scoped
+from config import CLUB_ID
 from typing import Optional
 
 import discord
@@ -66,6 +69,7 @@ class ParsedMatch:
     opp_name: str
     players: list[PlayerLine] = field(default_factory=list)
     ea_result: int = 0   # EA's own result code for us; low bits: 1 = win, 2 = loss, 4 = draw
+    club_id: int = CLUB_ID
 
     @property
     def result(self) -> str:
@@ -82,11 +86,14 @@ def parse_match(match: dict, club_id: int) -> Optional[ParsedMatch]:
     if not match_id:
         return None
     clubs = match.get("clubs", {}) or {}
+    if str(club_id) not in clubs:
+        return None
     ours = clubs.get(str(club_id), {}) or {}
     opp_id = next((k for k in clubs if k != str(club_id)), None)
     opp = clubs.get(opp_id, {}) if opp_id else {}
 
     pm = ParsedMatch(
+        club_id=club_id,
         match_id=match_id,
         match_type=match.get("_matchType") or match.get("matchType") or "leagueMatch",
         ts=to_int(match.get("timestamp")),
@@ -306,11 +313,12 @@ def streak(results: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 #  Embeds
 # --------------------------------------------------------------------------- #
+@match_scoped
 def match_embed(pm: ParsedMatch, footer_extra: str = "", with_table: bool = True) -> discord.Embed:
     r = pm.result
     type_label = MATCH_TYPE_LABEL.get(pm.match_type, pm.match_type)
     embed = discord.Embed(
-        title=f"{RESULT_LABEL[r]}  {CLUB_NAME} {pm.our_goals}–{pm.opp_goals} {pm.opp_name}",
+        title=f"{RESULT_LABEL[r]}  {club_name()} {pm.our_goals}–{pm.opp_goals} {pm.opp_name}",
         colour=RESULT_COLOUR.get(r, CLUB_COLOUR),
         description=f"{type_label}" + (f" • <t:{pm.ts}:R>" if pm.ts else ""),
     )
@@ -336,10 +344,11 @@ def match_embed(pm: ParsedMatch, footer_extra: str = "", with_table: bool = True
         table = "```\n" + "\n".join(rows) + "\n```"
         embed.add_field(name="Ratings  (rating • shots • pass% • tackles)", value=clip(table), inline=False)
 
-    embed.set_footer(text=f"{CLUB_NAME} • EA FC Pro Clubs" + (f" • {footer_extra}" if footer_extra else ""))
+    embed.set_footer(text=f"{club_name()} • EA FC Pro Clubs" + (f" • {footer_extra}" if footer_extra else ""))
     return embed
 
 
+@match_scoped
 async def match_post(pm: ParsedMatch, footer_extra: str = "") -> tuple[discord.Embed, Optional[discord.File]]:
     """Embed + result card image. Falls back to the text table if the image fails for any reason."""
     import asyncio

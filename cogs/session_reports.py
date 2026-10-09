@@ -13,6 +13,7 @@ from db import connect, get_setting, set_setting
 from cogs.link import get_all_links
 from cogs.operations import report_health
 from interaction_tracking import TrackedView
+from clubs import monitored_clubs, match_key, match_club, raw_match_key, club_for
 
 log = logging.getLogger("madboys-bot.session_reports")
 
@@ -71,10 +72,12 @@ def archive_sessions(gid, now):
                 continue
             next_start = conn.execute("SELECT MIN(starts_at) FROM sessions WHERE guild_id=? AND starts_at>? AND cancelled=0", (gid, s["starts_at"])).fetchone()[0]
             boundary = min(next_start or now + 1, now + 1)
-            rows = conn.execute("SELECT * FROM matches WHERE club_id=? AND ts>=? AND ts<? ORDER BY ts,match_id", (CLUB_ID, s["starts_at"], boundary)).fetchall()
+            club_ids = [c['club_id'] for c in monitored_clubs()] or [CLUB_ID]
+            marks = ','.join('?' for _ in club_ids)
+            rows = conn.execute(f"SELECT * FROM matches WHERE club_id IN ({marks}) AND ts>=? AND ts<? ORDER BY ts,club_id,match_id", (*club_ids, s["starts_at"], boundary)).fetchall()
             matches = []
             for match in rows:
-                if match["match_id"] in assigned:
+                if match_key(match["match_id"], match['club_id']) in assigned:
                     continue
                 # A distant game belongs to a different playing session.
                 previous = matches[-1]["ts"] if matches else s["starts_at"]
@@ -88,14 +91,18 @@ def archive_sessions(gid, now):
                 continue
             if cancelled:
                 matches = []
-            ids = [m["match_id"] for m in matches]
+            ids = [match_key(m["match_id"], m['club_id']) for m in matches]
             assigned.update(ids)
             players = []
-            if ids:
-                marks = ",".join("?" for _ in ids)
-                players = [dict(p) for p in conn.execute(
+            for cid in sorted({m['club_id'] for m in matches}):
+                raw_ids = [m['match_id'] for m in matches if m['club_id'] == cid]
+                marks = ','.join('?' for _ in raw_ids)
+                group = [dict(p) for p in conn.execute(
                     f"SELECT name,COUNT(*) games,SUM(goals) goals,SUM(assists) assists,AVG(rating) rating,SUM(motm) motm,SUM(saves) saves,SUM(tackles_made) tackles,SUM(passes_made) passes,SUM(pass_attempts) attempts FROM match_players WHERE club_id=? AND match_id IN ({marks}) GROUP BY name COLLATE NOCASE",
-                    [CLUB_ID, *ids])]
+                    [cid, *raw_ids])]
+                for p in group:
+                    p.update(club_id=cid, club_name=club_for(cid)['name'])
+                players.extend(group)
             for player in players:
                 player["discord_ids"] = [did for did, name in links.items() if name.casefold() == player["name"].casefold()]
             rsvps = [dict(r) for r in conn.execute("SELECT discord_id,status,source FROM session_rsvps WHERE session_id=?", (s["id"],))]
@@ -114,32 +121,37 @@ def archive_sessions(gid, now):
 def recap_embed(record, personal_id=None):
     ids = json.loads(record["match_ids"])
     with connect() as conn:
-        rows = [conn.execute("SELECT * FROM matches WHERE club_id=? AND match_id=?", (CLUB_ID, mid)).fetchone() for mid in ids]
+        rows = [conn.execute("SELECT * FROM matches WHERE club_id=? AND match_id=?", (match_club(mid), raw_match_key(mid))).fetchone() for mid in ids]
     rows = [r for r in rows if r]
     results = " · ".join(f"{sum(r['result'] == outcome for r in rows)}{outcome}" for outcome in ("W", "D", "L"))
     embed = discord.Embed(title="My session summary" if personal_id else "Session finished",
         description=f"Session #{record['session_id']} · <t:{record['starts_at']}:f>\n**{record['outcome'].capitalize()}** · Club: {len(rows)} games · {results}", colour=CLUB_COLOUR)
     players = json.loads(record["players"])
+    for cid in sorted({r['club_id'] for r in rows}) if not personal_id else []:
+        group = [r for r in rows if r['club_id'] == cid]
+        form = ' · '.join(f"{sum(r['result']==outcome for r in group)}{outcome}" for outcome in ('W','D','L'))
+        embed.add_field(name=club_for(cid)['name'], value=f"{len(group)} games · {form}\n{sum(r['our_goals'] for r in group)} scored · {sum(r['opp_goals'] for r in group)} conceded", inline=False)
     if personal_id:
         players = [p for p in players if personal_id in p.get("discord_ids", [])]
         if not players:
             embed.add_field(name="Your matches", value="No linked player stats for you in this session. Link your EA name using Setup before playing.", inline=False)
     else:
-        embed.add_field(name="Club result", value=f"{sum(r['our_goals'] for r in rows)} scored · {sum(r['opp_goals'] for r in rows)} conceded\n{len(players)} players recorded by EA", inline=False)
+        count = len({p['name'].casefold() for p in players})
+        embed.add_field(name="Club result", value=f"{sum(r['our_goals'] for r in rows)} scored · {sum(r['opp_goals'] for r in rows)} conceded\n{count} players recorded by EA", inline=False)
         if rows:
             embed.add_field(name="Results (latest 10)", value="\n".join(
-                f"{r['result']} · {r['our_goals']}–{r['opp_goals']} vs {r['opp_name'] or 'Opponent'}" for r in rows[-10:])[:1024], inline=False)
+                f"{club_for(r['club_id'])['name']} · {r['result']} · {r['our_goals']}–{r['opp_goals']} vs {r['opp_name'] or 'Opponent'}" for r in rows[-10:])[:1024], inline=False)
         if players:
             lines = []
             for p in sorted(players, key=lambda p: (-(p["goals"] or 0), -(p["assists"] or 0))):
                 rating = f"{p['rating']:.2f}" if p["rating"] is not None else "—"
-                lines.append(f"**{p['name'][:40]}** · {p['games']} games · {p['goals']}G {p['assists']}A · {rating} rating")
+                lines.append(f"**{p['name'][:40]}** ({p.get('club_name', club_for(CLUB_ID)['name'])}) · {p['games']} games · {p['goals']}G {p['assists']}A · {rating} rating")
             embed.add_field(name="Squad performance", value="\n".join(lines)[:1024], inline=False)
         players = []
     for p in players[:10]:
         rating = f"{p['rating']:.2f}" if p["rating"] is not None else "—"
         passing = f"{100 * p['passes'] / p['attempts']:.0f}%" if p["attempts"] else "—"
-        embed.add_field(name=p["name"][:256], value=f"**{p['games']} games** · {p['goals']} goals · {p['assists']} assists\nRating **{rating}** · {p['motm']} MOTM\n{p['tackles']} tackles · {p['saves']} saves · Passing {passing}", inline=False)
+        embed.add_field(name=f"{p['name']} · {p.get('club_name', club_for(CLUB_ID)['name'])}"[:256], value=f"**{p['games']} games** · {p['goals']} goals · {p['assists']} assists\nRating **{rating}** · {p['motm']} MOTM\n{p['tackles']} tackles · {p['saves']} saves · Passing {passing}", inline=False)
     embed.set_footer(text="Finished after inactivity • Stats from EA recorded matches; sign-ups are not attendance")
     return embed
 

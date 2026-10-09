@@ -34,6 +34,7 @@ COGS = [
     "cogs.operations",
     "cogs.onboarding",
     "cogs.admin",
+    "cogs.clubs",
     "cogs.patchnotes",
     "cogs.session_reports",
 ]

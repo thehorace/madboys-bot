@@ -13,6 +13,7 @@ know who played LB and who played CB, the bot combines:
 This file holds the logic; cogs/positions.py holds the Discord parts.
 """
 
+from clubs import club_id, club_name
 import json
 import time
 from typing import Optional
@@ -44,7 +45,7 @@ def save_plan(guild_id: str, formation: str, slots: dict[str, Optional[str]], po
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO lineup_plans (guild_id, club, formation, slots, posted_at, posted_by) VALUES (?,?,?,?,?,?)",
-            (guild_id, CLUB_NAME, formation, json.dumps({k: v for k, v in slots.items() if v}),
+            (guild_id, club_name(), formation, json.dumps({k: v for k, v in slots.items() if v}),
              int(time.time()), posted_by))
         return cur.lastrowid
 
@@ -56,7 +57,7 @@ def plan_for_match(guild_id: str, match_ts: int) -> Optional[dict]:
         row = conn.execute("""
             SELECT * FROM lineup_plans WHERE guild_id=? AND club=? AND posted_at<=? AND posted_at>=?
             ORDER BY posted_at DESC LIMIT 1""",
-            (guild_id, CLUB_NAME, when + 60, when - PLAN_VALID_HOURS * 3600)).fetchone()
+            (guild_id, club_name(), when + 60, when - PLAN_VALID_HOURS * 3600)).fetchone()
     if not row:
         return None
     plan = dict(row)
@@ -83,9 +84,9 @@ def previous_game_position(guild_id: str, discord_id: str, before_ts: int) -> Op
     with connect() as conn:
         row = conn.execute("""
             SELECT r.position FROM rotation_log r JOIN matches m ON m.match_id = r.match_id
-            WHERE r.guild_id=? AND r.club=? AND r.discord_id=? AND m.ts < ? AND m.ts >= ?
+            WHERE m.club_id=? AND r.guild_id=? AND r.club=? AND r.discord_id=? AND m.ts < ? AND m.ts >= ?
             ORDER BY m.ts DESC LIMIT 1""",
-            (guild_id, CLUB_NAME, discord_id, before_ts, before_ts - CARRY_OVER_HOURS * 3600)).fetchone()
+            (club_id(), guild_id, club_name(), discord_id, before_ts, before_ts - CARRY_OVER_HOURS * 3600)).fetchone()
     return row["position"] if row and is_exact(row["position"]) else None
 
 
@@ -115,7 +116,7 @@ def resolve_position(plan: Optional[dict], discord_id: str, ea_pos: Optional[str
 
 def last_exact_position(guild_id: str, discord_id: str, role: Optional[str] = None) -> Optional[str]:
     """The player's most recent confirmed exact position (optionally within a role), for 'same as last time'."""
-    for e in get_recent_positions(guild_id, CLUB_NAME, discord_id, limit=20):
+    for e in get_recent_positions(guild_id, club_name(), discord_id, limit=20):
         p = strip_number(e["position"])
         if is_exact(p) and (role is None or broad_role(p) == role):
             return p
@@ -131,7 +132,7 @@ def rotation_note(guild_id: str, discord_id: str, builds: list[str]) -> Optional
     AREA (Defence / Midfield / Front 3), -> (dedupe key, note). The key changes only
     when a new streak starts, so each streak is mentioned once, not after every game.
     """
-    entries = get_recent_positions(guild_id, CLUB_NAME, discord_id, limit=15)
+    entries = get_recent_positions(guild_id, club_name(), discord_id, limit=15)
     positions = [e["position"] for e in entries]
     area, run = current_streak(positions)
     if not area or run < ROTATION_THRESHOLD or area == "GK":
