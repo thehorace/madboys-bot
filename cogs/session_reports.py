@@ -185,14 +185,15 @@ def recap_embed(record, personal_id=None):
     rows = session_matches(record)
     if personal_id is None:
         return compact_recap(record, rows)
-    results = " · ".join(f"{sum(r['result'] == outcome for r in rows)}{outcome}" for outcome in ("W", "D", "L"))
-    embed = discord.Embed(title="My session summary" if personal_id else "Session finished",
-        description=f"Session #{record['session_id']} · <t:{record['starts_at']}:f>\n**{record['outcome'].capitalize()}** · Club: {len(rows)} games · {results}", colour=CLUB_COLOUR)
     players = json.loads(record["players"])
-    if personal_id:
-        players = [p for p in players if personal_id in p.get("discord_ids", [])]
-        if not players:
-            embed.add_field(name="Your matches", value="No linked player stats for you in this session. Link your EA name using Setup before playing.", inline=False)
+    players = [p for p in players if personal_id in p.get("discord_ids", [])]
+    played = sum(p['games'] for p in players)
+    embed = discord.Embed(title="My session summary", colour=CLUB_COLOUR,
+        description=f"Session #{record['session_id']} · <t:{record['starts_at']}:f>\n"
+                    f"**You played {played} {'match' if played == 1 else 'matches'}**\n"
+                    f"Club session: {len(rows)} matches · {result_words(rows)}")
+    if not players:
+        embed.add_field(name="Your matches", value="No linked player stats for you in this session. Link your EA name using Setup before playing.", inline=False)
     for p in players[:10]:
         rating = f"{p['rating']:.2f}" if p["rating"] is not None else "—"
         passing = f"{100 * p['passes'] / p['attempts']:.0f}%" if p["attempts"] else "—"
@@ -235,7 +236,24 @@ def detail_pages(record):
     return pages
 
 
-class DetailsView(TrackedView):
+class PrivateSessionView(TrackedView):
+    """Keep the latest interaction token for visible timeout feedback."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.anchor = None
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.anchor is not None:
+            try:
+                await self.anchor.edit_original_response(
+                    content='This menu has expired. Reopen it from Session history or Results & squad stats.', view=self)
+            except discord.HTTPException:
+                pass  # An expired interaction token must not break the timeout task.
+
+
+class DetailsView(PrivateSessionView):
     def __init__(self, record, user_id):
         super().__init__(timeout=600)
         self.pages = detail_pages(record)
@@ -263,6 +281,7 @@ class DetailsView(TrackedView):
         return True
 
     async def move(self, interaction, step):
+        self.anchor = interaction
         self.index = max(0, min(len(self.pages)-1, self.index+step))
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.index], view=self)
@@ -273,6 +292,7 @@ class DetailsView(TrackedView):
             await interaction.response.send_message('That section is unavailable. Reopen the session details.', ephemeral=True)
             return
         self.index = int(value)
+        self.anchor = interaction
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.index], view=self)
 
@@ -287,6 +307,7 @@ class DetailsView(TrackedView):
 
 async def send_details(interaction, record):
     view = DetailsView(record, interaction.user.id)
+    view.anchor = interaction
     await interaction.response.send_message(embed=view.pages[0], view=view, ephemeral=True,
                                            allowed_mentions=discord.AllowedMentions.none())
 
@@ -314,7 +335,7 @@ class SummaryView(TrackedView):
         await send_details(interaction, records[0])
 
 
-class HistoryView(TrackedView):
+class HistoryView(PrivateSessionView):
     def __init__(self, user_id, guild_id, records, private=False, offset=0):
         super().__init__(timeout=600)
         self.user_id, self.guild_id, self.private = user_id, guild_id, private
@@ -340,6 +361,7 @@ class HistoryView(TrackedView):
         return True
 
     async def choose(self, interaction):
+        self.anchor = interaction
         self.selected = int(interaction.data["values"][0])
         record = history(self.guild_id, self.selected)[0]
         embed = recap_embed(record)
@@ -353,6 +375,7 @@ class HistoryView(TrackedView):
 
     @discord.ui.button(label="My summary for this session", custom_id="sessions:history-personal", row=1)
     async def personal(self, interaction, _):
+        self.anchor = interaction
         record = history(self.guild_id, self.selected)[0]
         await interaction.response.edit_message(embed=recap_embed(record, str(interaction.user.id)), view=self)
 
@@ -366,7 +389,9 @@ class HistoryView(TrackedView):
             await interaction.response.send_message("No more sessions in that direction.", ephemeral=True)
             return
         view = HistoryView(self.user_id, self.guild_id, records, self.private, offset)
+        view.anchor = interaction
         await interaction.response.edit_message(embed=recap_embed(records[0]), view=view)
+        self.stop()  # An old page's timeout must not overwrite the replacement menu.
 
     @discord.ui.button(label="Older sessions", custom_id="sessions:history-older", row=1)
     async def older(self, interaction, _):
@@ -465,8 +490,10 @@ class SessionReportsCog(commands.Cog):
             embed.add_field(name=f"Session #{record['session_id']}", value=f"<t:{record['starts_at']}:f>\n{text}", inline=False)
         if not records:
             embed.description = "No finished sessions yet. History saves after a successful match check."
-        await interaction.response.send_message(embed=embed,
-            view=HistoryView(interaction.user.id, str(interaction.guild_id), records, private) if records else None, ephemeral=True)
+        view = HistoryView(interaction.user.id, str(interaction.guild_id), records, private) if records else None
+        if view:
+            view.anchor = interaction
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     async def show_personal(self, interaction):
         record = latest_personal(str(interaction.guild_id), str(interaction.user.id))

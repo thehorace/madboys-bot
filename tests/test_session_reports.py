@@ -80,6 +80,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1 goals", embed.fields[0].value)
         self.assertIn("80%", embed.fields[0].value)
         self.assertNotIn("1 goals", reports.recap_embed(record, "43").fields[0].value)
+        self.assertIn('You played 1 match',embed.description)
         view = reports.SummaryView()  # New persistent view resolves saved message -> exact session.
         i = self.interaction()
         await view.children[0].callback(i)

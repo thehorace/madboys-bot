@@ -131,3 +131,36 @@ class RecapLayoutTests(unittest.IsolatedAsyncioTestCase):
         selects=[s for s in statements if s.startswith('SELECT * FROM matches')]
         self.assertEqual(len(selects),2)
         self.assertEqual(rows,sorted(rows,key=lambda r:(r['ts'],r['club_id'],r['match_id'])))
+
+    async def test_expired_details_disable_controls_using_latest_click(self):
+        self.populate()
+        view=reports.DetailsView(self.record,42)
+        original=SimpleNamespace(edit_original_response=AsyncMock())
+        latest=SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()),edit_original_response=AsyncMock())
+        view.anchor=original
+        await view.move(latest,1)
+        await view.on_timeout()
+        self.assertTrue(all(c.disabled for c in view.children))
+        original.edit_original_response.assert_not_awaited()
+        latest.edit_original_response.assert_awaited_once()
+        self.assertIn('expired',latest.edit_original_response.call_args.kwargs['content'])
+        self.assertIsNone(reports.SummaryView().timeout)
+
+    async def test_history_replacement_stops_old_timeout(self):
+        record={**self.record,'rsvps':'[]'}
+        view=reports.HistoryView(42,'10',[record])
+        interaction=SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()))
+        with patch.object(reports,'history',return_value=[record]):
+            await view.paginate(interaction,20)
+        self.assertTrue(view.is_finished())
+        replacement=interaction.response.edit_message.call_args.kwargs['view']
+        self.assertIs(replacement.anchor,interaction)
+        self.assertFalse(replacement.is_finished())
+
+    async def test_expired_token_does_not_break_timeout_cleanup(self):
+        import discord
+        view=reports.DetailsView(self.record,42)
+        error=discord.NotFound(SimpleNamespace(status=404,reason='Not Found'), 'Expired token')
+        view.anchor=SimpleNamespace(edit_original_response=AsyncMock(side_effect=error))
+        await view.on_timeout()
+        self.assertTrue(all(c.disabled for c in view.children))
