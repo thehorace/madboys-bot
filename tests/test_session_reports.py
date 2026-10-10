@@ -227,7 +227,9 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.member.send.assert_awaited_once()
         self.guild.fetch_member.assert_not_awaited()
         embed = self.channel.send.call_args.kwargs["embed"]
-        self.assertIn("Squad performance", [f.name for f in embed.fields])
+        self.assertEqual(len(embed.fields), 1)
+        self.assertIn('1 win', embed.description)
+        self.assertIn('Fauz', embed.fields[0].value)
         personal = self.member.send.call_args.kwargs["embed"]
         self.assertEqual(personal.title, "My session summary")
         self.assertIn("1 goals", personal.fields[0].value)

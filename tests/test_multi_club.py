@@ -171,7 +171,7 @@ class MultiClubTests(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_snapshot_and_database_remain_usable(self):
         self.store(self.primary,'legacy',100)
         record={'match_ids':'["legacy"]','players':'[]','session_id':1,'starts_at':1,'outcome':'completed'}
-        self.assertIn('Club: 1 games',reports.recap_embed(record).description)
+        self.assertIn('1 match',reports.recap_embed(record).description)
         db.init_all()
         self.assertTrue(md.is_stored(CLUB_ID,'legacy'))
 

@@ -118,42 +118,146 @@ def archive_sessions(gid, now):
                                  [(s["id"], did) for did in recipients])
 
 
-def recap_embed(record, personal_id=None):
+def session_matches(record):
     ids = json.loads(record["match_ids"])
     with connect() as conn:
         rows = [conn.execute("SELECT * FROM matches WHERE club_id=? AND match_id=?", (match_club(mid), raw_match_key(mid))).fetchone() for mid in ids]
-    rows = [r for r in rows if r]
+    return sorted((dict(r) for r in rows if r), key=lambda r: (r['ts'], r['club_id'], r['match_id']))
+
+
+def result_words(rows):
+    labels = []
+    for code, single, plural in [('W','win','wins'),('D','draw','draws'),('L','loss','losses')]:
+        count = sum(r['result'] == code for r in rows)
+        labels.append(f"{count} {single if count == 1 else plural}")
+    return ' · '.join(labels)
+
+
+def display_name(name):
+    return discord.utils.escape_markdown(str(name)[:45])
+
+
+def standout(players, stat, label, emoji):
+    best = max((p.get(stat) or 0 for p in players), default=0)
+    if not best:
+        return None
+    names = sorted({p['name'] for p in players if (p.get(stat) or 0) == best}, key=str.casefold)
+    who = ', '.join(display_name(n) for n in names[:2])
+    if len(names) > 2:
+        who += f" +{len(names)-2} more"
+    return f"{emoji} **{who}** — {best} {label[:-1] if best == 1 else label}"
+
+
+def compact_recap(record, rows):
+    players = json.loads(record['players'])
+    count = len({p['name'].casefold() for p in players})
+    completed = record['outcome'] == 'completed'
+    embed = discord.Embed(title='🏁 Session recap' if completed else f"Session {record['outcome']}", colour=CLUB_COLOUR,
+        description=f"<t:{record['starts_at']}:D>\n\n**{result_words(rows)}**\n"
+                    f"{len(rows)} {'match' if len(rows) == 1 else 'matches'} · {count} {'player' if count == 1 else 'players'}\n"
+                    f"⚽ **{sum(r['our_goals'] for r in rows)}** goals scored · **{sum(r['opp_goals'] for r in rows)}** conceded")
+    for cid in sorted({r['club_id'] for r in rows}):
+        games = [r for r in rows if r['club_id'] == cid]
+        squad = [p for p in players if p.get('club_id', CLUB_ID) == cid]
+        highlights = [standout(squad,'goals','goals','⚽'), standout(squad,'assists','assists','🎯')]
+        lines = [f"**{len(games)} {'match' if len(games) == 1 else 'matches'}** · {result_words(games)}",
+                 f"{sum(r['our_goals'] for r in games)} scored · {sum(r['opp_goals'] for r in games)} conceded"]
+        lines += [''] + [h for h in highlights if h] if any(highlights) else []
+        embed.add_field(name=f"🛡️ {club_for(cid)['name']}", value='\n'.join(lines), inline=False)
+    embed.set_footer(text=f"Session #{record['session_id']} • Full results and squad stats below • EA recorded matches")
+    return embed
+
+
+def recap_embed(record, personal_id=None):
+    rows = session_matches(record)
+    if personal_id is None:
+        return compact_recap(record, rows)
     results = " · ".join(f"{sum(r['result'] == outcome for r in rows)}{outcome}" for outcome in ("W", "D", "L"))
     embed = discord.Embed(title="My session summary" if personal_id else "Session finished",
         description=f"Session #{record['session_id']} · <t:{record['starts_at']}:f>\n**{record['outcome'].capitalize()}** · Club: {len(rows)} games · {results}", colour=CLUB_COLOUR)
     players = json.loads(record["players"])
-    for cid in sorted({r['club_id'] for r in rows}) if not personal_id else []:
-        group = [r for r in rows if r['club_id'] == cid]
-        form = ' · '.join(f"{sum(r['result']==outcome for r in group)}{outcome}" for outcome in ('W','D','L'))
-        embed.add_field(name=club_for(cid)['name'], value=f"{len(group)} games · {form}\n{sum(r['our_goals'] for r in group)} scored · {sum(r['opp_goals'] for r in group)} conceded", inline=False)
     if personal_id:
         players = [p for p in players if personal_id in p.get("discord_ids", [])]
         if not players:
             embed.add_field(name="Your matches", value="No linked player stats for you in this session. Link your EA name using Setup before playing.", inline=False)
-    else:
-        count = len({p['name'].casefold() for p in players})
-        embed.add_field(name="Club result", value=f"{sum(r['our_goals'] for r in rows)} scored · {sum(r['opp_goals'] for r in rows)} conceded\n{count} players recorded by EA", inline=False)
-        if rows:
-            embed.add_field(name="Results (latest 10)", value="\n".join(
-                f"{club_for(r['club_id'])['name']} · {r['result']} · {r['our_goals']}–{r['opp_goals']} vs {r['opp_name'] or 'Opponent'}" for r in rows[-10:])[:1024], inline=False)
-        if players:
-            lines = []
-            for p in sorted(players, key=lambda p: (-(p["goals"] or 0), -(p["assists"] or 0))):
-                rating = f"{p['rating']:.2f}" if p["rating"] is not None else "—"
-                lines.append(f"**{p['name'][:40]}** ({p.get('club_name', club_for(CLUB_ID)['name'])}) · {p['games']} games · {p['goals']}G {p['assists']}A · {rating} rating")
-            embed.add_field(name="Squad performance", value="\n".join(lines)[:1024], inline=False)
-        players = []
     for p in players[:10]:
         rating = f"{p['rating']:.2f}" if p["rating"] is not None else "—"
         passing = f"{100 * p['passes'] / p['attempts']:.0f}%" if p["attempts"] else "—"
         embed.add_field(name=f"{p['name']} · {p.get('club_name', club_for(CLUB_ID)['name'])}"[:256], value=f"**{p['games']} games** · {p['goals']} goals · {p['assists']} assists\nRating **{rating}** · {p['motm']} MOTM\n{p['tackles']} tackles · {p['saves']} saves · Passing {passing}", inline=False)
     embed.set_footer(text="Finished after inactivity • Stats from EA recorded matches; sign-ups are not attendance")
     return embed
+
+
+def detail_pages(record):
+    """Paginate whole entries instead of cutting off names/Markdown at 1024 chars."""
+    rows = session_matches(record)
+    players = json.loads(record['players'])
+    pages = []
+    club_ids = sorted({r['club_id'] for r in rows} | {p.get('club_id', CLUB_ID) for p in players})
+    for cid in club_ids:
+        results = [f"{'🟢' if r['result']=='W' else '🟡' if r['result']=='D' else '🔴'} "
+                   f"**{r['our_goals']}–{r['opp_goals']}** vs {display_name(r['opp_name'] or 'Opponent')} · <t:{r['ts']}:t>"
+                   for r in rows if r['club_id'] == cid]
+        squad = sorted((p for p in players if p.get('club_id', CLUB_ID)==cid), key=lambda p: (-(p.get('goals') or 0), -(p.get('assists') or 0), p['name'].casefold()))
+        stats = []
+        for p in squad:
+            rating = f"{p['rating']:.2f}" if p.get('rating') is not None else '—'
+            stats.append(f"**{display_name(p['name'])}**\n{p['games']} matches · {p['goals'] or 0} goals · {p['assists'] or 0} assists · {rating} rating")
+        for title, entries in [('Match results', results), ('Squad stats', stats)]:
+            chunks, chunk = [], []
+            for entry in entries:
+                if chunk and (len('\n\n'.join([*chunk, entry])) > 950 or len(chunk) >= 6):
+                    chunks.append(chunk)
+                    chunk = []
+                chunk.append(entry)
+            if chunk:
+                chunks.append(chunk)
+            for chunk in chunks:
+                embed = discord.Embed(title=f"{title} · {club_for(cid)['name']}", description='\n\n'.join(chunk), colour=CLUB_COLOUR)
+                pages.append(embed)
+    if not pages:
+        pages = [discord.Embed(title='Session details', description='No matches or player stats recorded.', colour=CLUB_COLOUR)]
+    for i, embed in enumerate(pages):
+        embed.set_footer(text=f"Session #{record['session_id']} • Page {i+1} of {len(pages)} • Stats stay separate for each club")
+    return pages
+
+
+class DetailsView(TrackedView):
+    def __init__(self, record, user_id):
+        super().__init__(timeout=600)
+        self.pages = detail_pages(record)
+        self.user_id = user_id
+        self.index = 0
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.previous.disabled = self.index == 0
+        self.next_page.disabled = self.index == len(self.pages)-1
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message('Open your own session details.', ephemeral=True)
+            return False
+        return True
+
+    async def move(self, interaction, step):
+        self.index = max(0, min(len(self.pages)-1, self.index+step))
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    @discord.ui.button(label='Previous', emoji='◀️')
+    async def previous(self, interaction, _):
+        await self.move(interaction, -1)
+
+    @discord.ui.button(label='Next', emoji='▶️')
+    async def next_page(self, interaction, _):
+        await self.move(interaction, 1)
+
+
+async def send_details(interaction, record):
+    view = DetailsView(record, interaction.user.id)
+    await interaction.response.send_message(embed=view.pages[0], view=view, ephemeral=True,
+                                           allowed_mentions=discord.AllowedMentions.none())
 
 
 class SummaryView(TrackedView):
@@ -167,6 +271,16 @@ class SummaryView(TrackedView):
         records = history(str(interaction.guild_id), row[0]) if row else []
         await interaction.response.send_message(embed=recap_embed(records[0], str(interaction.user.id)) if records else None,
             content=None if records else "This session summary is unavailable.", ephemeral=True)
+
+    @discord.ui.button(label='Results & squad stats', emoji='📋', style=discord.ButtonStyle.secondary, custom_id='sessions:full-details')
+    async def details(self, interaction, _):
+        with connect() as conn:
+            row = conn.execute('SELECT session_id FROM session_history WHERE guild_id=? AND message_id=?', (str(interaction.guild_id), str(interaction.message.id))).fetchone()
+        records = history(str(interaction.guild_id), row[0]) if row else []
+        if not records:
+            await interaction.response.send_message('This session summary is unavailable.', ephemeral=True)
+            return
+        await send_details(interaction, records[0])
 
 
 class HistoryView(TrackedView):
@@ -209,6 +323,10 @@ class HistoryView(TrackedView):
     async def personal(self, interaction, _):
         record = history(self.guild_id, self.selected)[0]
         await interaction.response.edit_message(embed=recap_embed(record, str(interaction.user.id)), view=self)
+
+    @discord.ui.button(label='Results & squad stats', emoji='📋', custom_id='sessions:history-details', row=1)
+    async def details(self, interaction, _):
+        await send_details(interaction, history(self.guild_id, self.selected)[0])
 
     async def paginate(self, interaction, offset):
         records = history(self.guild_id, offset=offset)
