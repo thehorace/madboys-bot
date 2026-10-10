@@ -87,3 +87,47 @@ class RecapLayoutTests(unittest.IsolatedAsyncioTestCase):
         kwargs=interaction.response.send_message.call_args.kwargs
         self.assertTrue(kwargs['ephemeral'])
         self.assertIn('Session #9',kwargs['embed'].footer.text)
+
+    async def test_jump_picker_opens_correct_club_and_section(self):
+        self.populate(count=18)
+        view=reports.DetailsView(self.record,42)
+        option=next(o for o in view.section.options if 'Squad stats' in o.label and self.clubs[1]['name'] in o.label)
+        interaction=SimpleNamespace(data={'values':[option.value]},response=SimpleNamespace(edit_message=AsyncMock(),send_message=AsyncMock()))
+        await view.jump(interaction)
+        self.assertEqual(view.pages[view.index].title,option.label)
+        self.assertTrue(option.default)
+        self.assertEqual(sum(o.default for o in view.section.options),1)
+        before=view.index
+        interaction.data={'values':['99999']}
+        await view.jump(interaction)
+        self.assertEqual(view.index,before)
+        interaction.response.send_message.assert_awaited_once()
+
+    async def test_history_counts_same_player_once_across_clubs(self):
+        self.populate(roster=2)
+        with db.connect() as conn:
+            conn.execute("INSERT INTO sessions (id,guild_id,channel_id,starts_at,created_by) VALUES (9,'10','20',?,'daily')",(self.record['starts_at'],))
+            conn.execute("INSERT INTO session_history VALUES (9,'10',?,'completed',?,'[]',?,'99')",(1800009000,self.record['match_ids'],self.record['players']))
+        interaction=SimpleNamespace(guild_id=10,user=SimpleNamespace(id=42),response=SimpleNamespace(send_message=AsyncMock()))
+        await reports.SessionReportsCog(SimpleNamespace()).show_history(interaction)
+        embed=interaction.response.send_message.call_args.kwargs['embed']
+        self.assertIn('2 actual players',embed.fields[0].value)
+
+    async def test_match_loading_batches_by_club_and_ignores_duplicate_history_ids(self):
+        self.populate(count=30)
+        ids=json.loads(self.record['match_ids'])
+        self.record['match_ids']=json.dumps([*ids,ids[0],'missing'])
+        original=db.connect
+        from contextlib import contextmanager
+        statements=[]
+        @contextmanager
+        def traced():
+            with original() as conn:
+                conn.set_trace_callback(statements.append)
+                yield conn
+        with patch.object(reports,'connect',traced):
+            rows=reports.session_matches(self.record)
+        self.assertEqual(len(rows),60)
+        selects=[s for s in statements if s.startswith('SELECT * FROM matches')]
+        self.assertEqual(len(selects),2)
+        self.assertEqual(rows,sorted(rows,key=lambda r:(r['ts'],r['club_id'],r['match_id'])))

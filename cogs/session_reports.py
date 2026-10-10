@@ -120,9 +120,22 @@ def archive_sessions(gid, now):
 
 def session_matches(record):
     ids = json.loads(record["match_ids"])
+    by_club = {}
+    for mid in ids:
+        by_club.setdefault(match_club(mid), set()).add(raw_match_key(mid))
+    rows = []
     with connect() as conn:
-        rows = [conn.execute("SELECT * FROM matches WHERE club_id=? AND match_id=?", (match_club(mid), raw_match_key(mid))).fetchone() for mid in ids]
-    return sorted((dict(r) for r in rows if r), key=lambda r: (r['ts'], r['club_id'], r['match_id']))
+        for cid, match_ids in by_club.items():
+            match_ids = sorted(match_ids)
+            for start in range(0, len(match_ids), 900):
+                batch = match_ids[start:start+900]
+                marks = ','.join('?' for _ in batch)
+                rows.extend(conn.execute(f"SELECT * FROM matches WHERE club_id=? AND match_id IN ({marks})", [cid, *batch]).fetchall())
+    return sorted((dict(r) for r in rows), key=lambda r: (r['ts'], r['club_id'], r['match_id']))
+
+
+def actual_player_count(players):
+    return len({p['name'].casefold() for p in players})
 
 
 def result_words(rows):
@@ -150,7 +163,7 @@ def standout(players, stat, label, emoji):
 
 def compact_recap(record, rows):
     players = json.loads(record['players'])
-    count = len({p['name'].casefold() for p in players})
+    count = actual_player_count(players)
     completed = record['outcome'] == 'completed'
     embed = discord.Embed(title='🏁 Session recap' if completed else f"Session {record['outcome']}", colour=CLUB_COLOUR,
         description=f"<t:{record['starts_at']}:D>\n\n**{result_words(rows)}**\n"
@@ -228,11 +241,20 @@ class DetailsView(TrackedView):
         self.pages = detail_pages(record)
         self.user_id = user_id
         self.index = 0
+        sections = {}
+        for i, page in enumerate(self.pages):
+            sections.setdefault(page.title, i)
+        self.section = discord.ui.Select(placeholder='Jump to a club or section', row=1,
+            options=[discord.SelectOption(label=title[:100], value=str(index)) for title,index in sections.items()])
+        self.section.callback = self.jump
+        self.add_item(self.section)
         self.update_buttons()
 
     def update_buttons(self):
         self.previous.disabled = self.index == 0
         self.next_page.disabled = self.index == len(self.pages)-1
+        for option in self.section.options:
+            option.default = self.pages[int(option.value)].title == self.pages[self.index].title
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.user_id:
@@ -242,6 +264,15 @@ class DetailsView(TrackedView):
 
     async def move(self, interaction, step):
         self.index = max(0, min(len(self.pages)-1, self.index+step))
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    async def jump(self, interaction):
+        value = interaction.data.get('values', [''])[0]
+        if value not in {option.value for option in self.section.options}:
+            await interaction.response.send_message('That section is unavailable. Reopen the session details.', ephemeral=True)
+            return
+        self.index = int(value)
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.index], view=self)
 
@@ -314,7 +345,8 @@ class HistoryView(TrackedView):
         embed = recap_embed(record)
         if self.private:
             players = json.loads(record["players"])
-            embed.add_field(name="Actual players (EA)", value=", ".join(p["name"] for p in players)[:1024] or "None recorded", inline=False)
+            names = sorted({p['name'] for p in players}, key=str.casefold)
+            embed.add_field(name="Actual players (EA)", value=", ".join(names)[:1024] or "None recorded", inline=False)
             rsvps = json.loads(record["rsvps"])
             embed.add_field(name="Sign-ups (not attendance)", value="\n".join(f"{r['status']}: <@{r['discord_id']}>" for r in rsvps)[:1024] or "No sign-ups", inline=False)
         await interaction.response.edit_message(embed=embed, view=self)
@@ -426,7 +458,7 @@ class SessionReportsCog(commands.Cog):
             embed.description = "Choose a session below for its recap or your personal stats. Browse older sessions with the buttons."
         for record in records[:15]:
             players = json.loads(record["players"])
-            text = f"{record['outcome'].capitalize()} · {len(json.loads(record['match_ids']))} games · {len(players)} actual players"
+            text = f"{record['outcome'].capitalize()} · {len(json.loads(record['match_ids']))} games · {actual_player_count(players)} actual players"
             if private:
                 rsvps = json.loads(record["rsvps"])
                 text += f"\nSign-ups: {sum(r['status']=='yes' for r in rsvps)} yes · {sum(r['status']=='maybe' for r in rsvps)} maybe"
