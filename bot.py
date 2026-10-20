@@ -37,6 +37,8 @@ COGS = [
     "cogs.clubs",
     "cogs.patchnotes",
     "cogs.session_reports",
+    "cogs.announce",
+    "cogs.scout",
 ]
 
 

@@ -45,7 +45,9 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import match_data as md
+from announce import announce_channel_id
 from cogs.operations import report_health
+from cogs.scout import scout_view
 from cogs.link import find_discord_id_by_ea_name, get_all_links
 from cogs.rotation import is_match_processed, log_positions, mark_match_processed
 from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, CLUB_NAME, GUILD_ID,
@@ -185,7 +187,8 @@ class MatchdayCog(commands.Cog):
             log.info(f"Migrated matchday channel {row['channel_id']} from old matchday_poll table")
 
     def channel_id_for(self, guild_id: str) -> Optional[int]:
-        cid = get_setting(guild_id, K_CHANNEL) or MATCHDAY_CHANNEL_ID
+        # The shared announcements channel wins; the old per-feature channel is only a fallback.
+        cid = announce_channel_id(guild_id, get_setting(guild_id, K_CHANNEL) or MATCHDAY_CHANNEL_ID)
         return int(cid) if cid else None
 
     def posting_enabled(self, guild_id: str) -> bool:
@@ -432,7 +435,11 @@ class MatchdayCog(commands.Cog):
                 rematch = md.rematch_line(club_id(), pm)
                 if rematch:
                     embed.add_field(name="🔁 Rematch", value=rematch, inline=False)
-                await channel.send(content=f"📡 **{club_name()} — Full time!**", embed=embed, **({"file": file} if file else {}))
+                extra = {"file": file} if file else {}
+                view = scout_view(pm.opp_id, pm.opp_name, club_id())  # 🔍 Scout opponent
+                if view:
+                    extra["view"] = view
+                await channel.send(content=f"📡 **{club_name()} — Full time!**", embed=embed, **extra)
                 # "where did you play?" for anyone whose exact position isn't known
                 pos_cog = self.bot.get_cog("PositionsCog")
                 pending = (pending_by_match or {}).get(pm.match_id)
@@ -563,6 +570,13 @@ class MatchdayCog(commands.Cog):
         gid = str(interaction.guild_id)
         set_setting(gid, K_CHANNEL, str(channel.id))
         set_setting(gid, K_ENABLED, "1")
+        shared = announce_channel_id(gid)
+        if shared and shared != str(channel.id):
+            await interaction.response.send_message(
+                f"📡 Result posting is **on**. An announcements channel is set (<#{shared}>), so results, "
+                f"MOTM votes and recaps will post there — {channel.mention} is only a fallback. "
+                f"Use `/announce set` to change it.", ephemeral=True)
+            return
         await interaction.response.send_message(
             f"📡 Match results for **{club_name()}** will post in {channel.mention} automatically — "
             f"no need to run this again after restarts. Checking every {POLL_ACTIVE_MINUTES:g} min while you're "

@@ -32,6 +32,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import BOT_TZ, CLUB_COLOUR, CLUB_NAME, DAILY_SESSIONS, GUILD_ID, SESSION_CHANNEL_ID
+from announce import announce_channel_id
 from db import connect, now_iso, set_setting
 from utils import is_manager, resolve_name, survive
 from interaction_tracking import TrackedView, failed
@@ -126,7 +127,7 @@ def session_settings(guild_id: str) -> dict:
         "post_time": setting("post_time", "11:00"),
         "kickoff_time": setting("kickoff_time", "18:30"),
         "days": setting("days", "monday,tuesday,wednesday,thursday,friday,saturday,sunday").split(","),
-        "channel_id": setting("channel_id", SESSION_CHANNEL_ID or ""),
+        "channel_id": announce_channel_id(guild_id, setting("channel_id", SESSION_CHANNEL_ID or "")) or "",
         "cooldown": int(setting("cooldown", "300")),
         "waitlist": setting("waitlist", "1") == "1",
         "skip_date": setting("skip_date", ""),

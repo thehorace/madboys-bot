@@ -15,6 +15,13 @@ Server
   GUILD_ID               Your Discord server ID. Recommended: instant slash-command sync,
                          and tells the background tracker which server it belongs to.
 
+Announcements
+  ANNOUNCE_CHANNEL_NAME  Name of the announcements channel, found automatically   (default "announcements")
+  ANNOUNCE_CHANNEL_ID    Channel for every scheduled/automatic post (results, MOTM votes, milestones,
+                         recaps, daily sign-ups, session summaries, EA news). Optional: /announce set
+                         saves it in the DB and wins over this. Slash commands always reply in the
+                         channel they were used in.
+
 Auto match tracker
   MATCHDAY_CHANNEL_ID    Channel to post results in. Optional: /matchday start sets it
                          from Discord and that choice is saved in the DB.
@@ -73,6 +80,8 @@ MATCH_TYPES = [t.strip() for t in os.getenv("MATCH_TYPES", "leagueMatch,playoffM
 
 GUILD_ID = os.getenv("GUILD_ID")
 MATCHDAY_CHANNEL_ID = os.getenv("MATCHDAY_CHANNEL_ID")
+ANNOUNCE_CHANNEL_ID = os.getenv("ANNOUNCE_CHANNEL_ID")
+ANNOUNCE_CHANNEL_NAME = os.getenv("ANNOUNCE_CHANNEL_NAME", "announcements").strip().lstrip("#").lower()
 
 POLL_ACTIVE_MINUTES = float(os.getenv("POLL_ACTIVE_MINUTES", "1"))
 POLL_IDLE_MINUTES = float(os.getenv("POLL_IDLE_MINUTES", "3"))

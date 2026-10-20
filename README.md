@@ -20,6 +20,8 @@ looks up is posted straight away. Each new match is:
   tracks the season's awards
 - checked for career milestones ("🎉 @Fauzan just hit 100 career goals!")
 
+Everything the bot posts by itself (results, MOTM votes, milestones, the weekly recap, daily sign-ups, session summaries, EA news) goes to the channel set with `/announce set`; slash commands reply where you use them.
+
 A weekly recap posts on Sunday evening. Set the channel once with
 `/matchday start`; it survives restarts and redeploys.
 
@@ -318,4 +320,6 @@ cogs/link.py      Discord <-> EA name links
 cogs/motm.py      squad MOTM vote + awards table
 cogs/hub.py       /stats button menu + /panel pinned panel
 cogs/misc.py      /help /build /ping
+cogs/announce.py  /announce: the one channel for automatic posts (helper: announce.py)
+cogs/scout.py     /scout + 🔍 Scout opponent button
 ```

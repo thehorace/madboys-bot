@@ -18,6 +18,7 @@ from utils import survive
 from cogs.operations import report_health
 from cogs.usage import can_view
 from config import CLUB_COLOUR, GUILD_ID
+from announce import announce_channel_id
 from db import connect, get_setting, set_setting
 
 SOURCE = "https://www.ea.com/games/ea-sports-fc/fc-27/news"
@@ -202,7 +203,7 @@ def patch_embed(article: dict) -> discord.Embed:
 
 def patch_settings(gid: str) -> dict:
     return {"enabled": get_setting(gid, "patchnotes:enabled") != "0",
-            "channel_id": get_setting(gid, "patchnotes:channel") or os.getenv("PATCHNOTES_CHANNEL_ID", ""),
+            "channel_id": announce_channel_id(gid, get_setting(gid, "patchnotes:channel") or os.getenv("PATCHNOTES_CHANNEL_ID", "")) or "",
             "last_checked": get_setting(gid, "patchnotes:last_checked") or "Not yet"}
 
 

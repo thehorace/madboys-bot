@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import CLUB_ID, CLUB_COLOUR
+from announce import announce_channel_id
 from db import connect, get_setting, set_setting
 from cogs.link import get_all_links
 from cogs.operations import report_health
@@ -25,7 +26,7 @@ def report_settings(gid):
     return {"enabled": saved.get("reports:enabled") != "0",
             "dms": saved.get("reports:dms") != "0",
             "gap": int(saved.get("reports:gap") or 120),
-            "channel": saved.get("reports:channel")}
+            "channel": announce_channel_id(gid, saved.get("reports:channel"))}
 
 
 def history(gid, session_id=None, offset=0):
