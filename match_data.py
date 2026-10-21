@@ -16,7 +16,7 @@ EA match payload shape (the parts we use):
   }
 """
 
-from clubs import club_id, club_name
+from clubs import club_name
 import json
 import logging
 from dataclasses import dataclass, field
@@ -26,7 +26,7 @@ from typing import Optional
 
 import discord
 
-from config import CLUB_COLOUR, CLUB_NAME
+from config import CLUB_COLOUR
 from db import connect, now_iso
 from utils import RESULT_COLOUR, RESULT_EMOJI, RESULT_LABEL, clip, pct, result_letter, to_float, to_int
 
@@ -196,16 +196,25 @@ def backfill_player_fields():
 
 
 def backfill_results():
-    """Re-check saved W/D/L against EA's own result code (fixes forfeits/DNFs stored as draws)."""
+    """
+    Re-check saved W/D/L against EA's own result code (fixes forfeits/DNFs stored as draws).
+    One-off repair: new matches are stored with the right result, so after it has run once it's
+    skipped (it re-parsed every saved match's EA data on every startup).
+    """
+    from db import get_setting, set_setting
+    if get_setting("global", "backfill:results_v1"):
+        return
+    fixed = 0
     with connect() as conn:
-        rows = conn.execute("SELECT club_id, match_id, result, raw_json FROM matches WHERE raw_json IS NOT NULL").fetchall()
-        fixed = 0
-        for r in rows:
+        rows = conn.execute("SELECT club_id, match_id, result, raw_json FROM matches WHERE raw_json IS NOT NULL")
+        updates = []
+        for r in rows:   # stream rows instead of loading every match's JSON at once
             pm = parse_match(json.loads(r["raw_json"]), r["club_id"])
             if pm and pm.result != r["result"]:
-                conn.execute("UPDATE matches SET result=? WHERE club_id=? AND match_id=?",
-                             (pm.result, r["club_id"], r["match_id"]))
-                fixed += 1
+                updates.append((pm.result, r["club_id"], r["match_id"]))
+        conn.executemany("UPDATE matches SET result=? WHERE club_id=? AND match_id=?", updates)
+        fixed = len(updates)
+    set_setting("global", "backfill:results_v1", "1")
     if fixed:
         log.info(f"Corrected the result of {fixed} saved match(es) using EA's result code")
 

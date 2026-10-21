@@ -30,7 +30,7 @@ from discord.ext import commands, tasks
 
 import match_data as md
 from cogs.link import get_link
-from config import CLUB_NAME, MOTM_VOTE_MINUTES
+from config import MOTM_VOTE_MINUTES
 from db import connect, now_iso
 from interaction_tracking import TrackedView, failed
 from utils import clip, is_manager, survive
@@ -274,8 +274,9 @@ class MotmCog(commands.Cog):
             await interaction.response.send_message("Managers only.", ephemeral=True)
             return
         with connect() as conn:
-            row = conn.execute("SELECT * FROM motm_polls WHERE closed=0 AND guild_id=? AND club_id=? ORDER BY closes_at DESC LIMIT 1",
-                               (str(interaction.guild_id), club_id())).fetchone()
+            # Any club's open vote: a manager following MADBOYS can still close a GRAYSBOYS vote.
+            row = conn.execute("SELECT * FROM motm_polls WHERE closed=0 AND guild_id=? ORDER BY closes_at DESC LIMIT 1",
+                               (str(interaction.guild_id),)).fetchone()
         if not row:
             await interaction.response.send_message("No open vote.", ephemeral=True)
             return

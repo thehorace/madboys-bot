@@ -31,7 +31,7 @@ from discord.ext import commands
 
 import match_data as md
 from cogs.link import get_link
-from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
+from config import CLUB_COLOUR
 from db import connect
 from utils import clip, is_manager, to_float, to_int
 from interaction_tracking import failed

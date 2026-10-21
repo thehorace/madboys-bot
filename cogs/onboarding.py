@@ -6,7 +6,7 @@ from discord.ext import commands
 
 from cogs.link import get_link, set_link
 from cogs.lineup import POSITION_GROUPS, get_prefs, set_prefs
-from config import CLUB_COLOUR, CLUB_ID
+from config import CLUB_COLOUR
 from interaction_tracking import TrackedView, failed
 
 

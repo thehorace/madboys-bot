@@ -260,11 +260,19 @@ class EAClient:
             from config import MATCH_TYPES
             match_types = MATCH_TYPES
 
-        results = [
-            await self.get_recent_matches(club_id, match_type=mt, count=count,
-                                          bypass_cache=bypass_cache, allow_stale=allow_stale)
-            for mt in match_types
-        ]
+        if allow_stale:
+            results = [
+                await self.get_recent_matches(club_id, match_type=mt, count=count,
+                                              bypass_cache=bypass_cache, allow_stale=allow_stale)
+                for mt in match_types
+            ]
+        else:
+            # Fresh-only (the tracker) never reads the stale flag, so fetch the types in parallel:
+            # a hung relay then costs one timeout instead of one per match type.
+            results = await asyncio.gather(*(
+                self.get_recent_matches(club_id, match_type=mt, count=count,
+                                        bypass_cache=bypass_cache, allow_stale=False)
+                for mt in match_types))
         if all(r is None for r in results):
             return None
 

@@ -24,7 +24,7 @@ Delivery: by DM to managers who tapped "📩 DM me rotation notes" in the
 or MANAGER_CHANNEL_ID). Nobody opted in = no notes.
 """
 
-from clubs import club_id, club_name, club_scoped
+from clubs import club_id, club_name, club_scope
 import json
 import logging
 import os
@@ -38,7 +38,6 @@ from discord.ext import commands
 
 import positions as P
 from cogs.rotation import set_match_position
-from config import CLUB_NAME
 from db import connect, get_setting, set_setting
 from interaction_tracking import TrackedView
 from utils import resolve_name
@@ -162,9 +161,24 @@ class PositionsCog(commands.Cog):
 
     @app_commands.command(name="position", description="Set (or fix) where you played in your last game")
     @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in P.ALL_POSITIONS])
-    @club_scoped
     async def position(self, interaction: discord.Interaction, position: app_commands.Choice[str]):
+        # Deliberately NOT club-scoped: "your last game" means the last game you played for any
+        # club, not the club your stats menu follows (which may be the other squad's).
         gid, uid = str(interaction.guild_id), str(interaction.user.id)
+        with connect() as conn:
+            last = conn.execute("""
+                SELECT c.club_id FROM rotation_log r
+                JOIN monitored_clubs c ON c.name = r.club AND c.enabled = 1
+                JOIN matches m ON m.match_id = r.match_id AND m.club_id = c.club_id
+                WHERE r.guild_id=? AND r.discord_id=? ORDER BY m.ts DESC LIMIT 1""", (gid, uid)).fetchone()
+        if not last:
+            await interaction.response.send_message(
+                "I haven't tracked a game for you yet (are you linked? tap 👤 My stats on the panel).", ephemeral=True)
+            return
+        with club_scope(last["club_id"]):
+            await self._set_last_position(interaction, gid, uid, position)
+
+    async def _set_last_position(self, interaction, gid, uid, position):
         with connect() as conn:
             row = conn.execute("""
                 SELECT r.match_id, m.our_goals, m.opp_goals, m.opp_name FROM rotation_log r
@@ -184,7 +198,8 @@ class PositionsCog(commands.Cog):
             if pending.pop(uid, None) is not None:
                 _save_pending(pr["message_id"], pending)
         await interaction.response.send_message(
-            f"Logged **{position.value}** for your last game ({row['our_goals']}–{row['opp_goals']} vs {row['opp_name']}) ✅",
+            f"Logged **{position.value}** for your last game ({club_name()} {row['our_goals']}–{row['opp_goals']} "
+            f"vs {row['opp_name']}) ✅",
             ephemeral=True)
         await self.check_notes(interaction.guild, [uid])
 

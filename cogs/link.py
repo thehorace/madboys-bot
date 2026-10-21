@@ -11,7 +11,7 @@ Commands:
   /link list                    - Manager: list all links
 """
 
-from clubs import club_id, club_name, club_scope, club_scoped, monitored_clubs
+from clubs import club_scope, club_scoped, monitored_clubs
 import logging
 from typing import Optional
 
@@ -19,7 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
+from config import CLUB_COLOUR
 from db import connect, now_iso
 from utils import clip, is_manager, resolve_name
 from interaction_tracking import failed
@@ -81,11 +81,24 @@ class LinkCog(commands.Cog):
 
     link_group = app_commands.Group(name="link", description="Link Discord accounts to EA Pro Clubs personas")
 
-    async def _roster_note(self, ea_name: str) -> str:
+    async def _all_rosters(self) -> Optional[list[dict]]:
+        """Members of every tracked club (a player may only be in GRAYSBOYS, say). None if EA gave nothing."""
         ea = getattr(self.bot, "ea", None)
-        members = await ea.get_member_stats(club_id()) if ea else None
+        if not ea:
+            return None
+        found, any_ok = [], False
+        for club in monitored_clubs():
+            members = await ea.get_member_stats(club["club_id"])
+            if members:
+                any_ok = True
+                found.extend(m for m in members if m.get("name"))
+        return found if any_ok else None
+
+    async def _roster_note(self, ea_name: str) -> str:
+        members = await self._all_rosters()
         if members and not any((m.get("name") or "").lower() == ea_name.lower() for m in members):
-            return (f"\n⚠️ **{ea_name}** isn't in {club_name()}'s current EA roster — double-check the spelling, "
+            names = " / ".join(c["name"] for c in monitored_clubs())
+            return (f"\n⚠️ **{ea_name}** isn't in the current EA roster ({names}) — double-check the spelling, "
                     f"or ignore this if they just joined.")
         return ""
 
@@ -153,10 +166,10 @@ class LinkCog(commands.Cog):
         embed = discord.Embed(title="🔗 EA Persona Links", description=clip("\n".join(lines) or "No links yet.", 4096),
                               colour=CLUB_COLOUR)
 
-        members = await self.bot.ea.get_member_stats(club_id()) if getattr(self.bot, "ea", None) else None
+        members = await self._all_rosters()
         if members:
             linked = {n.lower() for n in links.values()}
-            missing = [m["name"] for m in members if m.get("name") and m["name"].lower() not in linked]
+            missing = sorted({m["name"] for m in members if m["name"].lower() not in linked}, key=str.lower)
             if missing:
                 embed.add_field(name=f"In the EA roster but not linked ({len(missing)})",
                                 value=clip(", ".join(sorted(missing, key=str.lower))), inline=False)

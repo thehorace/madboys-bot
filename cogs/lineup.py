@@ -38,7 +38,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.rotation import broad_role, current_streak, get_all_recent, is_exact, strip_number
-from config import CLUB_COLOUR, CLUB_NAME, ROTATION_THRESHOLD
+from config import CLUB_COLOUR, ROTATION_THRESHOLD
 from db import connect, now_iso
 from interaction_tracking import TrackedView, failed
 from pitch import render_lineup

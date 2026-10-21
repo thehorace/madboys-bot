@@ -20,7 +20,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw
 
-from config import BOT_TZ, CLUB_NAME
+from config import BOT_TZ
 from fonts import font
 from match_data import MATCH_TYPE_LABEL, POS_SHORT, ParsedMatch, motm_of
 from clubs import match_scoped

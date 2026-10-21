@@ -16,7 +16,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from clubs import club_id, club_name, club_scope, club_scoped, club_for, monitored_clubs
+from clubs import club_id, club_name, club_scope, club_scoped, monitored_clubs
 from cogs.stats import send_screen
 from config import CLUB_COLOUR
 from db import connect

@@ -24,7 +24,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import CLUB_COLOUR, CLUB_NAME, ROTATION_THRESHOLD
+from config import CLUB_COLOUR, ROTATION_THRESHOLD
 from db import connect, now_iso
 from utils import clip, resolve_name
 

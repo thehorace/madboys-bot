@@ -19,6 +19,10 @@ def toggle_club(cid):
         if row[0] and conn.execute('SELECT COUNT(*) FROM monitored_clubs WHERE enabled=1').fetchone()[0] <= 1:
             raise ValueError('Keep at least one club enabled.')
         conn.execute('UPDATE monitored_clubs SET enabled=? WHERE club_id=?', (not row[0], cid))
+        if not row[0]:
+            # Re-enabled: save the games missed while it was off quietly, don't announce weeks of old results.
+            conn.execute("INSERT INTO settings (guild_id,key,value) VALUES ('global',?,'1') "
+                         "ON CONFLICT(guild_id,key) DO UPDATE SET value='1'", (f"club:quiet:{cid}",))
 
 
 class ClubModal(discord.ui.Modal, title='Add a monitored EA club'):

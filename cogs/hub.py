@@ -33,7 +33,7 @@ from discord.ext import commands
 import match_data as md
 from cogs import stats as S
 from cogs.link import get_link, set_link
-from config import CLUB_COLOUR, CLUB_ID, CLUB_NAME
+from config import CLUB_COLOUR
 from db import get_setting, set_setting
 from utils import is_manager
 from interaction_tracking import TrackedView, failed
@@ -376,6 +376,9 @@ class PanelView(TrackedView):
 
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
+        # Unbound on purpose: /panel is posted from inside the poster's club scope, and keeping
+        # that would send every click to *their* club. Each click uses the clicker's /club choice.
+        self.club_id = None
         self.bot = bot
 
     @discord.ui.button(label="Stats", emoji="📊", style=discord.ButtonStyle.primary, custom_id="madboys:panel:stats")
@@ -429,7 +432,7 @@ class PanelView(TrackedView):
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
-        title=f"⚽ {club_name()} Bot",
+        title=f"⚽ {' & '.join(c['name'] for c in monitored_clubs()) or club_name()} Bot"[:256],
         description="**Tap a button — no commands needed.**\n"
                     "Your menu opens privately (only you see it), and you can 📢 Share anything to the channel.\n\n"
                     "📊 **Stats** — everything: results, players, leaderboards, head-to-heads\n"

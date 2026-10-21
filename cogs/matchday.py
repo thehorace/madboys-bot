@@ -50,7 +50,7 @@ from cogs.operations import report_health
 from cogs.scout import scout_view
 from cogs.link import find_discord_id_by_ea_name, get_all_links
 from cogs.rotation import is_match_processed, log_positions, mark_match_processed
-from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, CLUB_NAME, GUILD_ID,
+from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, GUILD_ID,
                     MATCHDAY_CHANNEL_ID, POLL_ACTIVE_MINUTES, POLL_IDLE_MINUTES, RECAP_HOUR, RECAP_WEEKDAY,
                     VOICE_ACTIVE_PLAYERS)
 from db import connect, get_setting, set_setting
@@ -63,6 +63,10 @@ log = logging.getLogger("madboys-bot.matchday")
 POSITION_MAP = {"goalkeeper": "GK", "defender": "DEF", "midfielder": "MID", "forward": "FWD"}
 
 MAX_POSTS_PER_POLL = 3
+# A club whose checks have failed this long stops holding up session summaries for the
+# other clubs (its alert stays up until it recovers).
+STALE_CLUB_SECONDS = 2 * 3600
+_FETCH_FAILED = object()
 
 # Discord "Playing ..." names that mean someone's on the game (only used if ENABLE_PRESENCE=1)
 GAME_NAME = re.compile(r"EA SPORTS FC|\bFC ?2[5-9]\b|\bFIFA\b", re.IGNORECASE)  # if the bot was offline and finds 8 new games, don't flood the channel
@@ -312,17 +316,38 @@ class MatchdayCog(commands.Cog):
             self._polling = False
 
     async def _poll_once(self) -> int:
-        """A failed club never prevents checking the remaining clubs."""
+        """
+        1. Fetch every club's results at the same time (a slow relay costs one timeout, not one per club).
+        2. Store and post each club's new games.
+        3. Milestones last: they need an extra relay call per club and shouldn't delay any result.
+        A failed club never prevents checking the remaining clubs.
+        """
         self.last_poll_at = time.time()
         self.club_status = getattr(self, "club_status", {})
-        total = 0
-        states = []
-        for club in monitored_clubs():
+        clubs = monitored_clubs()
+
+        async def fetch(club):
+            with club_scope(club):
+                try:
+                    return await self.ea.get_recent_matches_multi(club['club_id'], count=10,
+                                                                  bypass_cache=True, allow_stale=False)
+                except Exception:
+                    log.exception("Club fetch failed: %s", club['name'])
+                    return _FETCH_FAILED
+        fetched = await asyncio.gather(*(fetch(c) for c in clubs))
+
+        total, states = 0, []
+        self._milestone_jobs = []
+        for club, raw in zip(clubs, fetched):
             state = self.club_status.setdefault(club['club_id'], {})
             state.update(name=club['name'], checked_at=time.time())
+            if raw is _FETCH_FAILED:   # already logged by fetch()
+                state.update(ok=False, partial=False, error="EA/relay match check failed")
+                states.append(state)
+                continue
             try:
                 with club_scope(club):
-                    total += await self._poll_club()
+                    total += await self._poll_club(raw)
                     ok, partial = self.last_poll_ok, self.last_poll_partial
                 state.update(ok=ok, partial=partial, error=None if ok else "EA/relay match check incomplete")
                 if ok:
@@ -331,15 +356,55 @@ class MatchdayCog(commands.Cog):
                 log.exception("Club check failed: %s", club['name'])
                 state.update(ok=False, partial=False, error=type(exc).__name__)
             states.append(state)
-        self.last_poll_ok = bool(states) and all(s['ok'] for s in states)
+
+        jobs, self._milestone_jobs = self._milestone_jobs, None
+        for club, guild, new in jobs:
+            try:
+                with club_scope(club):
+                    await self.check_milestones(guild, announce=True, matches=new)
+            except Exception:
+                log.exception("Milestone check failed: %s", club['name'])
+
+        await self._track_failing_clubs(states)
+        # Session summaries wait for every club, except one that has been failing for hours:
+        # otherwise a single broken club would stop everyone's recaps.
+        healthy = [s for s in states if s['ok']]
+        self.last_poll_ok = bool(healthy) and all(s['ok'] or s.get('stale') for s in states)
         self.last_poll_partial = not self.last_poll_ok and any(s['ok'] or s['partial'] for s in states)
         return total
 
-    async def _poll_club(self) -> int:
-        self.last_poll_at = time.time()
-        raw_matches = await self.ea.get_recent_matches_multi(club_id(), count=10, bypass_cache=True, allow_stale=False)
+    async def _track_failing_clubs(self, states: list[dict]):
+        now = time.time()
+        guild = self.home_guild()
+        for s in states:
+            if s['ok']:
+                s['failing_since'] = None
+                s['stale'] = False
+                if s.pop('alerted', False) and guild:
+                    await report_health(self.bot, str(guild.id), f"Club tracking: {s['name']}")
+                continue
+            s['failing_since'] = s.get('failing_since') or now
+            s['stale'] = now - s['failing_since'] >= STALE_CLUB_SECONDS
+            if s['stale'] and not s.get('alerted') and guild:
+                s['alerted'] = True
+                await report_health(self.bot, str(guild.id), f"Club tracking: {s['name']}",
+                                    f"{s['name']}'s EA checks have failed for over 2 hours. Session summaries "
+                                    "no longer wait for it. Check its club ID in /admin → Settings → Clubs.")
+
+    async def _poll_club(self, raw_matches=_FETCH_FAILED) -> int:
+        if raw_matches is _FETCH_FAILED:   # called on its own (not from _poll_once)
+            self.last_poll_at = time.time()
+            raw_matches = await self.ea.get_recent_matches_multi(club_id(), count=10, bypass_cache=True,
+                                                                 allow_stale=False)
         self.last_poll_partial = raw_matches is not None and not getattr(raw_matches, "complete", True)
         self.last_poll_ok = raw_matches is not None and not self.last_poll_partial
+        # Quiet sync: a brand-new club, or one re-enabled in /admin, saves its existing games without
+        # announcing them, until one COMPLETE check has happened (a half-failed first check used to
+        # leave older playoff games to be "announced" as new on the next poll).
+        quiet_key = f"club:quiet:{club_id()}"
+        quiet = md.match_count(club_id()) == 0 or bool(get_setting("global", quiet_key))
+        if quiet:
+            set_setting("global", quiet_key, None if self.last_poll_ok else "1")
         if not raw_matches:
             return 0
 
@@ -348,7 +413,7 @@ class MatchdayCog(commands.Cog):
         if guild_id:
             self._migrate_old_poll_channel(guild_id)
 
-        first_run = md.match_count(club_id()) == 0
+        first_run = quiet
         self._linked_in.clear()
         self._unlinked.clear()
 
@@ -385,7 +450,12 @@ class MatchdayCog(commands.Cog):
             ids -= {did for p in pending_by_match.values() for did in p}
             await pos_cog.check_notes(guild, sorted(ids))
 
-        await self.check_milestones(guild, announce=True, matches=new)
+        jobs = getattr(self, "_milestone_jobs", None)
+        if jobs is not None:   # inside _poll_once: run after every club has posted its results
+            from clubs import club_for
+            jobs.append((club_for(club_id()), guild, new))
+        else:
+            await self.check_milestones(guild, announce=True, matches=new)
         return len(new)
 
     def _log_rotation(self, guild_id: str, pm: md.ParsedMatch) -> dict[str, str]:

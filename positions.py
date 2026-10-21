@@ -19,7 +19,7 @@ import time
 from typing import Optional
 
 from cogs.rotation import AREA_NAMES, area_of, broad_role, current_streak, get_recent_positions, is_exact, strip_number
-from config import CLUB_NAME, ROTATION_THRESHOLD
+from config import ROTATION_THRESHOLD
 from db import connect
 
 # EA bucket -> broad role
