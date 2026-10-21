@@ -274,6 +274,10 @@ class BadgesCog(commands.Cog):
     @app_commands.describe(member="See someone else's badges")
     @app_commands.guild_only()
     async def badges(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        await self.open_badges(interaction, member)
+
+    async def open_badges(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        """Private badge page (+ emoji picker for your own). Used by /badges, the panel and the stats menu."""
         gid = str(interaction.guild_id)
         target = member or interaction.user
         if target.bot:
@@ -285,22 +289,20 @@ class BadgesCog(commands.Cog):
             failed(interaction)
             who = "You're" if target == interaction.user else f"{target.display_name} is"
             await interaction.response.send_message(
-                f"{who} not linked to an EA name yet, so badges can't be tracked — use `/setup` or 👤 My stats first.",
+                f"{who} not linked to an EA name yet, so badges can't be tracked — tap **Setup** on the panel first.",
                 ephemeral=True)
             if str(target.id) in B.users_with_badges(gid):
                 await self.forget(interaction.guild, str(target.id))   # unlinked since: clean up
             return
+        await interaction.response.defer(ephemeral=True)
         if not B.user_row(gid, str(target.id))["seeded"]:
-            await interaction.response.defer(ephemeral=True)
             await self.refresh_member(interaction.guild, str(target.id))
-            send = interaction.followup.send
-        else:
-            send = interaction.response.send_message
         embed = badges_embed(gid, str(target.id), target.display_name)
         if target == interaction.user:
-            await send(embed=embed, view=BadgeChoiceView(self, interaction.guild, interaction.user), ephemeral=True)
+            await interaction.followup.send(embed=embed, view=BadgeChoiceView(self, interaction.guild, interaction.user),
+                                            ephemeral=True)
         else:
-            await send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

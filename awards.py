@@ -124,6 +124,17 @@ def compute(cid: int, year: int, month: int, tz) -> Optional[dict]:
     return out
 
 
+def months_with_games(cid: int, tz, limit: int = 24) -> list[str]:
+    """Past months (newest first, not counting this one) where this club played enough games for awards."""
+    from collections import Counter
+    with connect() as conn:
+        stamps = [r[0] for r in conn.execute("SELECT ts FROM matches WHERE club_id=?", (cid,))]
+    now = datetime.now(tz)
+    this = f"{now.year:04d}-{now.month:02d}"
+    counts = Counter(datetime.fromtimestamp(t, tz).strftime("%Y-%m") for t in stamps if t)
+    return sorted((m for m, n in counts.items() if n >= MIN_CLUB_GAMES and m != this), reverse=True)[:limit]
+
+
 def save(guild_id: str, cid: int, awards: dict, message_id: Optional[str], posted_at: int):
     with connect() as conn:
         conn.execute("""INSERT INTO monthly_awards (guild_id, club_id, month, data, message_id, posted_at)

@@ -75,6 +75,9 @@ class StatsMenu(TrackedView):
         self.position = "all"   # leaderboard / passing filter: all, DEF, MID, FWD, GK
         self.opponent: Optional[str] = None
         self.career = False
+        self.partner_of: Optional[str] = None   # Best partnerships: one player's partners (None = top pairs)
+        self.attend_period = "30"               # Who shows up: "30", "90" or "all"
+        self.award_month: Optional[str] = None  # Monthly awards: "YYYY-MM" (None = this month so far)
         self.embed: discord.Embed = discord.Embed()
         self.png: Optional[bytes] = None   # result card, when the page has one
         self.message_interaction: Optional[discord.Interaction] = None
@@ -82,7 +85,8 @@ class StatsMenu(TrackedView):
     # ------------------------------------------------------------------ #
     @classmethod
     @club_scoped
-    async def open(cls, bot: commands.Bot, interaction: discord.Interaction, page: str = "home"):
+    async def open(cls, bot: commands.Bot, interaction: discord.Interaction, page: str = "home",
+                   stat: Optional[str] = None):
         """Send a new private menu in reply to a slash command or a panel button."""
         from cogs.lineup import get_prefs
         if not get_link(str(interaction.guild_id), str(interaction.user.id)) or not get_prefs(str(interaction.guild_id), str(interaction.user.id)):
@@ -93,6 +97,8 @@ class StatsMenu(TrackedView):
         await interaction.response.defer(ephemeral=True, thinking=True)
         roster = await S.roster_names(bot.ea)
         menu = cls(bot, interaction.user, str(interaction.guild_id), roster, md.opponents(club_id(), limit=25))
+        if stat:
+            menu.stat = stat
         await menu.go(page)
         menu.record_result(interaction)
         menu.message_interaction = interaction
@@ -250,6 +256,10 @@ class StatsMenu(TrackedView):
                 for n in others])
             sel.callback = self._pick_compare
             self.add_item(sel)
+        elif self.page == "leaderboard" and self.stat in ("partners", "attendance", "awards"):
+            picker = self.squad_picker()
+            if picker:
+                self.add_item(picker)
         elif self.opponents:
             sel = discord.ui.Select(placeholder="🤝 Head-to-head vs…", row=3, options=[
                 discord.SelectOption(label=n[:100], value=n[:100], default=self.page == "h2h" and n == self.opponent)
@@ -277,6 +287,10 @@ class StatsMenu(TrackedView):
         switch = discord.ui.Button(label="Switch club", emoji="🔁", row=4)
         switch.callback = self._switch_club
         self.add_item(switch)
+        if self.page == "me":
+            badges = discord.ui.Button(label="My badges", emoji="🏅", row=4, style=discord.ButtonStyle.secondary)
+            badges.callback = self._my_badges
+            self.add_item(badges)
 
         # position filter for leaderboards (cycles All -> DEF -> MID -> FWD -> GK)
         if self.page == "leaderboard" and self.stat not in ("squad_motm", *SQUAD_PAGES):
@@ -291,20 +305,64 @@ class StatsMenu(TrackedView):
         """Pages built from saved games/sessions rather than EA's live stats."""
         import insights
         guild = self.bot.get_guild(int(self.guild_id))
-        if key == "partners":
-            return await asyncio.to_thread(insights.build_partnerships)   # can take ~0.3s with a big history
+        if key == "partners":   # can take ~0.3s with a big history: off the main loop
+            return await asyncio.to_thread(insights.build_partnerships, self.partner_of)
         if guild is None:
             return "Couldn't find this server."
         if key == "attendance":
-            return await insights.build_attendance(guild, "30", me=str(self.user.id))
+            return await insights.build_attendance(guild, self.attend_period, me=str(self.user.id))
         if key == "badges":
             from cogs.badges import build_badge_board
             return await build_badge_board(guild)
         from cogs.awards import build_awards
-        screen = await build_awards(self.guild_id)
+        screen = await build_awards(self.guild_id, self.award_month)
         if isinstance(screen, tuple):
             screen[0].set_image(url="attachment://result.png")   # the menu attaches images as result.png
         return screen
+
+    def squad_picker(self) -> Optional[discord.ui.Select]:
+        """Row-3 dropdown for the squad pages: whose partners / which period / which month."""
+        if self.stat == "partners":
+            if not self.roster:
+                return None
+            options = [discord.SelectOption(label="Top pairs (everyone)", value="_all", emoji="🤝",
+                                            default=self.partner_of is None)]
+            options += [discord.SelectOption(label=n[:100], value=n[:100], default=n == self.partner_of)
+                        for n in self.roster[:24]]
+            placeholder = "🤝 Best partners of…"
+        elif self.stat == "attendance":
+            import insights
+            options = [discord.SelectOption(label=label, value=key, default=key == self.attend_period)
+                       for key, (label, _) in insights.ATTENDANCE_DAYS.items()]
+            placeholder = "📅 Period…"
+        else:
+            import awards as A
+            from cogs.awards import _tz
+            options = [discord.SelectOption(label="This month (so far)", value="_now", emoji="⏳",
+                                            default=self.award_month is None)]
+            options += [discord.SelectOption(label=A.month_label(m), value=m, default=m == self.award_month)
+                        for m in A.months_with_games(club_id(), _tz(self.guild_id))[:24]]
+            placeholder = "📅 Pick a month…"
+        sel = discord.ui.Select(placeholder=placeholder, row=3, options=options)
+        sel.callback = self._pick_squad_option
+        return sel
+
+    async def _pick_squad_option(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        if self.stat == "partners":
+            self.partner_of = None if value == "_all" else value
+        elif self.stat == "attendance":
+            self.attend_period = value
+        else:
+            self.award_month = None if value == "_now" else value
+        await self._update(interaction, "leaderboard")
+
+    async def _my_badges(self, interaction: discord.Interaction):
+        badges = self.bot.get_cog("BadgesCog")
+        if not badges:
+            await interaction.response.send_message("Badges aren't available right now.", ephemeral=True)
+            return
+        await badges.open_badges(interaction)
 
     async def _switch_club(self, interaction):
         clubs = monitored_clubs()
@@ -461,19 +519,36 @@ class PanelView(TrackedView):
     async def session_history(self, interaction: discord.Interaction, _):
         await self.bot.get_cog("SessionReportsCog").show_history(interaction)
 
+    @discord.ui.button(label="My badges", emoji="🏅", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:badges", row=2)
+    async def my_badges(self, interaction: discord.Interaction, _):
+        badges = self.bot.get_cog("BadgesCog")
+        if not badges:
+            await interaction.response.send_message("Badges aren't available right now.", ephemeral=True)
+            return
+        await badges.open_badges(interaction)
+
+    @discord.ui.button(label="Awards", emoji="🏆", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:awards", row=2)
+    async def awards(self, interaction: discord.Interaction, _):
+        await StatsMenu.open(self.bot, interaction, "leaderboard", stat="awards")
+
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
         title=f"⚽ {' & '.join(c['name'] for c in monitored_clubs()) or club_name()} Bot"[:256],
         description="**Tap a button — no commands needed.**\n"
                     "Your menu opens privately (only you see it), and you can 📢 Share anything to the channel.\n\n"
-                    "📊 **Stats** — everything: results, players, leaderboards, head-to-heads\n"
+                    "📊 **Stats** — everything: results, players, leaderboards, head-to-heads, "
+                    "best partnerships, who shows up\n"
                     "📡 **Last game** — latest result with player ratings\n"
                     "👤 **My stats** — your numbers (first time: pick your EA name)\n"
                     "🏆 **Leaderboard** — who's top of the squad\n"
                     "🛠️ **My builds** — tick the positions you've got builds for\n"
                     "📋 **My session** — your private stats after the session finishes\n"
                     "🗓️ **Session history** — finished sessions and club results\n"
+                    "🏅 **My badges** — your badges, and the emoji on your name\n"
+                    "🏆 **Awards** — this month's award race (and past months)\n"
                     "🧑‍💼 **Manager** — build & post the lineup (managers only)",
         colour=CLUB_COLOUR)
 

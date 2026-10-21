@@ -381,5 +381,66 @@ class MenuTests(Base):
             self.assertLessEqual(len(lb.options), 25)
 
 
+class HubControlTests(Base):
+    async def test_pickers_change_the_page_and_layout_stays_valid(self):
+        from collections import Counter
+        from cogs.hub import StatsMenu
+        for i in range(4):
+            self.game(ts(2026, 9, 3 + i), players=[("Ali", {"r": 8.0}), ("Bob", {"r": 7.0})])
+        guild = SimpleNamespace(id=10, get_member=lambda _: None, fetch_member=AsyncMock())
+        bot = SimpleNamespace(ea=SimpleNamespace(), get_guild=lambda _: guild, get_cog=lambda n: None)
+        menu = StatsMenu(bot, SimpleNamespace(id=42), "10", ["Ali", "Bob"], ["Rivals"])
+        inter = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()), edit_original_response=AsyncMock(),
+                                extras={}, data={}, guild_id=10, user=SimpleNamespace(id=42))
+
+        def picker():
+            return next(c for c in menu.children if getattr(c, "row", None) == 3)
+
+        def check():
+            ids = Counter(c.custom_id for c in menu.children)
+            self.assertFalse([i for i, n in ids.items() if n > 1])
+            for row in range(5):
+                self.assertLessEqual(sum(c.row == row for c in menu.children), 5)
+
+        with patch("cogs.awards._tz", return_value=SYD):
+            for stat, value, attr, expected in (("partners", "Ali", "partner_of", "Ali"),
+                                                ("attendance", "90", "attend_period", "90"),
+                                                ("awards", "2026-09", "award_month", "2026-09")):
+                menu.stat = stat
+                await menu.go("leaderboard")
+                check()
+                self.assertTrue(picker().placeholder.startswith(("🤝", "📅")))
+                inter.data = {"values": [value]}
+                with patch("interaction_tracking.record"):
+                    await picker().callback(inter)
+                self.assertEqual(getattr(menu, attr), expected)
+                check()
+            self.assertIn("September 2026", menu.embed.title)
+        set_link("10", "42", "Ali", "self")
+        menu.ea = SimpleNamespace(get_member_stats=AsyncMock(return_value=[{"name": "Ali", "gamesPlayed": 4}]),
+                                  stale_note=lambda: None)
+        await menu.go("me")
+        self.assertEqual(menu.page, "me")
+        self.assertTrue(any(getattr(c, "label", "") == "My badges" for c in menu.children))
+        check()
+
+    async def test_panel_has_badges_and_awards_buttons(self):
+        from collections import Counter
+        from cogs.hub import PanelView
+        badges = SimpleNamespace(open_badges=AsyncMock())
+        panel = PanelView(SimpleNamespace(get_cog=lambda n: badges if n == "BadgesCog" else None))
+        ids = Counter(c.custom_id for c in panel.children)
+        self.assertFalse([i for i, n in ids.items() if n > 1])
+        self.assertIn("madboys:panel:badges", ids)
+        self.assertIn("madboys:panel:awards", ids)
+        for row in range(5):
+            self.assertLessEqual(sum(c.row == row for c in panel.children), 5)
+        button = next(c for c in panel.children if c.custom_id == "madboys:panel:badges")
+        inter = SimpleNamespace(guild_id=10, user=SimpleNamespace(id=42), extras={})
+        with patch("interaction_tracking.record"):
+            await button.callback(inter)
+        badges.open_badges.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()
