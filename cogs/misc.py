@@ -23,8 +23,15 @@ HELP_SECTIONS = [
         ("/compare", "Two players side by side"),
         ("/form", "Recent results"),
         ("/h2h", "Record vs a specific club"),
+        ("/scout", "Any opponent's record, form and our head-to-head"),
         ("/recap", "Summary of the last N days"),
         ("/motm table", "Squad MOTM awards (voted after every game)"),
+    ]),
+    ("🏅 Squad", [
+        ("/badges", "Your badges, and which emoji shows on your nickname"),
+        ("/awards", "Monthly awards — this month's race, or any past month"),
+        ("/partners", "Best partnerships — which pairs win most together"),
+        ("/attendance", "Who shows up — sign-ups vs actually playing"),
     ]),
     ("🔗 Setup", [
         ("/setup", "Guided EA link, positions and button tour"),

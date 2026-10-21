@@ -43,6 +43,14 @@ STICKY_MIN_SECONDS = 45        # ...but not more often than this
 
 log = logging.getLogger("madboys-bot.hub")
 
+# Leaderboard-menu pages built from the bot's own saved games and sessions: (label, emoji, description)
+SQUAD_PAGES = {
+    "partners": ("Best partnerships", "🤝", "Which pairs win most together"),
+    "attendance": ("Who shows up", "📋", "Sign-ups vs actually playing (last 30 days)"),
+    "badges": ("Badge collection", "🏅", "Everyone's badges"),
+    "awards": ("Monthly awards", "🏆", "This month's award race so far"),
+}
+
 MENU_TIMEOUT = 14 * 60  # Discord lets us edit an interaction's reply for 15 min
 
 # pages where the Season/Career toggle means something
@@ -163,6 +171,8 @@ class StatsMenu(TrackedView):
         elif page == "leaderboard" and self.stat == "squad_motm":
             from cogs.motm import build_table_embed
             screen = build_table_embed()
+        elif page == "leaderboard" and self.stat in SQUAD_PAGES:
+            screen = await self.squad_page(self.stat)
         elif page == "leaderboard":
             screen = await S.build_leaderboard(self.ea, self.stat, self.career, self.position)
         elif page == "h2h":
@@ -220,7 +230,10 @@ class StatsMenu(TrackedView):
                                     description="Accuracy vs involvement, by player, position & team",
                                     default=self.page == "leaderboard" and self.stat == "passing")]
             + [discord.SelectOption(label="Squad MOTM awards", value="squad_motm", emoji="🗳️",
-                                    default=self.page == "leaderboard" and self.stat == "squad_motm")])
+                                    default=self.page == "leaderboard" and self.stat == "squad_motm")]
+            + [discord.SelectOption(label=label, value=key, emoji=emoji, description=desc,
+                                    default=self.page == "leaderboard" and self.stat == key)
+               for key, (label, emoji, desc) in SQUAD_PAGES.items()])
         lb.callback = self._pick_stat
         self.add_item(lb)
 
@@ -248,7 +261,7 @@ class StatsMenu(TrackedView):
                                    emoji="🕰️" if self.career else "📅", row=4,
                                    style=discord.ButtonStyle.success,
                                    disabled=self.page not in CAREER_PAGES
-                                   or (self.page == "leaderboard" and self.stat in ("squad_motm", "passing")))
+                                   or (self.page == "leaderboard" and self.stat in ("squad_motm", "passing", *SQUAD_PAGES)))
         toggle.callback = self._toggle_career
         self.add_item(toggle)
 
@@ -266,13 +279,32 @@ class StatsMenu(TrackedView):
         self.add_item(switch)
 
         # position filter for leaderboards (cycles All -> DEF -> MID -> FWD -> GK)
-        if self.page == "leaderboard" and self.stat != "squad_motm":
+        if self.page == "leaderboard" and self.stat not in ("squad_motm", *SQUAD_PAGES):
             label = S.POSITION_FILTERS[self.position][0]
             pos_btn = discord.ui.Button(label=label, emoji="🔎", row=4,
                                         style=discord.ButtonStyle.primary if self.position != "all"
                                         else discord.ButtonStyle.secondary)
             pos_btn.callback = self._cycle_position
             self.add_item(pos_btn)
+
+    async def squad_page(self, key: str):
+        """Pages built from saved games/sessions rather than EA's live stats."""
+        import insights
+        guild = self.bot.get_guild(int(self.guild_id))
+        if key == "partners":
+            return await asyncio.to_thread(insights.build_partnerships)   # can take ~0.3s with a big history
+        if guild is None:
+            return "Couldn't find this server."
+        if key == "attendance":
+            return await insights.build_attendance(guild, "30", me=str(self.user.id))
+        if key == "badges":
+            from cogs.badges import build_badge_board
+            return await build_badge_board(guild)
+        from cogs.awards import build_awards
+        screen = await build_awards(self.guild_id)
+        if isinstance(screen, tuple):
+            screen[0].set_image(url="attachment://result.png")   # the menu attaches images as result.png
+        return screen
 
     async def _switch_club(self, interaction):
         clubs = monitored_clubs()

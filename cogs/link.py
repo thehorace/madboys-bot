@@ -142,6 +142,9 @@ class LinkCog(commands.Cog):
         await interaction.response.send_message(
             f"🗑️ Removed link for **{target.display_name}**." if ok else f"**{target.display_name}** wasn't linked.",
             ephemeral=True)
+        badges = interaction.client.get_cog("BadgesCog") if ok else None
+        if badges:   # their badges belonged to that EA name: drop them and the nickname emoji
+            await badges.forget(interaction.guild, str(target.id))
 
     @link_group.command(name="show", description="Show the linked EA persona for yourself or someone else")
     @app_commands.describe(member="Leave blank to check yourself")

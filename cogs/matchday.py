@@ -364,6 +364,7 @@ class MatchdayCog(commands.Cog):
                     await self.check_milestones(guild, announce=True, matches=new)
             except Exception:
                 log.exception("Milestone check failed: %s", club['name'])
+        await self._award_badges(jobs)
 
         await self._track_failing_clubs(states)
         # Session summaries wait for every club, except one that has been failing for hours:
@@ -456,7 +457,20 @@ class MatchdayCog(commands.Cog):
             jobs.append((club_for(club_id()), guild, new))
         else:
             await self.check_milestones(guild, announce=True, matches=new)
+            from clubs import club_for
+            await self._award_badges([(club_for(club_id()), guild, new)])
         return len(new)
+
+    async def _award_badges(self, jobs: list):
+        """Badges for everyone in this check's new games (all clubs at once, one announcement)."""
+        badges = self.bot.get_cog("BadgesCog")
+        guild = next((g for _, g, _ in jobs if g), None)
+        if not badges or not guild:
+            return
+        try:
+            await badges.after_matches(guild, [pm for _, _, new in jobs for pm in new])
+        except Exception:
+            log.exception("Badge check failed")
 
     def _log_rotation(self, guild_id: str, pm: md.ParsedMatch) -> dict[str, str]:
         """

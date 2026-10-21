@@ -248,6 +248,35 @@ itself. Later games in a catch-up batch are excluded. `/help` includes passing
 stats and the session list/cancel commands; tests check that every advertised
 command exists and fits Discord's embed limits.
 
+## Badges, monthly awards, partnerships and attendance
+
+All four are built from the games and sessions the bot has saved, so they cost no EA calls.
+
+**Badges** are earned from real tracked games, for either club:
+🎩 Hat-trick Hero (3+ goals) · 🎯 Playmaker (3+ assists) · 🌟 Star Man (9.0+ rating) ·
+🔥 On Fire (scored in 5 games in a row) · 🧱 Brick Wall (3 clean sheets in a row as keeper/defender) ·
+🧤 Safe Hands (8+ saves) · 🗳️ Fan Favourite (5 squad MOTM votes won) · 💯 Centurion (100 games) ·
+👑 Player of the Month. New badges are announced after each game, and the newest badge's
+emoji is added to the player's server nickname (e.g. "Fauz 🎩"). **`/badges`** shows your
+badges and lets you pick which emoji shows, or none. When the feature first starts, everyone's
+past games are badged quietly with one "badges are here" message. Only linked players can earn
+badges. Nicknames need the bot to have **Manage Nicknames** and a role above the players'; Discord
+never lets a bot rename the server owner.
+
+**Monthly awards**: in the first week of each month (from 10:00 in the session timezone) the
+bot posts last month's awards card for each club that played 3+ games: Player of the Month
+(best average rating, +0.1 per squad MOTM vote won, minimum 30% of the club's games), top
+scorer, top assists, squad MOTM king, most improved and ever-present. Player of the Month gets
+the gold **👑 Player of the Month** role (the bot creates it; needs **Manage Roles** and its own
+role above it) and the 👑 badge. **`/awards`** shows this month's race so far, or any past month.
+
+**`/partners`** ranks the pairs who win most when they play together (5+ games together, or 3+
+while the club has few games saved); **`/partners player:`** shows one player's best partners.
+**`/attendance`** shows who shows up: games played, ✅ sign-ups, show rate, no-shows and
+"surprise" appearances, from finished sessions with games. Joining voice doesn't count as a sign-up.
+All four are also in the `/stats` menu's leaderboard list, and player pages show their badges
+and best partners.
+
 ## Guided player setup
 
 **`/setup`**, or the panel's **Setup** button, opens a private three-step flow:

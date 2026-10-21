@@ -262,7 +262,31 @@ async def build_player(ea, name: str, career: bool = False, with_recent: bool = 
         rows = recent_player_games(p.get("name", ""), 5)
         if rows:
             embed.add_field(name="Last games", value=clip("\n".join(rows)), inline=False)
+        await asyncio.to_thread(add_squad_extras, embed, p.get("name", ""))   # DB work off the main loop
     return footer(embed, ea)
+
+
+def add_squad_extras(embed: discord.Embed, name: str):
+    """Badges and best partners on a player's page (from saved games; never fails the page)."""
+    try:
+        import badges as B
+        import insights
+        with connect() as conn:
+            link = conn.execute("SELECT guild_id, discord_id FROM ea_links WHERE ea_name=? COLLATE NOCASE LIMIT 1",
+                                (name,)).fetchone()
+        if link:
+            mine = B.stored(link["guild_id"], link["discord_id"])
+            if mine:
+                line = "  ".join(B.badge_line(v, k).replace("**", "") for k, v in
+                                 sorted(mine.items(), key=lambda kv: kv[1]["earned_at"]))
+                embed.add_field(name="🏅 Badges", value=clip(line), inline=False)
+        partners = insights.partners_of(name, limit=3)
+        if partners:
+            embed.add_field(name="🤝 Best partners", value=clip("\n".join(
+                f"**{x['partner']}** — {round(100 * x['w'] / x['games'])}% wins in {x['games']} games" for x in partners)),
+                inline=False)
+    except Exception:
+        log.exception("Couldn't add badges/partners to %s's page", name)
 
 
 async def build_leaderboard(ea, stat: str, career: bool = False, position: str = "all") -> Screen:

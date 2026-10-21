@@ -39,6 +39,9 @@ COGS = [
     "cogs.session_reports",
     "cogs.announce",
     "cogs.scout",
+    "cogs.insights",
+    "cogs.badges",
+    "cogs.awards",
 ]
 
 
