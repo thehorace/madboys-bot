@@ -539,6 +539,7 @@ class LineupBuilder(TrackedView):
             b.callback = cb
             self.add_item(b)
 
+        import os
         from cogs.positions import K_MANAGER_CHANNEL, note_dm_list
         from db import get_setting
         dm_on = str(self.user.id) in note_dm_list(self.gid)
@@ -547,8 +548,9 @@ class LineupBuilder(TrackedView):
                                 style=discord.ButtonStyle.success if dm_on else discord.ButtonStyle.secondary)
         db_.callback = self._notes_dm
         self.add_item(db_)
-        here = get_setting(self.gid, K_MANAGER_CHANNEL)
-        nb = discord.ui.Button(label="Notes also post in a channel ✓" if here else "Also post notes in this channel",
+        setting = get_setting(self.gid, K_MANAGER_CHANNEL)
+        here = setting != "off" and bool(setting or os.getenv("MANAGER_CHANNEL_ID"))
+        nb = discord.ui.Button(label="Notes post in a channel ✓ (tap to stop)" if here else "Also post notes in this channel",
                                emoji="📝", style=discord.ButtonStyle.secondary, row=4)
         nb.callback = self._notes_here
         self.add_item(nb)
@@ -637,8 +639,9 @@ class LineupBuilder(TrackedView):
         on = toggle_note_dm(self.gid, str(interaction.user.id))
         if on:
             try:   # check DMs actually reach them
-                await interaction.user.send("📩 You'll get the MADBOYS rotation notes here — a quick heads-up when "
-                                            "someone's been in the same area (Defence / Midfield / Front 3) for 3 games.")
+                await interaction.user.send(f"📩 You'll get the {club_name()} rotation notes here — a quick heads-up "
+                                            f"when someone's been in the same area (Defence / Midfield / Front 3) "
+                                            f"for {ROTATION_THRESHOLD} games.")
                 note = "📩 Rotation notes will be DM'd to you."
             except discord.HTTPException:
                 note = ("📩 Turned on, but I couldn't DM you — allow DMs from server members "
@@ -650,10 +653,16 @@ class LineupBuilder(TrackedView):
     async def _notes_here(self, interaction: discord.Interaction):
         await interaction.response.defer()
         from cogs.positions import K_MANAGER_CHANNEL
-        from db import set_setting
+        from db import get_setting, set_setting
+        import os
+        current = get_setting(self.gid, K_MANAGER_CHANNEL)
+        if current != "off" and (current or os.getenv("MANAGER_CHANNEL_ID")):   # already on: turn it off
+            set_setting(self.gid, K_MANAGER_CHANNEL, "off")
+            await self._update(interaction, "📝 Stopped posting rotation notes in a channel (DMs still work).")
+            return
         set_setting(self.gid, K_MANAGER_CHANNEL, str(interaction.channel_id))
         await self._update(interaction, f"📝 Rotation notes will be posted in <#{interaction.channel_id}> "
-                                        f"(keep this a managers-only channel).")
+                                        f"(keep this a managers-only channel). Tap again to stop.")
 
 
 @club_scoped

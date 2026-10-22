@@ -10,6 +10,20 @@ from config import CLUB_COLOUR
 from interaction_tracking import TrackedView, failed
 
 
+def unknown_ea_name(name: str, roster: list[str]) -> bool:
+    """True when we have a squad list / tracked games and this name is in neither (probably a typo)."""
+    key = name.casefold()
+    if any(n.casefold() == key for n in roster):
+        return False
+    from db import connect
+    with connect() as conn:
+        seen = conn.execute("SELECT 1 FROM match_players WHERE name = ? COLLATE NOCASE LIMIT 1", (name,)).fetchone()
+        any_games = seen or conn.execute("SELECT 1 FROM match_players LIMIT 1").fetchone()
+    if seen:
+        return False
+    return bool(roster or any_games)   # nothing to compare against yet -> don't nag
+
+
 class NameModal(discord.ui.Modal, title="Link your EA player"):
     name = discord.ui.TextInput(label="EA player name", max_length=100)
 
@@ -22,7 +36,11 @@ class NameModal(discord.ui.Modal, title="Link your EA player"):
             failed(interaction)
             await interaction.response.send_message("Enter your EA player name.", ephemeral=True)
             return
-        set_link(self.setup_view.gid, str(interaction.user.id), self.name.value.strip(), "self")
+        typed = self.name.value.strip()
+        set_link(self.setup_view.gid, str(interaction.user.id), typed, "self")
+        from cogs.badges import badges_relinked
+        badges_relinked(interaction, str(interaction.user.id))
+        self.setup_view.name_warning = unknown_ea_name(typed, self.setup_view.roster)
         self.setup_view.step = 1
         await self.setup_view.show(interaction)
 
@@ -33,6 +51,7 @@ class SetupView(TrackedView):
         self.bot, self.user, self.gid = bot, user, guild_id
         self.roster = sorted(set(roster), key=str.lower)
         self.page = 0
+        self.name_warning = False   # typed name isn't in the squad list or any tracked game
         linked = get_link(guild_id, str(user.id))
         self.step = 0 if not linked else 1 if not get_prefs(guild_id, str(user.id)) else 2
         self.render()
@@ -50,6 +69,9 @@ class SetupView(TrackedView):
             text = "**1 / 3 · Link your EA player**\nPick your name from the squad roster, or enter it manually."
         elif self.step == 1:
             text = f"**2 / 3 · Choose your positions**\nLinked as **{name}**. Tick every position you have a build for."
+            if self.name_warning:
+                text += (f"\n\n⚠️ **{name}** isn't in the squad list or any game we've tracked. If that's a typo, "
+                         "tap **Change EA player** — your stats only show up when it matches your EA name exactly.")
         else:
             text = (f"**3 / 3 · You're ready**\nEA player: **{name}**\nPositions: **{', '.join(positions)}**\n\n"
                     "📊 **Stats** opens your private menu. **Me** shows your numbers; dropdowns show players and leaderboards.\n"
@@ -94,7 +116,10 @@ class SetupView(TrackedView):
         await interaction.response.edit_message(content=None, embed=self.embed(), view=self)
 
     async def pick_name(self, interaction):
+        self.name_warning = False
         set_link(self.gid, str(self.user.id), interaction.data["values"][0], "self")
+        from cogs.badges import badges_relinked
+        badges_relinked(interaction, str(self.user.id))
         self.step = 1
         await self.show(interaction)
 

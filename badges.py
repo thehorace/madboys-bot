@@ -8,7 +8,7 @@ Rules (all from real tracked games, any club):
   🌟 Star Man           a 9.0+ match rating
   🔥 On Fire            scored in 5 games in a row (same club)
   🧱 Brick Wall         3 clean sheets in a row as keeper/defender (same club)
-  🧤 Safe Hands         8+ saves in a game
+  🧤 Safe Hands         8+ saves in a game in goal
   🗳️ Fan Favourite      5 squad MOTM votes won
   💯 Centurion          100 tracked games
   👑 Player of the Month  won a monthly award
@@ -31,7 +31,7 @@ BADGES = {   # key: (emoji, name, how to earn it)
     "star_man":      ("🌟", "Star Man", "a 9.0+ match rating"),
     "on_fire":       ("🔥", "On Fire", "scored in 5 games in a row"),
     "brick_wall":    ("🧱", "Brick Wall", "3 clean sheets in a row as keeper/defender"),
-    "safe_hands":    ("🧤", "Safe Hands", "8+ saves in a game"),
+    "safe_hands":    ("🧤", "Safe Hands", "8+ saves in a game in goal"),
     "fan_favourite": ("🗳️", "Fan Favourite", "won 5 squad MOTM votes"),
     "centurion":     ("💯", "Centurion", "100 tracked games"),
     "potm":          ("👑", "Player of the Month", "won a monthly award"),
@@ -133,7 +133,7 @@ def evaluate(guild_id: str, ea_name: str) -> dict[str, dict]:
             hit("playmaker", g["ts"], f"{g['assists']} assists {vs}")
         if (g["rating"] or 0) >= 9.0:
             hit("star_man", g["ts"], f"{g['rating']:.1f} rating {vs}")
-        if (g["saves"] or 0) >= 8:
+        if (g["saves"] or 0) >= 8 and g["pos"] == "goalkeeper":
             hit("safe_hands", g["ts"], f"{g['saves']} saves {vs}")
         cid = g["club_id"]
         scoring_run[cid] = scoring_run.get(cid, 0) + 1 if (g["goals"] or 0) > 0 else 0

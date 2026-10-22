@@ -263,8 +263,8 @@ def player_totals(club_id: int, start_ts: int = 0, end_ts: int = 2**62) -> list[
                       AVG(mp.rating) AS rating, SUM(mp.motm) AS motm,
                       SUM(mp.passes_made) AS passes_made, SUM(mp.pass_attempts) AS pass_attempts,
                       SUM(mp.tackles_made) AS tackles_made, SUM(mp.shots) AS shots
-               FROM match_players mp JOIN matches m ON m.club_id=mp.club_id AND m.match_id=mp.match_id
-               WHERE mp.club_id=? AND m.ts>=? AND m.ts<?
+               FROM matches m CROSS JOIN match_players mp ON mp.club_id=m.club_id AND mp.match_id=m.match_id
+               WHERE m.club_id=? AND m.ts>=? AND m.ts<?
                GROUP BY mp.name COLLATE NOCASE""",
             (club_id, start_ts, end_ts),
         ).fetchall()

@@ -22,6 +22,7 @@ class TrackedView(discord.ui.View):
     def __init__(self, **kwargs):
         from clubs import bound_club_id
         self.club_id = bound_club_id()
+        self._last_interaction = None   # latest button/menu press, so an expired menu can grey itself out
         super().__init__(**kwargs)
         for child in self.children:
             self._track(child)
@@ -33,6 +34,7 @@ class TrackedView(discord.ui.View):
 
         async def tracked(interaction):
             record(interaction, "pending")
+            self._last_interaction = interaction
             try:
                 from clubs import club_scope, selected_club
                 cid = self.club_id
@@ -54,6 +56,23 @@ class TrackedView(discord.ui.View):
     def add_item(self, item):
         self._track(item)
         return super().add_item(item)
+
+    async def on_timeout(self):
+        """Menus that time out grey out their buttons, so a dead button never says "interaction failed"."""
+        interaction = self._last_interaction
+        if interaction is None or interaction.message is None:
+            return
+        for item in self.children:
+            if not getattr(item, "url", None):
+                item.disabled = True
+        try:
+            if interaction.response.type in (discord.InteractionResponseType.message_update,
+                                             discord.InteractionResponseType.deferred_message_update):
+                await interaction.edit_original_response(view=self)
+            else:
+                await interaction.followup.edit_message(interaction.message.id, view=self)
+        except (discord.HTTPException, ValueError, TypeError):
+            pass   # message gone or token expired: nothing to tidy
 
     async def on_error(self, interaction, error, item):
         failed(interaction)

@@ -113,6 +113,7 @@ class BadgeChoiceView(TrackedView):
         await interaction.response.defer()
         member = self.guild.get_member(self.user.id) or interaction.user
         await self.cog.apply_nickname(member)
+        self.stop()   # replaced by a fresh copy below, so this one mustn't grey the menu out later
         await interaction.edit_original_response(
             embed=badges_embed(gid, uid, getattr(member, "display_name", self.user.name)),
             view=BadgeChoiceView(self.cog, self.guild, self.user))
@@ -124,6 +125,7 @@ class BadgesCog(commands.Cog):
         B.init_badges()
         self._lock = asyncio.Lock()
         self._launch_task: Optional[asyncio.Task] = None
+        self._background: set[asyncio.Task] = set()
 
     async def cog_load(self):
         self._launch_task = asyncio.create_task(self._launch())
@@ -131,6 +133,21 @@ class BadgesCog(commands.Cog):
     def cog_unload(self):
         if self._launch_task:
             self._launch_task.cancel()
+        for task in self._background:
+            task.cancel()
+
+    def relinked(self, guild: Optional[discord.Guild], discord_id: str):
+        """Someone (re)linked their EA name: re-check their badges and nickname in the background."""
+        if guild is None:
+            return
+        task = asyncio.create_task(self.refresh_member(guild, discord_id))
+        self._background.add(task)
+
+        def done(t: asyncio.Task):
+            self._background.discard(t)
+            if not t.cancelled() and t.exception():
+                log.warning("Badge refresh after link failed: %r", t.exception())
+        task.add_done_callback(done)
 
     def home_guild(self) -> Optional[discord.Guild]:
         if GUILD_ID:
@@ -295,14 +312,26 @@ class BadgesCog(commands.Cog):
                 await self.forget(interaction.guild, str(target.id))   # unlinked since: clean up
             return
         await interaction.response.defer(ephemeral=True)
-        if not B.user_row(gid, str(target.id))["seeded"]:
-            await self.refresh_member(interaction.guild, str(target.id))
+        row = B.user_row(gid, str(target.id))
+        if not row["seeded"] or (row["ea_name"] or "").casefold() != get_link(gid, str(target.id)).casefold():
+            await self.refresh_member(interaction.guild, str(target.id))   # new, or re-linked to another name
         embed = badges_embed(gid, str(target.id), target.display_name)
         if target == interaction.user:
             await interaction.followup.send(embed=embed, view=BadgeChoiceView(self, interaction.guild, interaction.user),
                                             ephemeral=True)
         else:
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+def badges_relinked(interaction: discord.Interaction, discord_id: str):
+    """Call right after set_link: refreshes that player's badges without holding up the reply."""
+    try:   # never let a badge hiccup break linking
+        client = getattr(interaction, "client", None)
+        cog = client.get_cog("BadgesCog") if client else None
+        if isinstance(cog, BadgesCog):
+            cog.relinked(getattr(interaction, "guild", None), discord_id)
+    except Exception:
+        log.exception("Couldn't schedule a badge refresh after linking")
 
 
 async def setup(bot: commands.Bot):

@@ -36,21 +36,32 @@ HELP_SECTIONS = [
     ("🔗 Setup", [
         ("/setup", "Guided EA link, positions and button tour"),
         ("/link me", "Connect your Discord to your EA name — do this first!"),
+        ("/link show", "See who someone is linked to"),
+        ("/link list", "Manager: every link, and who in the roster isn't linked"),
         ("/builds", "Tick the positions you have a build for (or 🛠️ on the panel)"),
     ]),
-    ("🎮 Sessions & lineups", [
+    ("🎮 Sessions", [
         ("/session create", "Post a 'who's on tonight?' sign-up"),
         ("/session list", "Upcoming sessions and sign-ups"),
         ("/session cancel", "Manager: cancel the next upcoming session"),
+        ("/session skip", "Admin: skip today's daily session"),
+        ("/session settings", "Admin: daily session time and options"),
         ("/mysession", "Private personal summary after the session finishes"),
         ("/sessionhistory", "Browse finished sessions and your past summaries"),
+        ("/motm close", "Manager: close the open MOTM vote now"),
+    ]),
+    ("🧑‍💼 Lineups & rotation", [
         ("/formation show", "Current lineup on a pitch"),
         ("/lineup builder", "Manager: build & post the lineup with buttons (or 🧑‍💼 on the panel)"),
         ("/rotation check", "Who's been stuck in one position"),
+        ("/rotation history", "Where someone has played lately"),
+        ("/rotation stats", "Games per role for each player"),
         ("/position", "Fix where you played in your last game"),
     ]),
     ("📡 Match tracking", [
         ("/matchday start", "Manager: choose where results auto-post (one time)"),
+        ("/announce set", "Manager: send all automatic posts to this channel"),
+        ("/announce show", "Where automatic posts go"),
         ("/panel", "Manager: post a pinned button panel"),
         ("/matchday status", "Private: what the tracker is doing"),
         ("/status", "Is the bot / EA relay healthy?"),
@@ -70,7 +81,9 @@ class MiscCog(commands.Cog):
 
     @app_commands.command(name="help", description="What this bot can do")
     async def help(self, interaction: discord.Interaction):
-        embed = discord.Embed(title=f"⚽ {CLUB_NAME} Bot", colour=CLUB_COLOUR,
+        from clubs import monitored_clubs
+        names = " & ".join(c["name"] for c in monitored_clubs()) or CLUB_NAME
+        embed = discord.Embed(title=f"⚽ {names} Bot"[:256], colour=CLUB_COLOUR,
                               description="Match results post automatically after every game.\n"
                                           "**Easiest way in: `/stats`** — a menu of buttons, no typing needed.")
         for name, cmds in HELP_SECTIONS:

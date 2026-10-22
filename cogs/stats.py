@@ -313,6 +313,23 @@ async def build_leaderboard(ea, stat: str, career: bool = False, position: str =
     return footer(embed, ea, ("Career" if career else "This season") + (f" • min {min_games} games" if min_games > 1 else ""))
 
 
+def _passing_rows(cid: int):
+    """Passing by role played, and team passing in the last 20 games (runs in a thread)."""
+    with connect() as conn:
+        by_role = conn.execute("""
+            SELECT LOWER(pos) AS pos, COUNT(*) AS apps, SUM(passes_made) AS made, SUM(pass_attempts) AS att
+            FROM match_players WHERE club_id=? AND pos IS NOT NULL GROUP BY LOWER(pos)
+        """, (cid,)).fetchall()
+        # pick the last 20 games first, then add up their players (much faster than grouping every game)
+        per_match = conn.execute("""
+            SELECT l.result, SUM(mp.passes_made) AS made, SUM(mp.pass_attempts) AS att
+            FROM (SELECT match_id, result, ts FROM matches WHERE club_id=? ORDER BY ts DESC LIMIT 20) l
+            CROSS JOIN match_players mp ON mp.club_id=? AND mp.match_id=l.match_id
+            GROUP BY l.match_id ORDER BY l.ts DESC
+        """, (cid, cid)).fetchall()
+    return by_role, per_match
+
+
 async def build_passing(ea, position: str = "all") -> Screen:
     """
     Passing, the way the squad asked for it: accuracy vs how involved you are
@@ -344,16 +361,7 @@ async def build_passing(ea, position: str = "all") -> Screen:
                             value="```\n" + "\n".join(table) + "\n```", inline=False)
 
     # by position actually played, from the matches the bot has tracked
-    with connect() as conn:
-        by_role = conn.execute("""
-            SELECT LOWER(pos) AS pos, COUNT(*) AS apps, SUM(passes_made) AS made, SUM(pass_attempts) AS att
-            FROM match_players WHERE club_id=? AND pos IS NOT NULL GROUP BY LOWER(pos)
-        """, (club_id(),)).fetchall()
-        per_match = conn.execute("""
-            SELECT m.result, SUM(mp.passes_made) AS made, SUM(mp.pass_attempts) AS att
-            FROM matches m JOIN match_players mp ON mp.club_id=m.club_id AND mp.match_id=m.match_id
-            WHERE m.club_id=? GROUP BY m.match_id ORDER BY m.ts DESC LIMIT 20
-        """, (club_id(),)).fetchall()
+    by_role, per_match = await asyncio.to_thread(_passing_rows, club_id())
     if by_role:
         order = {"goalkeeper": 0, "defender": 1, "midfielder": 2, "forward": 3}
         lines = []

@@ -109,6 +109,8 @@ class LinkCog(commands.Cog):
     async def link_me(self, interaction: discord.Interaction, ea_name: str):
         await interaction.response.defer(ephemeral=True)
         set_link(str(interaction.guild_id), str(interaction.user.id), ea_name, linked_by="self")
+        from cogs.badges import badges_relinked
+        badges_relinked(interaction, str(interaction.user.id))
         await interaction.followup.send(
             f"✅ Linked you to EA persona **{ea_name}**. Your positions will be tracked automatically "
             f"after each match, and `/me` now shows your stats." + await self._roster_note(ea_name),
@@ -126,6 +128,8 @@ class LinkCog(commands.Cog):
             return
         await interaction.response.defer()
         set_link(str(interaction.guild_id), str(member.id), ea_name, linked_by=str(interaction.user.id))
+        from cogs.badges import badges_relinked
+        badges_relinked(interaction, str(member.id))
         await interaction.followup.send(f"✅ Linked **{member.display_name}** to EA persona **{ea_name}**."
                                         + await self._roster_note(ea_name))
 

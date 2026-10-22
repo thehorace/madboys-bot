@@ -244,8 +244,11 @@ class PositionsCog(commands.Cog):
                                                   int(time.time()), club_id()))
 
     def manager_channel_id(self, guild_id: str) -> Optional[int]:
-        cid = get_setting(guild_id, K_MANAGER_CHANNEL) or os.getenv("MANAGER_CHANNEL_ID")
-        return int(cid) if cid else None
+        cid = get_setting(guild_id, K_MANAGER_CHANNEL)
+        if cid == "off":          # turned off from the lineup builder (beats the env default too)
+            return None
+        cid = cid or os.getenv("MANAGER_CHANNEL_ID")
+        return int(cid) if cid and cid.isdigit() else None
 
     async def check_notes(self, guild: Optional[discord.Guild], discord_ids: list[str]):
         """Privately tell the managers about anyone who's just hit a streak in one area."""

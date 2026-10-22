@@ -89,7 +89,11 @@ class StatsMenu(TrackedView):
                    stat: Optional[str] = None):
         """Send a new private menu in reply to a slash command or a panel button."""
         from cogs.lineup import get_prefs
-        if not get_link(str(interaction.guild_id), str(interaction.user.id)) or not get_prefs(str(interaction.guild_id), str(interaction.user.id)):
+        # the main menu and "Me" still steer new players through Setup; Last game, Leaderboard, Awards etc.
+        # open straight away for everyone
+        needs_you = page in ("home", "me")
+        if needs_you and (not get_link(str(interaction.guild_id), str(interaction.user.id))
+                          or not get_prefs(str(interaction.guild_id), str(interaction.user.id))):
             interaction.extras["usage_category"] = "navigation"
             from cogs.onboarding import open_setup
             await open_setup(bot, interaction)
@@ -284,9 +288,14 @@ class StatsMenu(TrackedView):
                                   disabled=self.page in ("home", "link"))
         share.callback = self._share
         self.add_item(share)
-        switch = discord.ui.Button(label="Switch club", emoji="🔁", row=4)
-        switch.callback = self._switch_club
-        self.add_item(switch)
+        clubs = monitored_clubs()
+        if len(clubs) > 1:   # only worth a button when there's another club to switch to
+            current = self.club_id or club_id()
+            index = next((i for i, c in enumerate(clubs) if c["club_id"] == current), -1)
+            nxt = clubs[(index + 1) % len(clubs)]["name"]
+            switch = discord.ui.Button(label=f"Switch to {nxt}"[:80], emoji="🔁", row=4)
+            switch.callback = self._switch_club
+            self.add_item(switch)
         if self.page == "me":
             badges = discord.ui.Button(label="My badges", emoji="🏅", row=4, style=discord.ButtonStyle.secondary)
             badges.callback = self._my_badges
@@ -369,7 +378,8 @@ class StatsMenu(TrackedView):
         if not clubs:
             await interaction.response.send_message("No clubs are enabled.", ephemeral=True)
             return
-        index = next((i for i,c in enumerate(clubs) if c['club_id']==self.club_id), -1)
+        current = self.club_id or club_id()
+        index = next((i for i,c in enumerate(clubs) if c['club_id']==current), -1)
         club = clubs[(index+1) % len(clubs)]
         self.club_id = club['club_id']
         set_setting(self.guild_id, f"club:{self.user.id}", str(self.club_id))
@@ -418,6 +428,8 @@ class StatsMenu(TrackedView):
 
     async def _pick_self(self, interaction: discord.Interaction):
         set_link(self.guild_id, str(self.user.id), interaction.data["values"][0], linked_by="self")
+        from cogs.badges import badges_relinked
+        badges_relinked(interaction, str(self.user.id))
         await self._update(interaction, "me")
 
     async def _toggle_career(self, interaction: discord.Interaction):

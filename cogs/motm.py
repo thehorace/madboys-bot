@@ -70,15 +70,17 @@ def season_table(since_ts: int = 0) -> list[tuple[str, int, int]]:
     votes: Counter = Counter()
     with connect() as conn:
         polls = conn.execute("""
-            SELECT p.match_id, p.winners FROM motm_polls p JOIN matches m ON m.club_id=p.club_id
+            SELECT p.match_id, p.winners FROM motm_polls p CROSS JOIN matches m ON m.club_id=p.club_id
               AND m.match_id=CASE WHEN instr(p.match_id,':')>0 THEN substr(p.match_id,instr(p.match_id,':')+1) ELSE p.match_id END
             WHERE p.closed=1 AND p.club_id=? AND m.ts>=?""", (club_id(), since_ts)).fetchall()
         for p in polls:
             for w in json.loads(p["winners"] or "[]"):
                 awards[w] += 1
-            for r in conn.execute("SELECT candidate, COUNT(*) c FROM motm_votes WHERE match_id=? GROUP BY candidate",
-                                  (p["match_id"],)):
-                votes[r["candidate"]] += r["c"]
+        # all the votes in one go instead of one query per poll
+        ids = json.dumps([p["match_id"] for p in polls])
+        for r in conn.execute("SELECT candidate, COUNT(*) c FROM motm_votes"
+                              " WHERE match_id IN (SELECT value FROM json_each(?)) GROUP BY candidate", (ids,)):
+            votes[r["candidate"]] += r["c"]
     names = set(awards) | set(votes)
     return sorted(((n, awards[n], votes[n]) for n in names), key=lambda x: (-x[1], -x[2], x[0].lower()))
 
