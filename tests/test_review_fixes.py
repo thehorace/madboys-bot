@@ -146,3 +146,51 @@ class RelinkBadgeTests(Base):
             await t
         cog.refresh_member.assert_awaited_once_with(inter.guild, "5")
         badges_relinked(SimpleNamespace(), "5")   # odd interaction objects never break linking
+
+
+class ShareChoiceTests(Base):
+    def setup_share(self, bot_perms_gameday, user_can_announce=True):
+        from cogs.hub import StatsMenu
+        allow = SimpleNamespace(view_channel=True, send_messages=True, embed_links=True, attach_files=True)
+        deny = SimpleNamespace(view_channel=True, send_messages=False, embed_links=False, attach_files=False)
+        me, user = SimpleNamespace(id=1), SimpleNamespace(id=42, mention="@Fauz")
+
+        def chan(cid, name, bot, user_ok=True):
+            return SimpleNamespace(id=cid, name=name, mention=f"#{name}", send=AsyncMock(),
+                                   permissions_for=lambda who: (bot if who is me else (allow if user_ok else deny)))
+        gameday = chan(1, "gameday", bot_perms_gameday)
+        general = chan(2, "general", allow)
+        announcements = chan(3, "announcements", allow, user_can_announce)
+        guild = SimpleNamespace(id=10, me=me, text_channels=[gameday, general, announcements])
+        set_setting("10", "announce:channel", "3")
+        menu = object.__new__(StatsMenu)
+        menu.guild_id, menu.png, menu.embed = "10", b"png", discord.Embed(title="Stats")
+        chans = {1: gameday, 2: general, 3: announcements}
+        menu.bot = SimpleNamespace(get_cog=lambda _: None, get_channel=lambda cid: chans.get(cid))
+        inter = SimpleNamespace(user=user, channel=gameday, guild=guild, extras={},
+                                response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+                                followup=SimpleNamespace(send=AsyncMock()))
+        return menu, inter, gameday, general, announcements
+
+    async def test_share_offers_general_and_announcements(self):
+        from cogs.hub import ShareChoice
+        no_files = SimpleNamespace(view_channel=True, send_messages=True, embed_links=True, attach_files=False)
+        menu, inter, gameday, general, announcements = self.setup_share(no_files)
+        targets, problems = menu._share_destinations(inter)
+        self.assertEqual([t.name for t in targets], ["general", "announcements"])
+        self.assertIn("Attach Files", problems[0])            # explains why #gameday isn't offered
+        await menu._share(inter)
+        view = inter.response.send_message.await_args.kwargs["view"]
+        self.assertIsInstance(view, ShareChoice)
+        pick = SimpleNamespace(data={"values": ["3"]}, user=inter.user, extras={},
+                               response=SimpleNamespace(defer=AsyncMock()), edit_original_response=AsyncMock())
+        with patch("cogs.hub.S.card_file", return_value=None):
+            await view._pick(pick)
+        announcements.send.assert_awaited_once()
+        self.assertIn("#announcements", pick.edit_original_response.await_args.kwargs["content"])
+
+    async def test_channels_you_cant_post_in_are_never_offered(self):
+        allow = SimpleNamespace(view_channel=True, send_messages=True, embed_links=True, attach_files=True)
+        menu, inter, *_ = self.setup_share(allow, user_can_announce=False)
+        targets, _ = menu._share_destinations(inter)
+        self.assertNotIn("announcements", [t.name for t in targets])

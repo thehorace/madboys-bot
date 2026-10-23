@@ -132,7 +132,7 @@ class StatsMenu(TrackedView):
         embed = discord.Embed(
             title=f"📊 {club_name()} — Stats",
             description="Tap a button or pick from a dropdown below.\n*Only you can see this menu — "
-                        "use 📢 Share to post something to the channel.*",
+                        "use 📢 Share to post something to a channel.*",
             colour=CLUB_COLOUR)
         recent = md.recent_results(club_id(), 5)
         if recent:
@@ -440,37 +440,98 @@ class StatsMenu(TrackedView):
         self.career = not self.career
         await self._update(interaction, self.page)
 
-    async def _share(self, interaction: discord.Interaction):
+    def _share_destinations(self, interaction: discord.Interaction) -> tuple[list, list[str]]:
         """
-        Post what you're looking at. In a channel you can't type in yourself (e.g. a
-        managers-only #announcements holding the panel), it goes to the results channel
-        instead, so Share can't be used to get around the channel's permissions.
+        Channels this screen can be shared to: where you are, #general, the announcements channel
+        and the results channel. Only channels YOU can post in (so Share can't get around a
+        channel's permissions) and where the bot has what it needs. Returns (channels, problems).
         """
-        target = interaction.channel
-        perms = target.permissions_for(interaction.user) if hasattr(target, "permissions_for") else None
-        if perms is not None and not perms.send_messages:
-            tracker = self.bot.get_cog("MatchdayCog")
-            cid = tracker.channel_id_for(self.guild_id) if tracker else None
-            target = (self.bot.get_channel(cid) if cid else None) or None
-            if target is None:
-                await interaction.response.send_message(
-                    "You can't post in this channel, and no results channel is set to share to.", ephemeral=True)
-                return
-        destination_perms = target.permissions_for(interaction.user) if hasattr(target, "permissions_for") else None
-        if destination_perms is not None and not (destination_perms.view_channel and destination_perms.send_messages):
-            failed(interaction)
-            await interaction.response.send_message("You need permission to view and send messages in the destination channel to share there.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        from announce import announce_channel_id
+        guild = getattr(interaction, "guild", None)
+        tracker = self.bot.get_cog("MatchdayCog")
+        candidates = [interaction.channel]
+        if guild is not None:
+            candidates += [c for c in getattr(guild, "text_channels", []) if c.name.lower() == "general"][:1]
         try:
-            extra = {"file": S.card_file(self.png)} if self.png else {}
-            await target.send(content=f"📢 Shared by {interaction.user.mention}", embed=self.embed,
+            announcements = announce_channel_id(self.guild_id)
+        except Exception:   # never let a settings hiccup stop sharing to where you are
+            announcements = None
+        for cid in (announcements, tracker.channel_id_for(self.guild_id) if tracker else None):
+            if cid:
+                candidates.append(self.bot.get_channel(int(cid)))
+        seen, ok, problems = set(), [], []
+        needs = [("view_channel", "View Channel"), ("send_messages", "Send Messages"), ("embed_links", "Embed Links")]
+        if self.png:
+            needs.append(("attach_files", "Attach Files"))
+        me = getattr(guild, "me", None)
+        for ch in candidates:
+            if ch is None or not hasattr(ch, "permissions_for") or id(ch) in seen:
+                continue
+            seen.add(id(ch))
+            mine = ch.permissions_for(interaction.user)
+            if not (getattr(mine, "view_channel", True) and mine.send_messages):
+                continue   # you can't post there yourself
+            if me is not None:
+                bot_perms = ch.permissions_for(me)
+                missing = [label for attr, label in needs if not getattr(bot_perms, attr, True)]
+                if missing:
+                    problems.append(f"{getattr(ch, 'mention', '#channel')}: the bot is missing **{', '.join(missing)}**")
+                    continue
+            ok.append(ch)
+        return ok, problems
+
+    async def _share(self, interaction: discord.Interaction):
+        """Post what you're looking at — straight away if there's one place to post, else pick where."""
+        targets, problems = self._share_destinations(interaction)
+        if not targets:
+            failed(interaction)
+            text = "There's nowhere I can share this for you."
+            if problems:
+                text += "\n" + "\n".join(problems) + "\nAn admin can fix that in the channel's settings → Permissions."
+            else:
+                text += " You need permission to send messages in the channel you share to."
+            await interaction.response.send_message(text, ephemeral=True)
+            return
+        if len(targets) == 1:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            text = await self._post_share(interaction, targets[0], self.embed, self.png)
+            await interaction.followup.send(text, ephemeral=True)
+            return
+        await interaction.response.send_message("📢 Share this where?", view=ShareChoice(self, targets), ephemeral=True)
+
+    async def _post_share(self, interaction, target, embed, png) -> str:
+        try:
+            extra = {"file": S.card_file(png)} if png else {}
+            await target.send(content=f"📢 Shared by {interaction.user.mention}", embed=embed,
                               allowed_mentions=discord.AllowedMentions.none(), **extra)
-            where = "" if target == interaction.channel else f" in {target.mention}"
-            await interaction.followup.send(f"Posted{where} ✅", ephemeral=True)
+            return f"Posted in {getattr(target, 'mention', 'the channel')} ✅"
         except discord.Forbidden:
             failed(interaction)
-            await interaction.followup.send("I'm not allowed to post there.", ephemeral=True)
+            return (f"Discord wouldn't let me post in {getattr(target, 'mention', 'that channel')}. An admin can give "
+                    f"the bot Send Messages, Embed Links and Attach Files there.")
+
+
+class ShareChoice(TrackedView):
+    """'Share this where?' — a dropdown of the channels you (and the bot) can post in."""
+
+    def __init__(self, menu: "StatsMenu", targets: list):
+        super().__init__(timeout=120)
+        self.menu, self.targets = menu, {str(t.id): t for t in targets[:25]}
+        self.embed, self.png = menu.embed, menu.png   # what was on screen when Share was tapped
+        here = getattr(targets[0], "id", None)
+        pick = discord.ui.Select(placeholder="Pick a channel…", options=[
+            discord.SelectOption(label=f"#{getattr(t, 'name', 'channel')}"[:100], value=str(t.id),
+                                 description="This channel" if t.id == here else None)
+            for t in targets[:25]])
+        pick.callback = self._pick
+        self.add_item(pick)
+
+    async def _pick(self, interaction: discord.Interaction):
+        target = self.targets.get(interaction.data["values"][0])
+        await interaction.response.defer()
+        text = await self.menu._post_share(interaction, target, self.embed, self.png) if target else "That channel's gone."
+        self.stop()
+        await interaction.edit_original_response(content=text, view=None)
 
 
 class PanelView(TrackedView):
@@ -559,7 +620,7 @@ def panel_embed() -> discord.Embed:
     return discord.Embed(
         title=f"⚽ {' & '.join(c['name'] for c in monitored_clubs()) or club_name()} Bot"[:256],
         description="**Tap a button — no commands needed.**\n"
-                    "Your menu opens privately (only you see it), and you can 📢 Share anything to the channel.\n\n"
+                    "Your menu opens privately (only you see it), and you can 📢 Share anything to #general, announcements or here.\n\n"
                     "📊 **Stats** — everything: results, players, leaderboards, head-to-heads, "
                     "best partnerships, who shows up\n"
                     "📡 **Last game** — latest result with player ratings\n"
