@@ -420,7 +420,10 @@ class MatchdayCog(commands.Cog):
         self._unlinked.clear()
 
         new: list[md.ParsedMatch] = []
+        known = md.stored_ids(club_id(), [md.raw_match_id(m) for m in raw_matches])
         for raw in sorted(raw_matches, key=lambda m: to_int(m.get("timestamp"))):  # oldest first
+            if md.raw_match_id(raw) in known:
+                continue   # already saved: skip parsing + re-saving it
             pm = md.parse_match(raw, club_id())
             if pm and md.store_match(club_id(), pm, raw):
                 new.append(pm)

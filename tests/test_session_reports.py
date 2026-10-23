@@ -27,6 +27,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.start = 1_800_000_000
         db.set_setting("10", "reports:since", str(self.start - 100))
         db.set_setting("10", "reports:potd", "0")   # Player of the Day has its own tests
+        db.set_setting("10", "reports:gap_v30", "1")   # tests choose their own finish gap
         with db.connect() as conn:
             self.sid = conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by) VALUES ('10','20',?,'daily')", (self.start,)).lastrowid
             conn.execute("INSERT INTO session_rsvps VALUES (?,'42','yes','now','button')", (self.sid,))
@@ -56,6 +57,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.after_poll(self.guild)
 
     async def test_gap_resets_and_recap_sent_once_across_restart(self):
+        db.set_setting("10", "reports:gap", "120")
         self.game("a", self.start + 600)
         await self.poll(self.start + 7700)
         self.channel.send.assert_not_awaited()
@@ -144,6 +146,33 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reports.history("10")[0]["outcome"], "cancelled")
         self.channel.send.assert_awaited_once()
 
+    async def test_session_ends_30_minutes_after_the_last_game(self):
+        db.set_setting("10", "reports:gap", None)            # default
+        self.game("a", self.start + 2700)                     # kicked off 45 min late: still this session
+        self.game("b", self.start + 4200)
+        await self.poll(self.start + 4200 + 1700)             # 28 min after the last game: still open
+        self.channel.send.assert_not_awaited()
+        await self.poll(self.start + 4200 + 1810)             # 30 min passed: recap goes out
+        self.channel.send.assert_awaited_once()
+        self.assertEqual(json.loads(reports.history("10")[0]["match_ids"]), ["a", "b"])
+
+    async def test_no_game_yet_waits_two_hours_before_giving_up(self):
+        db.set_setting("10", "reports:gap", None)
+        await self.poll(self.start + 3600)
+        self.assertEqual(reports.history("10"), [])           # an hour in with no game: keep waiting
+        self.game("a", self.start + 5400)
+        await self.poll(self.start + 5400 + 1900)
+        self.assertEqual(reports.history("10")[0]["outcome"], "completed")
+
+    async def test_existing_servers_switch_to_30_minutes_once(self):
+        db.set_setting("10", "reports:gap_v30", None)
+        db.set_setting("10", "reports:gap", "120")
+        await self.poll(self.start + 10)
+        self.assertEqual(reports.report_settings("10")["gap"], 30)
+        db.set_setting("10", "reports:gap", "60")           # an admin changes it later: respected
+        await self.poll(self.start + 20)
+        self.assertEqual(reports.report_settings("10")["gap"], 60)
+
     async def test_later_game_after_inactivity_not_included_and_not_double_counted(self):
         self.game("a", self.start + 600)
         self.game("b", self.start + 8000)
@@ -172,7 +201,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         panel = admin.AdminView(self.bot, self.interaction().user, self.guild, anchor)
         for action in ("gap60", "toggle_reports", "toggle_tracker"):
             await panel.act(self.interaction(43, "other"), action)
-        self.assertEqual(reports.report_settings("10")["gap"], 120)
+        self.assertEqual(reports.report_settings("10")["gap"], 30)
         self.assertTrue(reports.report_settings("10")["enabled"])
         await panel.act(self.interaction(), "gap60")
         self.assertEqual(reports.report_settings("10")["gap"], 60)

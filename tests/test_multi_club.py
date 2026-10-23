@@ -149,6 +149,7 @@ class MultiClubTests(unittest.IsolatedAsyncioTestCase):
     async def test_session_includes_both_without_merging_player_stats(self):
         start=1800000000
         db.set_setting('10','reports:since',str(start-100))
+        db.set_setting('10','reports:gap','120')   # games 100 min apart, both in one session
         set_link('10','42','Fauz','self')
         with db.connect() as conn:
             conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by) VALUES ('10','20',?,'daily')",(start,))

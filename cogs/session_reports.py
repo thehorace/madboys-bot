@@ -18,6 +18,8 @@ from interaction_tracking import TrackedView
 from clubs import monitored_clubs, match_key, match_club, raw_match_key, club_for
 
 log = logging.getLogger("madboys-bot.session_reports")
+DEFAULT_GAP = 30       # a session ends this many minutes after its last game
+START_WINDOW = 120     # ...but the first game may come up to this long after kick-off
 
 
 def report_settings(gid):
@@ -27,7 +29,7 @@ def report_settings(gid):
     return {"enabled": saved.get("reports:enabled") != "0",
             "dms": saved.get("reports:dms") != "0",
             "potd": saved.get("reports:potd") != "0",
-            "gap": int(saved.get("reports:gap") or 120),
+            "gap": int(saved.get("reports:gap") or DEFAULT_GAP),
             "channel": announce_channel_id(gid, saved.get("reports:channel"))}
 
 
@@ -51,10 +53,11 @@ def latest_personal(gid, discord_id):
     return dict(row) if row else None
 
 
-def archive_sessions(gid, now):
+def archive_sessions(gid, now, settings=None):
     """Group timestamped matches by planned session and inactivity; atomic snapshots."""
-    settings = report_settings(gid)
+    settings = settings or report_settings(gid)
     gap = settings["gap"] * 60
+    start_window = max(START_WINDOW * 60, gap)   # people often kick off late: don't give up on a session early
     baseline = int(get_setting(gid, "reports:since") or now)
     if get_setting(gid, "reports:since") is None:
         set_setting(gid, "reports:since", str(now))
@@ -84,13 +87,13 @@ def archive_sessions(gid, now):
                     continue
                 # A distant game belongs to a different playing session.
                 previous = matches[-1]["ts"] if matches else s["starts_at"]
-                if match["ts"] - previous > gap:
+                if match["ts"] - previous > (gap if matches else start_window):
                     break
                 matches.append(dict(match))
             cancelled = bool(s["cancelled"])
             if not cancelled and matches and now - matches[-1]["ts"] < gap:
                 continue
-            if not cancelled and not matches and now - s["starts_at"] < gap:
+            if not cancelled and not matches and now - s["starts_at"] < start_window:
                 continue
             if cancelled:
                 matches = []
@@ -110,7 +113,7 @@ def archive_sessions(gid, now):
                 player["discord_ids"] = [did for did, name in links.items() if name.casefold() == player["name"].casefold()]
             rsvps = [dict(r) for r in conn.execute("SELECT discord_id,status,source FROM session_rsvps WHERE session_id=?", (s["id"],))]
             # Old records remain browsable but never create startup catch-up posts.
-            finish = matches[-1]["ts"] + gap if matches else s["starts_at"] + gap
+            finish = matches[-1]["ts"] + gap if matches else s["starts_at"] + start_window
             message = "suppressed" if finish <= baseline else None
             conn.execute("INSERT INTO session_history VALUES (?,?,?,?,?,?,?,?)", (s["id"], gid,
                 matches[-1]["ts"] if matches else now, "cancelled" if cancelled else "completed" if matches else "no games",
@@ -414,8 +417,12 @@ class SessionReportsCog(commands.Cog):
     async def after_poll(self, guild):
         gid = str(guild.id)
         now = int(time.time())
-        archive_sessions(gid, now)
-        if not report_settings(gid)["enabled"]:
+        if get_setting(gid, "reports:gap_v30") is None:   # one-time switch to "end 30 min after the last game"
+            set_setting(gid, "reports:gap", str(DEFAULT_GAP))
+            set_setting(gid, "reports:gap_v30", "1")
+        settings = report_settings(gid)   # read once per check
+        archive_sessions(gid, now, settings)
+        if not settings["enabled"]:
             with connect() as conn:
                 conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))
         with connect() as conn:
@@ -488,6 +495,8 @@ class SessionReportsCog(commands.Cog):
             pending = conn.execute("SELECT d.session_id,d.discord_id,h.ended_at FROM session_summary_dms d "
                 "JOIN session_history h ON h.session_id=d.session_id WHERE h.guild_id=? AND d.status='pending'", (gid,)).fetchall()
         errors = []
+        if not pending:
+            return errors
         enabled = report_settings(gid)["dms"]
         for delivery in pending:
             sid, did = delivery["session_id"], delivery["discord_id"]

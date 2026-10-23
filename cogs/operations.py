@@ -93,7 +93,7 @@ def status_embed(bot, gid):
             "SELECT h.session_id FROM session_history h JOIN sessions s ON s.id=h.session_id "
             "WHERE h.guild_id=? AND outcome='completed' ORDER BY s.starts_at DESC,s.id DESC LIMIT 1) GROUP BY status", (gid,)).fetchall()
     delivery_text = " · ".join(f"{r['count']} {r['status']}" for r in deliveries) or "None recorded"
-    embed.add_field(name="Session summaries", value=f"Club posts: {'On' if reports['enabled'] else 'Off'} · Personal DMs: {'On' if reports['dms'] else 'Off'}\nFinish gap: {reports['gap']} minutes · {saved} sessions saved\nLatest session DMs: {delivery_text}\nOnly closes after a successful EA check", inline=False)
+    embed.add_field(name="Session summaries", value=f"Club posts: {'On' if reports['enabled'] else 'Off'} · Personal DMs: {'On' if reports['dms'] else 'Off'}\nEnds {reports['gap']} min after the last game · {saved} sessions saved\nLatest session DMs: {delivery_text}\nOnly closes after a successful EA check", inline=False)
     embed.add_field(name="Needs attention", value=("\n".join(f"**{r['service']}**: {r['problem']}" for r in problems)[:1024] or "No recorded failures. Check the service states above."), inline=False)
     embed.add_field(name="Version", value=version_line(), inline=False)
     embed.set_footer(text="Private • Refresh to update these values")

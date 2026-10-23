@@ -145,6 +145,21 @@ def is_stored(club_id: int, match_id: str) -> bool:
         ).fetchone() is not None
 
 
+def raw_match_id(match: dict) -> str:
+    """The id parse_match() will give this EA match."""
+    return str(match.get("matchId") or match.get("timestamp") or "")
+
+
+def stored_ids(club_id: int, match_ids: list[str]) -> set[str]:
+    """Which of these matches are already saved (one query, so a quiet check doesn't re-save 10 games)."""
+    if not match_ids:
+        return set()
+    with connect() as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT match_id FROM matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?))",
+            (club_id, json.dumps(match_ids)))}
+
+
 def store_match(club_id: int, pm: ParsedMatch, raw: dict) -> bool:
     """Insert a match + its player lines. Returns False if it was already stored."""
     with connect() as conn:

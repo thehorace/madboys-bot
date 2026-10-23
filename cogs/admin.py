@@ -83,15 +83,15 @@ class AdminView(TrackedView):
                 description="Choose a section below. All settings save across restarts.\n\n"
                     "**Sessions** — schedule, timezone, channel, sticky cooldown and waitlist\n"
                     "**Match tracker** — result posting and match channel\n"
-                    "**Session summaries** — automatic recap, channel and 1–2 hour finish gap\n"
+                    "**Session summaries** — automatic recap, channel and when a session ends\n"
                     "**EA News** — automatic news and channel\n\nThese controls are private to your allowlist.")
         if self.page == "reports":
             settings = report_settings(str(self.guild.id))
             channel = f"<#{settings['channel']}>" if settings["channel"] else "#general"
             return discord.Embed(title="Session summary settings", colour=CLUB_COLOUR,
-                description=f"Club recaps: **{'On' if settings['enabled'] else 'Off'}**\nPersonal DMs: **{'On' if settings['dms'] else 'Off'}**\nPlayer of the Day card: **{'On' if settings['potd'] else 'Off'}**\nFinish after **{settings['gap']} minutes** without a game\nChannel: {channel}\n\n"
+                description=f"Club recaps: **{'On' if settings['enabled'] else 'Off'}**\nPersonal DMs: **{'On' if settings['dms'] else 'Off'}**\nPlayer of the Day card: **{'On' if settings['potd'] else 'Off'}**\nEnds **{settings['gap']} minutes** after the last game\nChannel: {channel}\n\n"
                     "One club recap and a personal DM for each linked player who played. No pings. Blocked DMs stay available in the panel. History saves even when posts are off. "
-                    "Finishing waits for a successful EA check. First game must be within the selected gap after kick-off.")
+                    "Finishing waits for a successful EA check. The first game can be up to 2 hours after kick-off.")
         if self.page == "tracker_settings":
             tracker = self.bot.get_cog("MatchdayCog")
             gid = str(self.guild.id)
@@ -154,11 +154,12 @@ class AdminView(TrackedView):
                 settings = report_settings(str(self.guild.id))
                 self.button("Disable recaps" if settings["enabled"] else "Enable recaps", "toggle_reports")
                 self.button("Disable personal DMs" if settings["dms"] else "Enable personal DMs", "toggle_report_dms")
-                self.button("Finish gap: 1 hour", "gap60")
-                self.button("Finish gap: 2 hours", "gap120")
+                self.button("End after: 30 min", "gap30", row=3)
+                self.button("End after: 1 hour", "gap60", row=3)
+                self.button("End after: 2 hours", "gap120", row=3)
                 self.button("Use #general", "reset_report_channel")
                 self.button("Disable Player of the Day" if settings["potd"] else "Enable Player of the Day",
-                            "toggle_report_potd", row=2)
+                            "toggle_report_potd", row=3)
             else:
                 self.button("Disable result posts" if get_setting(str(self.guild.id), "matchday_enabled") != "0" else "Enable result posts", "toggle_tracker")
             picker = discord.ui.ChannelSelect(placeholder="Summary channel" if self.page == "reports" else "Match result channel",
@@ -263,7 +264,7 @@ class AdminView(TrackedView):
                 await reports.show_history(interaction, private=True)
             else:
                 await interaction.response.send_message("Session history is unavailable.", ephemeral=True)
-        elif action in ("toggle_reports", "toggle_report_dms", "toggle_report_potd", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
+        elif action in ("toggle_reports", "toggle_report_dms", "toggle_report_potd", "gap30", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
             gid = str(self.guild.id)
             if action == "toggle_reports":
                 enabled = not report_settings(gid)["enabled"]
