@@ -12,6 +12,7 @@ Rules (all from real tracked games, any club):
   🗳️ Fan Favourite      5 squad MOTM votes won
   💯 Centurion          100 tracked games
   👑 Player of the Month  won a monthly award
+  ⭐ Player of the Day    named the standout player of a session
 
 Badges that can happen again (hat-tricks, 9.0 games...) keep a count ("🎩 ×3").
 Only linked players (EA name ↔ Discord) can earn badges, since they're stored per Discord user.
@@ -35,6 +36,7 @@ BADGES = {   # key: (emoji, name, how to earn it)
     "fan_favourite": ("🗳️", "Fan Favourite", "won 5 squad MOTM votes"),
     "centurion":     ("💯", "Centurion", "100 tracked games"),
     "potm":          ("👑", "Player of the Month", "won a monthly award"),
+    "potd":          ("⭐", "Player of the Day", "named the standout player of a session"),
 }
 EMOJIS = {e for e, _, _ in BADGES.values()}
 
@@ -113,6 +115,16 @@ def _potm_wins(guild_id: str, ea_name: str) -> list[tuple[int, str]]:
     return sorted(out)
 
 
+def _potd_wins(guild_id: str, ea_name: str) -> list[int]:
+    with connect() as conn:
+        try:
+            rows = conn.execute("SELECT posted_at FROM session_potd WHERE guild_id=? AND name=? COLLATE NOCASE "
+                                "ORDER BY posted_at", (guild_id, ea_name)).fetchall()
+        except Exception:   # Player of the Day table not created yet
+            return []
+    return [r["posted_at"] for r in rows]
+
+
 def evaluate(guild_id: str, ea_name: str) -> dict[str, dict]:
     """{badge: {count, earned_at, detail}} for everything this EA name has earned so far."""
     earned: dict[str, dict] = {}
@@ -153,6 +165,9 @@ def evaluate(guild_id: str, ea_name: str) -> dict[str, dict]:
     if potm:
         earned["potm"] = {"count": len(potm), "earned_at": potm[-1][0] or int(time.time()),
                           "detail": f"Player of the Month ({potm[-1][1]})"}
+    potd = _potd_wins(guild_id, ea_name)
+    if potd:
+        earned["potd"] = {"count": len(potd), "earned_at": potd[-1], "detail": "Player of the Day"}
     return earned
 
 

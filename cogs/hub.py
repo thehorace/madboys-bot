@@ -49,6 +49,7 @@ SQUAD_PAGES = {
     "attendance": ("Who shows up", "📋", "Sign-ups vs actually playing (last 30 days)"),
     "badges": ("Badge collection", "🏅", "Everyone's badges"),
     "awards": ("Monthly awards", "🏆", "This month's award race so far"),
+    "records": ("Club records", "📜", "Biggest wins, streaks, best single games"),
 }
 
 MENU_TIMEOUT = 14 * 60  # Discord lets us edit an interaction's reply for 15 min
@@ -316,6 +317,9 @@ class StatsMenu(TrackedView):
         guild = self.bot.get_guild(int(self.guild_id))
         if key == "partners":   # can take ~0.3s with a big history: off the main loop
             return await asyncio.to_thread(insights.build_partnerships, self.partner_of)
+        if key == "records":
+            from cogs.insights import build_records
+            return await build_records(self.guild_id)
         if guild is None:
             return "Couldn't find this server."
         if key == "attendance":
@@ -545,6 +549,11 @@ class PanelView(TrackedView):
     async def awards(self, interaction: discord.Interaction, _):
         await StatsMenu.open(self.bot, interaction, "leaderboard", stat="awards")
 
+    @discord.ui.button(label="Records", emoji="📜", style=discord.ButtonStyle.secondary,
+                       custom_id="madboys:panel:records", row=2)
+    async def records(self, interaction: discord.Interaction, _):
+        await StatsMenu.open(self.bot, interaction, "leaderboard", stat="records")
+
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
@@ -561,6 +570,7 @@ def panel_embed() -> discord.Embed:
                     "🗓️ **Session history** — finished sessions and club results\n"
                     "🏅 **My badges** — your badges, and the emoji on your name\n"
                     "🏆 **Awards** — this month's award race (and past months)\n"
+                    "📜 **Records** — biggest wins, streaks and best single games\n"
                     "🧑‍💼 **Manager** — build & post the lineup (managers only)",
         colour=CLUB_COLOUR)
 

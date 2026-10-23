@@ -365,6 +365,7 @@ class MatchdayCog(commands.Cog):
             except Exception:
                 log.exception("Milestone check failed: %s", club['name'])
         await self._award_badges(jobs)
+        await self._announce_records(jobs)
 
         await self._track_failing_clubs(states)
         # Session summaries wait for every club, except one that has been failing for hours:
@@ -459,7 +460,33 @@ class MatchdayCog(commands.Cog):
             await self.check_milestones(guild, announce=True, matches=new)
             from clubs import club_for
             await self._award_badges([(club_for(club_id()), guild, new)])
+            await self._announce_records([(club_for(club_id()), guild, new)])
         return len(new)
+
+    async def _announce_records(self, jobs: list):
+        """'New club record!' post when this check's games broke one (biggest win, most goals in a game...)."""
+        import records
+        for club, guild, new in jobs:
+            if not guild or not new or not self.posting_enabled(str(guild.id)):
+                continue
+            try:
+                key = f"records:streak:{club['club_id']}"
+                lines, streak = await asyncio.to_thread(
+                    records.broken_by, club["club_id"], {pm.match_id for pm in new if pm.club_id == club["club_id"]},
+                    get_setting("global", key))
+                if streak != get_setting("global", key):
+                    set_setting("global", key, streak)
+                if not lines:
+                    continue
+                cid = self.channel_id_for(str(guild.id))
+                channel = await self._channel(cid) if cid else None
+                if channel:
+                    embed = discord.Embed(title=f"📜 New {club['name']} record{'s' if len(lines) > 1 else ''}!",
+                                          description="\n".join(lines)[:4000], colour=0xF1C40F)
+                    embed.set_footer(text="See every record with /records or 🏆 Records on the panel")
+                    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            except Exception:
+                log.exception("Record check failed: %s", club["name"])
 
     async def _award_badges(self, jobs: list):
         """Badges for everyone in this check's new games (all clubs at once, one announcement)."""

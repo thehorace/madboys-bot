@@ -79,7 +79,10 @@ class MadBoysBot(commands.Bot):
             log.info(f"Synced {len(synced)} global command(s) (can take up to an hour to appear)")
 
     async def on_ready(self):
-        log.info(f"Logged in as {self.user} (id: {self.user.id}) in {len(self.guilds)} server(s)")
+        from deploy_checks import running_version
+        v = running_version()
+        log.info(f"Logged in as {self.user} (id: {self.user.id}) in {len(self.guilds)} server(s) — "
+                 f"version {v['sha'] or 'unknown'} {v['message']}")
 
     async def close(self):
         await self.ea.close()

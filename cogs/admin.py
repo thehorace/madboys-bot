@@ -89,7 +89,7 @@ class AdminView(TrackedView):
             settings = report_settings(str(self.guild.id))
             channel = f"<#{settings['channel']}>" if settings["channel"] else "#general"
             return discord.Embed(title="Session summary settings", colour=CLUB_COLOUR,
-                description=f"Club recaps: **{'On' if settings['enabled'] else 'Off'}**\nPersonal DMs: **{'On' if settings['dms'] else 'Off'}**\nFinish after **{settings['gap']} minutes** without a game\nChannel: {channel}\n\n"
+                description=f"Club recaps: **{'On' if settings['enabled'] else 'Off'}**\nPersonal DMs: **{'On' if settings['dms'] else 'Off'}**\nPlayer of the Day card: **{'On' if settings['potd'] else 'Off'}**\nFinish after **{settings['gap']} minutes** without a game\nChannel: {channel}\n\n"
                     "One club recap and a personal DM for each linked player who played. No pings. Blocked DMs stay available in the panel. History saves even when posts are off. "
                     "Finishing waits for a successful EA check. First game must be within the selected gap after kick-off.")
         if self.page == "tracker_settings":
@@ -157,6 +157,8 @@ class AdminView(TrackedView):
                 self.button("Finish gap: 1 hour", "gap60")
                 self.button("Finish gap: 2 hours", "gap120")
                 self.button("Use #general", "reset_report_channel")
+                self.button("Disable Player of the Day" if settings["potd"] else "Enable Player of the Day",
+                            "toggle_report_potd", row=2)
             else:
                 self.button("Disable result posts" if get_setting(str(self.guild.id), "matchday_enabled") != "0" else "Enable result posts", "toggle_tracker")
             picker = discord.ui.ChannelSelect(placeholder="Summary channel" if self.page == "reports" else "Match result channel",
@@ -261,7 +263,7 @@ class AdminView(TrackedView):
                 await reports.show_history(interaction, private=True)
             else:
                 await interaction.response.send_message("Session history is unavailable.", ephemeral=True)
-        elif action in ("toggle_reports", "toggle_report_dms", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
+        elif action in ("toggle_reports", "toggle_report_dms", "toggle_report_potd", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
             gid = str(self.guild.id)
             if action == "toggle_reports":
                 enabled = not report_settings(gid)["enabled"]
@@ -270,6 +272,8 @@ class AdminView(TrackedView):
                     from db import connect
                     with connect() as conn:
                         conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))
+            elif action == "toggle_report_potd":
+                set_setting(gid, "reports:potd", "0" if report_settings(gid)["potd"] else "1")
             elif action == "toggle_report_dms":
                 enabled = not report_settings(gid)["dms"]
                 set_setting(gid, "reports:dms", "1" if enabled else "0")

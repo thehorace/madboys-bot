@@ -26,6 +26,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         usage.init_usage()
         self.start = 1_800_000_000
         db.set_setting("10", "reports:since", str(self.start - 100))
+        db.set_setting("10", "reports:potd", "0")   # Player of the Day has its own tests
         with db.connect() as conn:
             self.sid = conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by) VALUES ('10','20',?,'daily')", (self.start,)).lastrowid
             conn.execute("INSERT INTO session_rsvps VALUES (?,'42','yes','now','button')", (self.sid,))

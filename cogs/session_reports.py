@@ -1,4 +1,5 @@
 """Durable session recaps; private player summaries never use RSVP as attendance."""
+import io
 import json
 import logging
 import time
@@ -25,6 +26,7 @@ def report_settings(gid):
             "SELECT key,value FROM settings WHERE guild_id=? AND key LIKE 'reports:%'", (gid,))}
     return {"enabled": saved.get("reports:enabled") != "0",
             "dms": saved.get("reports:dms") != "0",
+            "potd": saved.get("reports:potd") != "0",
             "gap": int(saved.get("reports:gap") or 120),
             "channel": announce_channel_id(gid, saved.get("reports:channel"))}
 
@@ -406,6 +408,8 @@ class HistoryView(PrivateSessionView):
 class SessionReportsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        import potd
+        potd.init_potd()
 
     async def after_poll(self, guild):
         gid = str(guild.id)
@@ -434,10 +438,48 @@ class SessionReportsCog(commands.Cog):
                     conn.execute("UPDATE session_history SET message_id=? WHERE session_id=?", (str(message.id), r[0]))
             except Exception as exc:
                 errors.append(exc)
+                continue
+            await self.post_player_of_the_day(guild, channel, record)
         errors.extend(await self.send_personal_summaries(guild, now))
         if errors:
             raise errors[0]
         await report_health(self.bot, gid, "Session summaries")
+
+    async def post_player_of_the_day(self, guild, channel, record):
+        """Card for the session's standout player, posted right under the recap. Never blocks the recap."""
+        import asyncio
+        import potd
+        from cogs.sessions import _tz
+        gid, sid = str(guild.id), record["session_id"]
+        try:
+            if potd.already_done(sid) or not report_settings(gid)["potd"]:
+                return
+            result = await asyncio.to_thread(potd.compute, session_matches(record))
+            if result is None:
+                return
+            winner = result["winner"]
+            links = get_all_links(gid)
+            did = next((d for d, n in links.items() if n.casefold() == winner["name"].casefold()), None)
+            total = potd.count_for(gid, winner["name"]) + 1
+            png = await asyncio.to_thread(potd.render_card, result, _tz(gid), total)
+            who = f"<@{did}>" if did else f"**{display_name(winner['name'])}**"
+            embed = discord.Embed(colour=CLUB_COLOUR, description=(
+                f"🌟 {who} is **Player of the Day**! "
+                f"{winner['rating']:.1f} average rating with {winner['goals']}G {winner['assists']}A "
+                f"in {winner['games']} game{'s' if winner['games'] != 1 else ''}."))
+            embed.set_image(url="attachment://player-of-the-day.png")
+            message = await channel.send(embed=embed, file=discord.File(io.BytesIO(png), "player-of-the-day.png"),
+                                         allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            potd.save(gid, sid, result, did, str(message.id), int(time.time()))
+            badges = self.bot.get_cog("BadgesCog")
+            if badges and did:
+                await badges.refresh_member(guild, did)
+            await report_health(self.bot, gid, "Player of the Day")
+        except Exception:
+            log.exception("Player of the Day failed for session %s", sid)
+            await report_health(self.bot, gid, "Player of the Day",
+                                "Couldn't post the Player of the Day card. Check the recap channel's permissions "
+                                "(Attach Files) and the logs.")
 
     async def send_personal_summaries(self, guild, now):
         """Retry transient failures per recipient; never replay delivered or old DMs."""

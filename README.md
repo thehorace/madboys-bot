@@ -248,7 +248,7 @@ itself. Later games in a catch-up batch are excluded. `/help` includes passing
 stats and the session list/cancel commands; tests check that every advertised
 command exists and fits Discord's embed limits.
 
-## Badges, monthly awards, partnerships and attendance
+## Badges, awards, Player of the Day, records, partnerships and attendance
 
 All four are built from the games and sessions the bot has saved, so they cost no EA calls.
 
@@ -256,7 +256,7 @@ All four are built from the games and sessions the bot has saved, so they cost n
 🎩 Hat-trick Hero (3+ goals) · 🎯 Playmaker (3+ assists) · 🌟 Star Man (9.0+ rating) ·
 🔥 On Fire (scored in 5 games in a row) · 🧱 Brick Wall (3 clean sheets in a row as keeper/defender) ·
 🧤 Safe Hands (8+ saves) · 🗳️ Fan Favourite (5 squad MOTM votes won) · 💯 Centurion (100 games) ·
-👑 Player of the Month. New badges are announced after each game, and the newest badge's
+👑 Player of the Month · ⭐ Player of the Day. New badges are announced after each game, and the newest badge's
 emoji is added to the player's server nickname (e.g. "Fauz 🎩"). **`/badges`** shows your
 badges and lets you pick which emoji shows, or none. When the feature first starts, everyone's
 past games are badged quietly with one "badges are here" message. Only linked players can earn
@@ -276,6 +276,18 @@ while the club has few games saved); **`/partners player:`** shows one player's 
 "surprise" appearances, from finished sessions with games. Joining voice doesn't count as a sign-up.
 All four are also in the `/stats` menu's leaderboard list, and player pages show their badges
 and best partners.
+
+**Player of the Day**: right after a session's recap is posted, the bot posts a card for the
+session's standout player (pinging them if they're linked). The pick is: average rating, +0.35
+per goal or assist per game, +0.4 × win rate, +0.2 per squad MOTM vote won and +0.15 per EA MOTM
+per game, and +0.3 × clean-sheet rate for keepers/defenders. Players need at least half their
+club's games that session. Winners get the ⭐ badge; the card counts how many times they've won.
+
+**`/records`** (also 📜 Records on the panel and in the `/stats` menu) shows club records from
+every saved game: biggest win, heaviest defeat, most goals in a game, longest win streak and
+unbeaten run, the current run, best single-game performances (goals, assists, rating, saves,
+tackles) and all-time leaders. When a game breaks a record (once the club has 20+ saved games),
+a "New record!" post goes to the results channel. Ties stay with whoever did it first.
 
 ## Guided player setup
 

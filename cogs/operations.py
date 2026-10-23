@@ -16,7 +16,8 @@ from discord.ext import commands, tasks
 from utils import survive
 
 from config import BOT_TZ, DB_PATH, GUILD_ID
-from db import connect, get_setting
+from db import connect, get_setting, set_setting
+from deploy_checks import running_version, settings_problems, version_line
 
 log = logging.getLogger("madboys-bot.operations")
 BACKUP_KEEP = max(1, int(os.getenv("BACKUP_KEEP_DAYS", "7")))
@@ -94,6 +95,7 @@ def status_embed(bot, gid):
     delivery_text = " · ".join(f"{r['count']} {r['status']}" for r in deliveries) or "None recorded"
     embed.add_field(name="Session summaries", value=f"Club posts: {'On' if reports['enabled'] else 'Off'} · Personal DMs: {'On' if reports['dms'] else 'Off'}\nFinish gap: {reports['gap']} minutes · {saved} sessions saved\nLatest session DMs: {delivery_text}\nOnly closes after a successful EA check", inline=False)
     embed.add_field(name="Needs attention", value=("\n".join(f"**{r['service']}**: {r['problem']}" for r in problems)[:1024] or "No recorded failures. Check the service states above."), inline=False)
+    embed.add_field(name="Version", value=version_line(), inline=False)
     embed.set_footer(text="Private • Refresh to update these values")
     return embed
 
@@ -163,6 +165,9 @@ class OperationsCog(commands.Cog):
                     return
                 same_episode = previous is not None and bool(previous["problem"]) == bool(problem)
                 if same_episode and previous["notified"]:
+                    if problem and str(problem)[:500] != previous["problem"]:   # still broken, details changed
+                        conn.execute("UPDATE service_health SET problem=? WHERE guild_id=? AND service=?",
+                                     (str(problem)[:500], guild_id, service))
                     return
                 # Do not send a recovery for a failure that never reached the owner.
                 should_notify = problem is not None or (previous is not None and previous["notified"])
@@ -186,6 +191,28 @@ class OperationsCog(commands.Cog):
             if sent:
                 with connect() as conn:
                     conn.execute("UPDATE service_health SET notified=1 WHERE guild_id=? AND service=?", (guild_id, service))
+
+    async def check_settings(self, guild):
+        """Settings that look wrong (relay URL/key, database location, channel IDs) -> one private alert."""
+        problems = settings_problems(guild, getattr(self.bot, "ea", None), DB_PATH)
+        await self.health(str(guild.id), "Bot settings", "\n".join(f"• {p}" for p in problems) if problems else None)
+
+    async def announce_version(self, guild_id: str):
+        """Tell the owners once when a new version starts, so a deploy can be confirmed without Railway."""
+        v = running_version()
+        if not v["sha"] or get_setting("global", "version:announced") == v["sha"]:
+            return
+        text = f"🚀 **Bot updated** — now running `{v['sha']}`" + (f": {v['message']}" if v["message"] else "")
+        try:
+            users = await self.recipients(guild_id)
+        except discord.HTTPException:
+            return
+        for user in users:
+            try:
+                await user.send(text[:1800], allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                log.warning("Couldn't send the version notice to %s", user.id)
+        set_setting("global", "version:announced", v["sha"])
 
     async def make_backup(self):
         async with self._backup_lock:
@@ -219,6 +246,8 @@ class OperationsCog(commands.Cog):
         if not guild:
             return
         gid = str(guild.id)
+        await self.announce_version(gid)
+        await self.check_settings(guild)
         tracker = self.bot.get_cog("MatchdayCog")
         if tracker:
             stopped = not tracker.ticker.is_running()

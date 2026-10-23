@@ -32,6 +32,7 @@ HELP_SECTIONS = [
         ("/awards", "Monthly awards — this month's race, or any past month"),
         ("/partners", "Best partnerships — which pairs win most together"),
         ("/attendance", "Who shows up — sign-ups vs actually playing"),
+        ("/records", "Club records — biggest wins, streaks, best single games"),
     ]),
     ("🔗 Setup", [
         ("/setup", "Guided EA link, positions and button tour"),
