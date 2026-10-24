@@ -118,6 +118,7 @@ class AdminView(TrackedView):
                         f"Final squad list at kick-off: {final}\n"
                         f"Sticky: 10 messages, minimum **{settings['cooldown']} seconds**\n"
                         f"Waitlist: **{'On' if settings['waitlist'] else 'Off'}**\n"
+                        f"Reminder DMs to regulars who haven't answered (1 hour before): **{'On' if settings['nudges'] else 'Off'}**\n"
                         f"Skipped date: {settings['skip_date'] or 'None'}\n\n"
                         "Changes also update today's sign-up if it's already posted (kick-off time, "
                         "reminder, channel). Use the channel picker to change where they post.")
@@ -183,6 +184,7 @@ class AdminView(TrackedView):
             self.button("Edit schedule", "schedule")
             self.button("Disable waitlist" if settings["waitlist"] else "Enable waitlist", "toggle_waitlist")
             self.button("Skip today", "skip", style=discord.ButtonStyle.danger)
+            self.button("Turn off reminder DMs" if settings["nudges"] else "Turn on reminder DMs", "toggle_nudges")
             picker = discord.ui.ChannelSelect(placeholder="Daily session channel", channel_types=[discord.ChannelType.text],
                                               row=1, custom_id="admin:channel")
             picker.callback = self.choose_channel
@@ -297,6 +299,9 @@ class AdminView(TrackedView):
             settings = session_settings(str(self.guild.id))
             key = "enabled" if action == "toggle_daily" else "waitlist"
             await self.session_action(interaction, **{key: not settings[key]})
+        elif action == "toggle_nudges":
+            set_setting(str(self.guild.id), "session:nudges", "0" if session_settings(str(self.guild.id))["nudges"] else "1")
+            await self.show(interaction)
         elif action == "skip":
             await self.run_command(interaction, "SessionsCog", "skip")
             await self.refresh_anchor(interaction)

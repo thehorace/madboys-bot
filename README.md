@@ -292,6 +292,16 @@ unbeaten run, the current run, best single-game performances (goals, assists, ra
 tackles) and all-time leaders. When a game breaks a record (once the club has 20+ saved games),
 a "New record!" post goes to the results channel. Ties stay with whoever did it first.
 
+**`/wrapped`** (also 🎁 Season Wrapped in the `/stats` menu, with a picker for anyone's) makes a
+shareable card of a player's season so far: games, win rate, goals, assists, rating, MOTMs, best
+game, favourite area of the pitch, best partner, biggest win, nemesis, squad top-3 spots, Player of
+the Day wins and hat-tricks. The season is the FC year, from 1 September (FC 27 = Sept 2026 on).
+
+**Reminder DMs**: an hour before kick-off, regulars (played in 2 of the last 4 finished sessions)
+who haven't answered the sign-up get a private DM with ✅ In / 🤔 Maybe / ❌ Out buttons that answer
+the sign-up for them. Anyone who already answered is left alone, it's one DM per session, and
+🔕 in the DM or **`/reminders off`** stops them. Admins can switch it off in `/admin` → Sessions.
+
 ## Guided player setup
 
 **`/setup`**, or the panel's **Setup** button, opens a private three-step flow:

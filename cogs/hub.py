@@ -50,6 +50,7 @@ SQUAD_PAGES = {
     "badges": ("Badge collection", "🏅", "Everyone's badges"),
     "awards": ("Monthly awards", "🏆", "This month's award race so far"),
     "records": ("Club records", "📜", "Biggest wins, streaks, best single games"),
+    "wrapped": ("Season Wrapped", "🎁", "Your season so far on a card"),
 }
 
 MENU_TIMEOUT = 14 * 60  # Discord lets us edit an interaction's reply for 15 min
@@ -77,6 +78,7 @@ class StatsMenu(TrackedView):
         self.opponent: Optional[str] = None
         self.career = False
         self.partner_of: Optional[str] = None   # Best partnerships: one player's partners (None = top pairs)
+        self.wrapped_of: Optional[str] = None   # Season Wrapped: whose card (None = yours)
         self.attend_period = "30"               # Who shows up: "30", "90" or "all"
         self.award_month: Optional[str] = None  # Monthly awards: "YYYY-MM" (None = this month so far)
         self.embed: discord.Embed = discord.Embed()
@@ -261,7 +263,7 @@ class StatsMenu(TrackedView):
                 for n in others])
             sel.callback = self._pick_compare
             self.add_item(sel)
-        elif self.page == "leaderboard" and self.stat in ("partners", "attendance", "awards"):
+        elif self.page == "leaderboard" and self.stat in ("partners", "attendance", "awards", "wrapped"):
             picker = self.squad_picker()
             if picker:
                 self.add_item(picker)
@@ -320,6 +322,9 @@ class StatsMenu(TrackedView):
         if key == "records":
             from cogs.insights import build_records
             return await build_records(self.guild_id)
+        if key == "wrapped":
+            from cogs.insights import build_wrapped
+            return await build_wrapped(self.guild_id, self.wrapped_of or get_link(self.guild_id, str(self.user.id)))
         if guild is None:
             return "Couldn't find this server."
         if key == "attendance":
@@ -335,6 +340,15 @@ class StatsMenu(TrackedView):
 
     def squad_picker(self) -> Optional[discord.ui.Select]:
         """Row-3 dropdown for the squad pages: whose partners / which period / which month."""
+        if self.stat == "wrapped":
+            if not self.roster:
+                return None
+            options = [discord.SelectOption(label="Mine", value="_me", emoji="🎁", default=self.wrapped_of is None)]
+            options += [discord.SelectOption(label=n[:100], value=n[:100], default=n == self.wrapped_of)
+                        for n in self.roster[:24]]
+            sel = discord.ui.Select(placeholder="🎁 Whose Wrapped…", row=3, options=options)
+            sel.callback = self._pick_squad_option
+            return sel
         if self.stat == "partners":
             if not self.roster:
                 return None
@@ -362,7 +376,9 @@ class StatsMenu(TrackedView):
 
     async def _pick_squad_option(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
-        if self.stat == "partners":
+        if self.stat == "wrapped":
+            self.wrapped_of = None if value == "_me" else value
+        elif self.stat == "partners":
             self.partner_of = None if value == "_all" else value
         elif self.stat == "attendance":
             self.attend_period = value

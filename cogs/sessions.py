@@ -142,6 +142,7 @@ def session_settings(guild_id: str) -> dict:
         "final_channel_id": announce_channel_id(guild_id) or "",
         "cooldown": int(setting("cooldown", "300")),
         "waitlist": setting("waitlist", "1") == "1",
+        "nudges": setting("nudges", "1") == "1",
         "skip_date": setting("skip_date", ""),
         "timezone": setting("timezone", BOT_TZ),
     }
