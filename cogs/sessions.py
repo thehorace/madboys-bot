@@ -116,6 +116,15 @@ def resolve_start(day: str, hm: tuple[int, int], now: Optional[datetime] = None)
     return start
 
 
+def signup_channel_id(guild) -> str:
+    """Where sign-ups go: the /session settings channel, else the server's one #general ('' if neither)."""
+    cid = session_settings(str(guild.id))["channel_id"]
+    if cid:
+        return cid
+    general = [c for c in getattr(guild, "text_channels", []) if c.name.lower() == "general"]
+    return str(general[0].id) if len(general) == 1 else ""
+
+
 def session_settings(guild_id: str) -> dict:
     with connect() as conn:
         saved = {r["key"][8:]: r["value"] for r in conn.execute(
@@ -127,7 +136,10 @@ def session_settings(guild_id: str) -> dict:
         "post_time": setting("post_time", "11:00"),
         "kickoff_time": setting("kickoff_time", "18:30"),
         "days": setting("days", "monday,tuesday,wednesday,thursday,friday,saturday,sunday").split(","),
-        "channel_id": announce_channel_id(guild_id, setting("channel_id", SESSION_CHANNEL_ID or "")) or "",
+        # Sign-ups (the ✅/🤔/❌ check-ins) go to the session channel, or #general when none is set.
+        # They deliberately don't follow /announce set: only the final squad list goes there.
+        "channel_id": setting("channel_id", SESSION_CHANNEL_ID or "") or "",
+        "final_channel_id": announce_channel_id(guild_id) or "",
         "cooldown": int(setting("cooldown", "300")),
         "waitlist": setting("waitlist", "1") == "1",
         "skip_date": setting("skip_date", ""),
@@ -270,6 +282,28 @@ def current_session_players(guild_id: str) -> Optional[list[str]]:
     return get_rsvps(row["id"])["yes"]
 
 
+async def final_list_embed(guild: discord.Guild, s: dict) -> discord.Embed:
+    """The kick-off 'who's playing' list. Mentions show names without pinging anyone."""
+    rsvps = get_rsvps(s["id"])
+    sources = rsvp_sources(s["id"])
+    playing = len(rsvps["yes"])
+    status = "Full XI 🔥" if playing >= SQUAD_SIZE else f"{playing} playing — short by {SQUAD_SIZE - playing}"
+    desc = f"**Kick-off:** <t:{s['starts_at']}:F>\n**{status}**"
+    if s.get("message_id") and s.get("channel_id"):
+        desc += f"\n[Sign-up post](https://discord.com/channels/{guild.id}/{s['channel_id']}/{s['message_id']})"
+    embed = discord.Embed(title=f"📋 {CLUB_NAME} — Final squad", description=desc, colour=CLUB_COLOUR)
+
+    def lines(ids):
+        return "\n".join(f"<@{d}>" + (" 🎧" if sources.get(d) == "voice" else "") for d in ids)[:1024] or "—"
+    embed.add_field(name=f"✅ Playing ({playing})", value=lines(rsvps["yes"]), inline=True)
+    if rsvps["maybe"]:
+        embed.add_field(name=f"🤔 Maybe ({len(rsvps['maybe'])})", value=lines(rsvps["maybe"]), inline=True)
+    if rsvps["waitlist"]:
+        embed.add_field(name=f"⏳ Waitlist ({len(rsvps['waitlist'])})", value=lines(rsvps["waitlist"]), inline=False)
+    embed.set_footer(text="Sign-ups closed at kick-off • 🎧 = added automatically when they joined voice")
+    return embed
+
+
 async def session_embed(guild: discord.Guild, s: dict) -> discord.Embed:
     rsvps = get_rsvps(s["id"])
     title = f"🎮 {CLUB_NAME} — Who's on?"
@@ -338,9 +372,11 @@ class SessionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._sticky_lock = asyncio.Lock()
+        self._checked_today_channel = False
         self.reminders.start()
         self.daily_sessions.start()
         self.session_updates.start()
+        self.final_lists.start()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -435,6 +471,7 @@ class SessionsCog(commands.Cog):
         self.reminders.cancel()
         self.daily_sessions.cancel()
         self.session_updates.cancel()
+        self.final_lists.cancel()
 
     session_group = app_commands.Group(name="session", description="Plan play sessions and see who's on")
 
@@ -546,7 +583,7 @@ class SessionsCog(commands.Cog):
                         # Re-send the reminder only if it hasn't gone out, or kick-off moved well away
                         # (a 10-minute nudge shouldn't ping everyone twice).
                         rearm = not s["reminded"] or new - now > REMIND_MINUTES * 60
-                        conn.execute("UPDATE sessions SET starts_at=?, reminded=?, started_shown=0 WHERE id=?",
+                        conn.execute("UPDATE sessions SET starts_at=?, reminded=?, started_shown=0, final_posted=0 WHERE id=?",
                                      (new, 0 if rearm else 1, s["id"]))
                     else:
                         conn.execute("UPDATE sessions SET starts_at=? WHERE id=?", (new, s["id"]))
@@ -568,7 +605,7 @@ class SessionsCog(commands.Cog):
         s = dict(row)
         open_ = not s["cancelled"] and s["starts_at"] > int(time.time())
         view = SessionView() if open_ else None
-        want = session_settings(str(guild.id))["channel_id"]
+        want = signup_channel_id(guild)
         try:
             old_ch = self.bot.get_channel(int(s["channel_id"])) or await self.bot.fetch_channel(int(s["channel_id"]))
             new_ch = guild.get_channel(int(want)) if (open_ and want and want != s["channel_id"]) else None
@@ -749,6 +786,13 @@ class SessionsCog(commands.Cog):
         if guild is None:
             log.warning("Daily session: set GUILD_ID to select the server")
             return
+        if not self._checked_today_channel:   # once per start-up: today's open sign-up to the right channel
+            self._checked_today_channel = True
+            s = self.todays_daily_session(str(guild.id))
+            want = signup_channel_id(guild)
+            if s and s["starts_at"] > int(time.time()) and want and want != s["channel_id"]:
+                log.info("Moving today's sign-up %s to channel %s", s["id"], want)
+                await self.refresh_today(guild, s["id"])
         starts_at = daily_start(datetime.now(_tz(str(guild.id))), session_settings(str(guild.id)))
         if starts_at is None:
             return
@@ -788,6 +832,35 @@ class SessionsCog(commands.Cog):
             with connect() as conn:
                 conn.execute("UPDATE sessions SET started_shown=1 WHERE id=?", (s["id"],))
 
+    @tasks.loop(minutes=1)
+    @survive
+    async def final_lists(self):
+        """At kick-off, post the final squad list in the announcements channel (once per session)."""
+        now = int(time.time())
+        with connect() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM sessions WHERE cancelled=0 AND final_posted=0 AND message_id IS NOT NULL "
+                "AND starts_at BETWEEN ? AND ?", (now - 3 * 3600, now))]
+        for s in rows:
+            guild = self.bot.get_guild(int(s["guild_id"]))
+            if not guild:
+                continue
+            settings = session_settings(s["guild_id"])
+            cid = settings["final_channel_id"] or s["channel_id"]
+            try:
+                channel = guild.get_channel(int(cid)) or await self.bot.fetch_channel(int(cid))
+                await channel.send(embed=await final_list_embed(guild, s), allowed_mentions=discord.AllowedMentions.none())
+            except (discord.HTTPException, ValueError):
+                log.warning("Couldn't post the final list for session %s", s["id"])
+                await report_health(self.bot, s["guild_id"], "Final squad list",
+                                    "Couldn't post the final squad list. Check the bot can send messages and embeds "
+                                    "in the announcements channel.")
+                continue
+            with connect() as conn:
+                conn.execute("UPDATE sessions SET final_posted=1 WHERE id=?", (s["id"],))
+            await report_health(self.bot, s["guild_id"], "Final squad list")
+
+    @final_lists.before_loop
     @session_updates.before_loop
     async def _before_updates(self):
         await self.bot.wait_until_ready()

@@ -109,11 +109,13 @@ class AdminView(TrackedView):
                             f"[Official EA source]({SOURCE})")
         settings = session_settings(str(self.guild.id))
         channel = f"<#{settings['channel_id']}>" if settings["channel_id"] else "#general"
+        final = f"<#{settings['final_channel_id']}>" if settings["final_channel_id"] else "same channel as the sign-up"
         return discord.Embed(title="🎮 Private session controls", colour=CLUB_COLOUR,
             description=f"Daily posts: **{'On' if settings['enabled'] else 'Off'}**\n"
                         f"Post **{settings['post_time']}** · Kick-off **{settings['kickoff_time']}** ({settings['timezone']}, "
                         f"daylight saving handled automatically)\n"
-                        f"Days: {', '.join(settings['days'])}\nChannel: {channel}\n"
+                        f"Days: {', '.join(settings['days'])}\nSign-ups: {channel}\n"
+                        f"Final squad list at kick-off: {final}\n"
                         f"Sticky: 10 messages, minimum **{settings['cooldown']} seconds**\n"
                         f"Waitlist: **{'On' if settings['waitlist'] else 'Off'}**\n"
                         f"Skipped date: {settings['skip_date'] or 'None'}\n\n"

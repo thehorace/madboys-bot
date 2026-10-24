@@ -20,7 +20,7 @@ looks up is posted straight away. Each new match is:
   tracks the season's awards
 - checked for career milestones ("🎉 @Fauzan just hit 100 career goals!")
 
-Everything the bot posts by itself (results, MOTM votes, milestones, the weekly recap, daily sign-ups, session summaries, EA news) goes to the channel set with `/announce set`; slash commands reply where you use them.
+Everything the bot posts by itself (results, MOTM votes, milestones, the weekly recap, the final squad list, session summaries, EA news) goes to the channel set with `/announce set`; daily sign-ups (the check-ins) stay in #general; slash commands reply where you use them.
 
 A weekly recap posts on Sunday evening. Set the channel once with
 `/matchday start`; it survives restarts and redeploys.
@@ -101,7 +101,10 @@ instead of filling slots first-come-first-served.
 Every day at **11am**, the bot posts a sign-up in **#general** for **6:30pm**
 that evening, using `BOT_TZ` (default Singapore time). It uses the usual
 In / Maybe / Out buttons and the 30-minute reminder. Nobody is signed up
-automatically when the post is created.
+automatically when the post is created. Sign-ups stay in #general (or the channel picked with
+`/session settings channel:`) even when an announcements channel is set. At kick-off the bot
+posts the **final squad list** (playing, maybe, waitlist) in the announcements channel, without
+pinging anyone; with no announcements channel it goes under the sign-up.
 
 Both daily and manual sign-ups ping `@everyone` on their first post (the bot
 needs Mention Everyone permission in that channel). Until kick-off, the sign-up

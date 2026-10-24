@@ -35,7 +35,8 @@ class AnnounceChannelTests(unittest.TestCase):
         # after /announce set: all of them move
         set_announce_channel("10", 99)
         self.assertEqual(tracker.channel_id_for("10"), 99)
-        self.assertEqual(sessions.session_settings("10")["channel_id"], "99")
+        self.assertEqual(sessions.session_settings("10")["channel_id"], "2")        # sign-ups stay put...
+        self.assertEqual(sessions.session_settings("10")["final_channel_id"], "99")  # ...the final list moves
         self.assertEqual(session_reports.report_settings("10")["channel"], "99")
         self.assertEqual(patchnotes.patch_settings("10")["channel_id"], "99")
         # other servers are unaffected; clearing restores the old channels

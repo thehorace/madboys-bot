@@ -3,9 +3,10 @@
 /announce show            - Show where automatic posts go (and what still falls back)
 /announce clear           - Manager: go back to the old per-feature channels
 
-Automatic posts = match results, MOTM votes, milestones, weekly recap, daily
-session sign-ups + reminders, session summaries, EA news. Slash commands keep
-replying in whatever channel they were used in.
+Automatic posts = match results, MOTM votes, milestones, weekly recap, the final
+squad list at kick-off, session summaries, EA news. Daily sign-ups (the check-ins)
+stay in #general or the /session settings channel. Slash commands keep replying in
+whatever channel they were used in.
 """
 import discord
 from discord import app_commands
@@ -63,18 +64,18 @@ class AnnounceCog(commands.Cog):
                 "Fix the channel permissions and run this again. Nothing was changed.", ephemeral=True)
             return
         set_announce_channel(interaction.guild_id, channel.id)
-        note = "" if perms.mention_everyone else (
-            "\n⚠️ I can't @everyone there, so the daily sign-up won't ping anyone — give me **Mention Everyone** if you want that.")
         await interaction.response.send_message(
             f"📣 Automatic posts now go to {channel.mention}: results, MOTM votes, milestones, weekly recaps, "
-            f"daily sign-ups, session summaries and EA news. Commands still reply where you use them.\n"
-            f"Today's already-posted sign-up moves on its next update.{note}", ephemeral=True)
+            f"the final squad list at kick-off, session summaries and EA news. Daily sign-ups (the check-ins) "
+            f"stay in #general — change that with `/session settings channel:`. Commands still reply where you "
+            f"use them.", ephemeral=True)
 
     @group.command(name="show", description="Show where automatic posts go")
     async def show(self, interaction: discord.Interaction):
         cid = announce_channel_id(interaction.guild_id)
         await interaction.response.send_message(
-            f"📣 Automatic posts go to <#{cid}>." if cid else
+            f"📣 Automatic posts and the final squad list go to <#{cid}>. Daily sign-ups stay in #general "
+            f"(or the `/session settings` channel)." if cid else
             "No #announcements channel found — each feature uses its own channel. Create a channel with that "
             "name, or run `/announce set`.",
             ephemeral=True)

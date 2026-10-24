@@ -311,6 +311,9 @@ def init_all():
         for column in ("sticky_at", "started_shown"):
             if column not in have_sessions:
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        if "final_posted" not in have_sessions:   # kick-off "final squad" post; old sessions count as done
+            conn.execute("ALTER TABLE sessions ADD COLUMN final_posted INTEGER NOT NULL DEFAULT 0")
+            conn.execute("UPDATE sessions SET final_posted=1 WHERE starts_at <= CAST(strftime('%s','now') AS INTEGER)")
         for table in ("position_prompts", "motm_polls"):
             if "club_id" not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN club_id INTEGER NOT NULL DEFAULT {INITIAL_CLUBS[0]['club_id']}")
