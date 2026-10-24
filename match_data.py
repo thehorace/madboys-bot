@@ -70,6 +70,8 @@ class ParsedMatch:
     players: list[PlayerLine] = field(default_factory=list)
     ea_result: int = 0   # EA's own result code for us; low bits: 1 = win, 2 = loss, 4 = draw
     club_id: int = CLUB_ID
+    has_time: bool = False   # EA sent minutes played for our players (older data may not)
+    dnf: bool = False        # EA flagged a "did not finish" (someone quit / disconnected)
 
     @property
     def result(self) -> str:
@@ -102,8 +104,12 @@ def parse_match(match: dict, club_id: int) -> Optional[ParsedMatch]:
         opp_id=opp_id,
         opp_name=((opp.get("details") or {}).get("name")) or "Unknown",
         ea_result=to_int(ours.get("result")),
+        dnf=bool(to_int(ours.get("winnerByDnf")) or to_int(opp.get("winnerByDnf"))
+                 or to_int(ours.get("result")) & 8 or to_int(opp.get("result")) & 8),
     )
     for pid, p in ((match.get("players") or {}).get(str(club_id)) or {}).items():
+        if "secondsPlayed" in p or "gameTime" in p:
+            pm.has_time = True
         pm.players.append(PlayerLine(
             persona_id=str(pid),
             name=p.get("playername") or f"<{pid}>",
@@ -125,6 +131,71 @@ def parse_match(match: dict, club_id: int) -> Optional[ParsedMatch]:
             goals_conceded=to_int(p.get("goalsconceded")),
         ))
     return pm
+
+
+VOID_SECONDS = 600   # under 10 minutes of match time for everyone = the game never really happened
+
+
+def void_reason(pm: ParsedMatch) -> Optional[str]:
+    """
+    Why this game shouldn't count, or None if it's a real game. Covers games that never got going:
+    a disconnect at kick-off, or a team forfeiting straight away — EA records those as a 3–0 default.
+    """
+    if pm.has_time and pm.players and max(p.seconds_played for p in pm.players) < VOID_SECONDS:
+        return "ended in the first few minutes (disconnect or forfeit)"
+    if not pm.players and pm.dnf:
+        return "didn't finish (disconnect or forfeit)"
+    return None
+
+
+VOID_SCHEMA = """
+CREATE TABLE IF NOT EXISTS void_matches (
+    club_id   INTEGER NOT NULL,
+    match_id  TEXT NOT NULL,
+    ts        INTEGER NOT NULL,
+    our_goals INTEGER, opp_goals INTEGER, opp_name TEXT,
+    reason    TEXT,
+    raw_json  TEXT,
+    PRIMARY KEY (club_id, match_id)
+);
+"""
+
+
+def store_void(club_id: int, pm: ParsedMatch, raw: dict, reason: str) -> bool:
+    """Remember a void game (so it isn't re-checked) without counting it anywhere. False if already known."""
+    with connect() as conn:
+        conn.executescript(VOID_SCHEMA)
+        return conn.execute("INSERT OR IGNORE INTO void_matches VALUES (?,?,?,?,?,?,?,?)",
+                            (club_id, pm.match_id, pm.ts, pm.our_goals, pm.opp_goals, pm.opp_name, reason,
+                             json.dumps(raw))).rowcount > 0
+
+
+def purge_void_matches():
+    """
+    One-off clean-up: games already saved that never really happened (0–3 forfeits, kick-off
+    disconnects) move out of the stats into void_matches. Their rotation entries go too.
+    """
+    from db import get_setting, set_setting
+    if get_setting("global", "backfill:void_v1"):
+        return
+    moved = []
+    with connect() as conn:
+        conn.executescript(VOID_SCHEMA)
+        for r in conn.execute("SELECT club_id, match_id, raw_json FROM matches WHERE raw_json IS NOT NULL"):
+            raw = json.loads(r["raw_json"])
+            pm = parse_match(raw, r["club_id"])
+            reason = void_reason(pm) if pm else None
+            if reason:
+                moved.append((r["club_id"], pm, raw, reason))
+        for cid, pm, raw, reason in moved:
+            conn.execute("INSERT OR IGNORE INTO void_matches VALUES (?,?,?,?,?,?,?,?)",
+                         (cid, pm.match_id, pm.ts, pm.our_goals, pm.opp_goals, pm.opp_name, reason, json.dumps(raw)))
+            conn.execute("DELETE FROM match_players WHERE club_id=? AND match_id=?", (cid, pm.match_id))
+            conn.execute("DELETE FROM matches WHERE club_id=? AND match_id=?", (cid, pm.match_id))
+            conn.execute("DELETE FROM rotation_log WHERE match_id=?", (pm.match_id,))
+    set_setting("global", "backfill:void_v1", "1")
+    if moved:
+        log.info(f"Took {len(moved)} game(s) that never really happened (forfeits/disconnects) out of the stats")
 
 
 def motm_of(pm: ParsedMatch) -> Optional[PlayerLine]:
@@ -155,9 +226,11 @@ def stored_ids(club_id: int, match_ids: list[str]) -> set[str]:
     if not match_ids:
         return set()
     with connect() as conn:
+        conn.executescript(VOID_SCHEMA)
         return {r[0] for r in conn.execute(
-            "SELECT match_id FROM matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?))",
-            (club_id, json.dumps(match_ids)))}
+            "SELECT match_id FROM matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?)) "
+            "UNION SELECT match_id FROM void_matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?))",
+            (club_id, json.dumps(match_ids), club_id, json.dumps(match_ids)))}
 
 
 def store_match(club_id: int, pm: ParsedMatch, raw: dict) -> bool:

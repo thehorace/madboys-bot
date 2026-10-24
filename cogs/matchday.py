@@ -420,14 +420,30 @@ class MatchdayCog(commands.Cog):
         self._unlinked.clear()
 
         new: list[md.ParsedMatch] = []
+        voided: list[tuple[md.ParsedMatch, str]] = []
         known = md.stored_ids(club_id(), [md.raw_match_id(m) for m in raw_matches])
         for raw in sorted(raw_matches, key=lambda m: to_int(m.get("timestamp"))):  # oldest first
             if md.raw_match_id(raw) in known:
                 continue   # already saved: skip parsing + re-saving it
             pm = md.parse_match(raw, club_id())
+            reason = md.void_reason(pm) if pm else None
+            if reason:   # forfeit / kick-off disconnect: EA's 0–3 doesn't count for anything here
+                if md.store_void(club_id(), pm, raw, reason):
+                    voided.append((pm, reason))
+                continue
             if pm and md.store_match(club_id(), pm, raw):
                 new.append(pm)
 
+        if voided and not quiet and guild_id and self.posting_enabled(guild_id):
+            cid = self.channel_id_for(guild_id)
+            channel = await self._channel(cid) if cid else None
+            if channel:
+                lines = [f"⚪ **{club_name()}** vs {clip(pm.opp_name, 60)} {reason} — not counted in any stats."
+                         for pm, reason in voided]
+                try:
+                    await channel.send("\n".join(lines)[:2000], allowed_mentions=discord.AllowedMentions.none())
+                except discord.HTTPException:
+                    log.warning("Couldn't post the void-game note")
         if not new:
             return 0
         self.last_new_at = time.time()

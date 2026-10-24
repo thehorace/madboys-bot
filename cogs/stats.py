@@ -163,14 +163,16 @@ def recent_player_games(name: str, limit: int) -> list[str]:
 #  screen builders (shared by slash commands and the menu)
 # --------------------------------------------------------------------------- #
 async def build_lastgame(ea, bot=None) -> Screen:
-    raw_list = await ea.get_recent_matches_multi(club_id(), count=1)
-    raw = raw_list[0] if raw_list else md.get_raw_match(club_id())  # fall back to our own history
+    raw_list = await ea.get_recent_matches_multi(club_id(), count=5)
+    # newest game that really happened (skips 0–3 forfeits / kick-off disconnects)
+    real = [r for r in (raw_list or []) if (lambda p: p and not md.void_reason(p))(md.parse_match(r, club_id()))]
+    raw = real[0] if real else md.get_raw_match(club_id())  # fall back to our own history
     if not raw:
         return "Couldn't fetch the last game — EA or the relay may be down."
     # Safety net: if someone looks up a game the tracker hasn't posted yet, post it now
     # instead of waiting for the next scheduled check.
     mid = str(raw.get("matchId") or raw.get("timestamp") or "")
-    if bot is not None and raw_list and mid and not md.is_stored(club_id(), mid):
+    if bot is not None and real and mid and not md.stored_ids(club_id(), [mid]):
         tracker = bot.get_cog("MatchdayCog")
         if tracker:
             tracker.poll_soon("someone opened Last game")

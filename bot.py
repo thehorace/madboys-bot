@@ -62,6 +62,7 @@ class MadBoysBot(commands.Bot):
         import match_data
         match_data.backfill_player_fields()
         match_data.backfill_results()
+        match_data.purge_void_matches()
         for ext in COGS:
             await self.load_extension(ext)
             log.info(f"Loaded {ext}")
