@@ -619,6 +619,13 @@ class MatchdayCog(commands.Cog):
                     played = latest.get(name.casefold())
                     if row is not None and announce and played is not None:
                         hit = crossed(row["value"], new_val, thresholds)
+                        # EA career totals are the same whichever club you look them up for, so the
+                        # same milestone would be announced once per club: only the first one counts.
+                        conn.execute("CREATE TABLE IF NOT EXISTS milestone_posts (player TEXT, stat TEXT, "
+                                     "threshold INTEGER, PRIMARY KEY (player, stat, threshold))")
+                        if hit and conn.execute("INSERT OR IGNORE INTO milestone_posts VALUES (?,?,?)",
+                                                (name.casefold(), stat, hit)).rowcount == 0:
+                            hit = None
                         if hit:
                             who = f"<@{links[name.lower()]}>" if name.lower() in links else f"**{name}**"
                             announcements.append(

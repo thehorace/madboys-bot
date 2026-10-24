@@ -16,10 +16,14 @@ from cogs.link import get_all_links
 from cogs.operations import report_health
 from interaction_tracking import TrackedView
 from clubs import monitored_clubs, match_key, match_club, raw_match_key, club_for
+from match_data import VOID_SCHEMA
 
 log = logging.getLogger("madboys-bot.session_reports")
 DEFAULT_GAP = 30       # a session ends this many minutes after its last game
 START_WINDOW = 120     # ...but the first game may come up to this long after kick-off
+MATCH_SECONDS = 15 * 60   # EA times a game by when it ENDS: allow for the next game being played
+VOICE_HOLD = 2 * 3600     # squad still together in voice: keep the session open (up to this long)
+FOLLOWUP_WINDOW = 12 * 3600   # games left over after a session closed get their own recap
 
 
 def report_settings(gid):
@@ -53,7 +57,41 @@ def latest_personal(gid, discord_id):
     return dict(row) if row else None
 
 
-def archive_sessions(gid, now, settings=None):
+def squad_in_voice(guild) -> bool:
+    """2+ linked players sitting in a voice channel together (they're probably still playing)."""
+    from config import VOICE_ACTIVE_PLAYERS
+    linked = set(get_all_links(str(guild.id)))
+    for vc in getattr(guild, "voice_channels", []) or []:
+        if sum(1 for m in vc.members if not m.bot and str(m.id) in linked) >= VOICE_ACTIVE_PLAYERS:
+            return True
+    return False
+
+
+def add_followup_sessions(gid, now):
+    """
+    Games nobody's session took (played after a session already closed, or on a day without a
+    sign-up) get an automatic session of their own, so they still get a recap and Player of the Day.
+    """
+    baseline = int(get_setting(gid, "reports:since") or now)
+    since = max(now - FOLLOWUP_WINDOW, baseline)
+    club_ids = [c['club_id'] for c in monitored_clubs()] or [CLUB_ID]
+    marks = ','.join('?' for _ in club_ids)
+    with connect() as conn:
+        pending = [r[0] for r in conn.execute(
+            "SELECT starts_at FROM sessions WHERE guild_id=? AND cancelled=0 AND starts_at<=? "
+            "AND id NOT IN (SELECT session_id FROM session_history)", (gid, now))]
+        assigned = {mid for r in conn.execute("SELECT match_ids FROM session_history WHERE guild_id=? AND ended_at>=?",
+                                              (gid, since - 2 * 86400)) for mid in json.loads(r[0])}
+        for m in conn.execute(f"SELECT club_id, match_id, ts FROM matches WHERE club_id IN ({marks}) AND ts>=? "
+                              f"ORDER BY ts", (*club_ids, since)):
+            if match_key(m["match_id"], m["club_id"]) in assigned or any(p <= m["ts"] for p in pending):
+                continue   # already summarised, or a session that's still open will take it
+            conn.execute("INSERT INTO sessions (guild_id, channel_id, starts_at, created_by) VALUES (?,?,?,?)",
+                         (gid, "0", m["ts"] - MATCH_SECONDS, "auto"))
+            return   # one at a time: the new session covers the games after it
+
+
+def archive_sessions(gid, now, settings=None, in_voice=False):
     """Group timestamped matches by planned session and inactivity; atomic snapshots."""
     settings = settings or report_settings(gid)
     gap = settings["gap"] * 60
@@ -80,19 +118,31 @@ def archive_sessions(gid, now, settings=None):
             boundary = min(next_start or now + 1, now + 1)
             club_ids = [c['club_id'] for c in monitored_clubs()] or [CLUB_ID]
             marks = ','.join('?' for _ in club_ids)
-            rows = conn.execute(f"SELECT * FROM matches WHERE club_id IN ({marks}) AND ts>=? AND ts<? ORDER BY ts,club_id,match_id", (*club_ids, s["starts_at"], boundary)).fetchall()
-            matches = []
+            rows = [dict(r) for r in conn.execute(f"SELECT * FROM matches WHERE club_id IN ({marks}) AND ts>=? AND ts<? ORDER BY ts,club_id,match_id", (*club_ids, s["starts_at"], boundary))]
+            # Forfeits/kick-off disconnects don't count in the recap, but they ARE the squad playing:
+            # they keep the session going.
+            conn.executescript(VOID_SCHEMA)
+            rows += [dict(r, void=True) for r in conn.execute(
+                f"SELECT club_id, match_id, ts FROM void_matches WHERE club_id IN ({marks}) AND ts>=? AND ts<?",
+                (*club_ids, s["starts_at"], boundary))]
+            rows.sort(key=lambda r: (r["ts"], r["club_id"], r["match_id"]))
+            matches, last_activity = [], None
             for match in rows:
-                if match_key(match["match_id"], match['club_id']) in assigned:
+                if not match.get("void") and match_key(match["match_id"], match['club_id']) in assigned:
                     continue
-                # A distant game belongs to a different playing session.
-                previous = matches[-1]["ts"] if matches else s["starts_at"]
-                if match["ts"] - previous > (gap if matches else start_window):
+                # A distant game belongs to a different playing session. Timestamps are when a game
+                # ENDS, so the next one gets MATCH_SECONDS on top of the gap for being played.
+                previous = last_activity or s["starts_at"]
+                if match["ts"] - previous > (gap + MATCH_SECONDS if last_activity else start_window):
                     break
-                matches.append(dict(match))
+                last_activity = match["ts"]
+                if not match.get("void"):
+                    matches.append(match)
             cancelled = bool(s["cancelled"])
-            if not cancelled and matches and now - matches[-1]["ts"] < gap:
+            if not cancelled and last_activity and now - last_activity < gap:
                 continue
+            if not cancelled and last_activity and in_voice and now - last_activity < VOICE_HOLD:
+                continue   # still together in voice (queueing, switching clubs): not finished yet
             if not cancelled and not matches and now - s["starts_at"] < start_window:
                 continue
             if cancelled:
@@ -113,7 +163,7 @@ def archive_sessions(gid, now, settings=None):
                 player["discord_ids"] = [did for did, name in links.items() if name.casefold() == player["name"].casefold()]
             rsvps = [dict(r) for r in conn.execute("SELECT discord_id,status,source FROM session_rsvps WHERE session_id=?", (s["id"],))]
             # Old records remain browsable but never create startup catch-up posts.
-            finish = matches[-1]["ts"] + gap if matches else s["starts_at"] + start_window
+            finish = (last_activity or 0) + gap if matches else s["starts_at"] + start_window
             message = "suppressed" if finish <= baseline else None
             conn.execute("INSERT INTO session_history VALUES (?,?,?,?,?,?,?,?)", (s["id"], gid,
                 matches[-1]["ts"] if matches else now, "cancelled" if cancelled else "completed" if matches else "no games",
@@ -421,7 +471,8 @@ class SessionReportsCog(commands.Cog):
             set_setting(gid, "reports:gap", str(DEFAULT_GAP))
             set_setting(gid, "reports:gap_v30", "1")
         settings = report_settings(gid)   # read once per check
-        archive_sessions(gid, now, settings)
+        add_followup_sessions(gid, now)
+        archive_sessions(gid, now, settings, in_voice=squad_in_voice(guild))
         if not settings["enabled"]:
             with connect() as conn:
                 conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))

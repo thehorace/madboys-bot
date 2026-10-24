@@ -113,3 +113,12 @@ class MilestoneTests(unittest.IsolatedAsyncioTestCase):
         await self.check(self.primary,[{'name':'Connor'}],games)
         await self.check(self.primary,[{'name':'Connor','goals':50}],games)
         self.channel.send.assert_not_awaited()
+
+    async def test_same_career_milestone_is_announced_once_across_clubs(self):
+        self.baseline(self.primary, 'Connor')
+        self.baseline(self.secondary, 'Connor')
+        await self.check(self.secondary, [{'name': 'Connor', 'goals': 50}],
+                         [self.game(self.secondary, 'g1', 100, ['Connor'])])
+        await self.check(self.primary, [{'name': 'Connor', 'goals': 50}],
+                         [self.game(self.primary, 'm1', 200, ['Connor'])])
+        self.channel.send.assert_awaited_once()     # GRAYSBOYS announced it; MADBOYS doesn't repeat it
