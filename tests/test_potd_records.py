@@ -170,3 +170,37 @@ class RecordsMenuTests(Base):
         menu.stat = "records"
         await menu.go("leaderboard")
         self.assertIn("Club records", menu.embed.title)
+
+
+class PotdFairnessTests(Base):
+    def setUp(self):
+        super().setUp()
+        potd.init_potd()
+
+    async def test_defender_who_played_better_beats_scoring_striker(self):
+        mids = []
+        for i in range(6):    # striker: 7.6 avg, 4 goals + 2 assists; defender: 7.7 avg, 3 clean sheets, 4 tackles a game
+            clean = i < 3
+            mids.append(self.game(ts(2026, 10, 3) + i * 1200, "W" if i < 4 else "L", [
+                ("Striker", {"pos": "forward", "r": 7.6, "g": 1 if i < 4 else 0, "a": 1 if i >= 4 else 0}),
+                ("Defender", {"pos": "defender", "r": 7.7, "cs": 1 if clean else 0})],
+                gf=2, ga=0 if clean else 1))
+        with connect() as conn:
+            conn.execute("UPDATE match_players SET tackles_made=4 WHERE name='Defender'")
+        result = potd.compute(rows(mids))
+        self.assertEqual(result["winner"]["name"], "Defender")
+        self.assertLessEqual(max(p["bonus"] for p in [result["winner"], *result["runners"]]), potd.BONUS_CAP)
+
+    async def test_hat_trick_machine_still_wins(self):
+        mids = [self.game(ts(2026, 10, 3) + i * 1200, "W", [
+            ("Striker", {"pos": "forward", "r": 8.2, "g": 3}),
+            ("Defender", {"pos": "defender", "r": 7.9, "cs": 1})], gf=3, ga=0) for i in range(3)]
+        self.assertEqual(potd.compute(rows(mids))["winner"]["name"], "Striker")
+
+    def test_bonus_is_capped_the_same_for_everyone(self):
+        base = {"games": 2, "goals": 0, "assists": 0, "team_clean_sheets": 0, "tackles": 0, "saves": 0}
+        self.assertEqual(potd.contribution_bonus({**base, "role": "forward", "goals": 20}), potd.BONUS_CAP)
+        self.assertEqual(potd.contribution_bonus({**base, "role": "defender", "team_clean_sheets": 2, "tackles": 40}),
+                         potd.BONUS_CAP)
+        self.assertEqual(potd.contribution_bonus({**base, "role": "goalkeeper", "team_clean_sheets": 2, "saves": 30}),
+                         potd.BONUS_CAP)

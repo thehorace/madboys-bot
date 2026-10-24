@@ -281,9 +281,10 @@ All four are also in the `/stats` menu's leaderboard list, and player pages show
 and best partners.
 
 **Player of the Day**: right after a session's recap is posted, the bot posts a card for the
-session's standout player (pinging them if they're linked). The pick is: average rating, +0.35
-per goal or assist per game, +0.4 × win rate, +0.2 per squad MOTM vote won and +0.15 per EA MOTM
-per game, and +0.3 × clean-sheet rate for keepers/defenders. Players need at least half their
+session's standout player (pinging them if they're linked). The pick is: average rating, plus a
+contribution bonus with the same maximum (0.6) for every position (attackers: goals and assists;
+defenders: clean sheets and tackles; keepers: clean sheets and saves; midfielders: whichever is
+better), +0.4 × win rate, and +0.2 per squad MOTM vote won and +0.15 per EA MOTM per game. Players need at least half their
 club's games that session. Winners get the ⭐ badge; the card counts how many times they've won.
 
 **`/records`** (also 📜 Records on the panel and in the `/stats` menu) shows club records from

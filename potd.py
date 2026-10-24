@@ -2,11 +2,15 @@
 Player of the Day: the standout player of a finished session, plus a card to post.
 
 How the pick works (per player, over the games they played in that session):
-    average match rating
-  + 0.35 per goal or assist per game
+    average match rating (EA's rating already weighs each position's job)
+  + a contribution bonus, the same maximum (0.6) for every position, earned the position's way:
+        attackers    0.3 per goal or assist per game
+        defenders    0.4 x clean-sheet rate + 0.03 per tackle per game
+        keepers      0.4 x clean-sheet rate + 0.04 per save per game
+        midfielders  whichever of the attacking / defending bonus is bigger
   + 0.40 x win rate
   + 0.20 per squad MOTM vote won per game, 0.15 per EA man of the match per game
-  + 0.30 x clean-sheet rate for keepers and defenders
+The position is the one they played most that session.
 Players must have played at least half of their club's games that session (min 1),
 so one great cameo doesn't beat someone who carried the whole night.
 """
@@ -40,6 +44,19 @@ CREATE TABLE IF NOT EXISTS session_potd (
 CREATE INDEX IF NOT EXISTS idx_session_potd_name ON session_potd (guild_id, name COLLATE NOCASE);
 """
 DEFENSIVE = ("goalkeeper", "defender")
+BONUS_CAP = 0.6
+
+
+def contribution_bonus(p: dict) -> float:
+    """Position-fair bonus, capped at BONUS_CAP for everyone (see the module docstring)."""
+    g = p["games"]
+    attack = 0.3 * (p["goals"] + p["assists"]) / g
+    cs_rate = p["team_clean_sheets"] / g
+    defence = 0.4 * cs_rate + 0.03 * p["tackles"] / g
+    keeping = 0.4 * cs_rate + 0.04 * p["saves"] / g
+    role = p.get("role", "")
+    bonus = {"forward": attack, "defender": defence, "goalkeeper": keeping}.get(role, max(attack, defence))
+    return min(BONUS_CAP, bonus)
 
 
 def init_potd():
@@ -84,7 +101,8 @@ def compute(matches: list[dict]) -> Optional[dict]:
         key = (r["club_id"], r["name"].casefold())
         p = players.setdefault(key, {"name": r["name"], "club_id": r["club_id"], "games": 0, "w": 0, "d": 0, "l": 0,
                                      "goals": 0, "assists": 0, "ratings": [], "saves": 0, "tackles": 0,
-                                     "ea_motm": 0, "clean_sheets": 0, "defensive": 0, "best": None})
+                                     "ea_motm": 0, "clean_sheets": 0, "defensive": 0, "best": None,
+                                     "team_clean_sheets": 0, "positions": defaultdict(int)})
         p["games"] += 1
         p[m["result"].lower()] += 1
         p["goals"] += r["goals"] or 0
@@ -95,6 +113,8 @@ def compute(matches: list[dict]) -> Optional[dict]:
         if r["rating"] is not None:
             p["ratings"].append(r["rating"])
         pos = (r["pos"] or "").lower()
+        p["positions"][pos] += 1
+        p["team_clean_sheets"] += 1 if m["opp_goals"] == 0 else 0
         if pos in DEFENSIVE:
             p["defensive"] += 1
             p["clean_sheets"] += 1 if (r["clean_sheet"] or m["opp_goals"] == 0) else 0
@@ -113,9 +133,10 @@ def compute(matches: list[dict]) -> Optional[dict]:
         p["rating"] = sum(p["ratings"]) / len(p["ratings"])
         p["squad_motm"] = votes.get(p["name"].casefold(), 0)
         p["keeper"] = p["defensive"] * 2 >= g and p["saves"] > 0
-        p["score"] = (p["rating"] + 0.35 * (p["goals"] + p["assists"]) / g + 0.4 * p["w"] / g
-                      + 0.2 * p["squad_motm"] / g + 0.15 * p["ea_motm"] / g
-                      + (0.3 * p["clean_sheets"] / g if p["defensive"] * 2 >= g else 0))
+        p["role"] = max(p.pop("positions").items(), key=lambda kv: kv[1])[0] if p["games"] else ""
+        p["bonus"] = contribution_bonus(p)
+        p["score"] = (p["rating"] + p["bonus"] + 0.4 * p["w"] / g
+                      + 0.2 * p["squad_motm"] / g + 0.15 * p["ea_motm"] / g)
         p.pop("ratings")
         p["club_name"] = club_for(p["club_id"])["name"]
         ranked.append(p)
@@ -240,7 +261,7 @@ def render_card(result: dict, tz=None, wins_total: int = 0) -> bytes:
         parts = [f"{i}. {r['name']} ({r['rating']:.1f})" for i, r in enumerate(result["runners"], start=2)]
         text, f = _fit(d, "Next best:  " + "     ".join(parts), W - 100, 24, bold=False)
         d.text((50, 572), text, font=f, fill=MUTED)
-    d.text((50, H - 48), "Rating, goals + assists, wins, MOTM votes and clean sheets  ·  min half the session's games",
+    d.text((50, H - 48), "Rating + a fair bonus for every position (goals, clean sheets, tackles, saves), wins, MOTM",
            font=font(18), fill=MUTED)
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)
