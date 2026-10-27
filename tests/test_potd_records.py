@@ -204,3 +204,39 @@ class PotdFairnessTests(Base):
                          potd.BONUS_CAP)
         self.assertEqual(potd.contribution_bonus({**base, "role": "goalkeeper", "team_clean_sheets": 2, "saves": 30}),
                          potd.BONUS_CAP)
+
+
+class PotdBothClubsTests(Base):
+    def setUp(self):
+        super().setUp()
+        potd.init_potd()
+        from clubs import monitored_clubs
+        self.other = next(c["club_id"] for c in monitored_clubs() if c["club_id"] != CLUB_ID)
+
+    async def test_one_pick_across_both_clubs(self):
+        # 2 GRAYSBOYS games, then 3 MADBOYS games: Magnet starred in GRAYSBOYS only, Fauz was good all night
+        mids = [self.game(ts(2026, 10, 27, 18) + i * 600, "W", [("Magnet", {"r": 9.2, "pos": "defender"}),
+                                                                ("Fauz", {"r": 8.0, "g": 1})], club=self.other)
+                for i in range(2)]
+        mids += [self.game(ts(2026, 10, 27, 19) + i * 600, "W", [("Magnet", {"r": 6.5, "pos": "defender"}),
+                                                                 ("Fauz", {"r": 8.2, "g": 1})])
+                 for i in range(3)]
+        with connect() as conn:
+            matches = [dict(r) for r in conn.execute("SELECT * FROM matches ORDER BY ts")]
+        result = potd.compute(matches)
+        w = result["winner"]
+        self.assertEqual(w["name"], "Fauz")
+        self.assertEqual(w["games"], 5)                                   # both clubs counted together
+        self.assertEqual(w["club_id"], CLUB_ID)                           # played most for MADBOYS
+        self.assertIn(" & ", w["club_name"])                              # card shows both clubs
+        magnet = next(r for r in result["runners"] if r["name"] == "Magnet")
+        self.assertEqual(magnet["games"], 5)
+        self.assertEqual(result["session"]["games"], 5)
+
+    async def test_needs_half_of_the_whole_night(self):
+        mids = [self.game(ts(2026, 10, 27, 18) + i * 600, "W", [("Cameo", {"r": 9.9})], club=self.other)
+                for i in range(2)]
+        mids += [self.game(ts(2026, 10, 27, 19) + i * 600, "W", [("Regular", {"r": 7.5})]) for i in range(3)]
+        with connect() as conn:
+            matches = [dict(r) for r in conn.execute("SELECT * FROM matches ORDER BY ts")]
+        self.assertEqual(potd.compute(matches)["winner"]["name"], "Regular")   # 2 of 5 isn't enough

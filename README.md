@@ -284,8 +284,9 @@ and best partners.
 session's standout player (pinging them if they're linked). The pick is: average rating, plus a
 contribution bonus with the same maximum (0.6) for every position (attackers: goals and assists;
 defenders: clean sheets and tackles; keepers: clean sheets and saves; midfielders: whichever is
-better), +0.4 × win rate, and +0.2 per squad MOTM vote won and +0.15 per EA MOTM per game. Players need at least half their
-club's games that session. Winners get the ⭐ badge; the card counts how many times they've won.
+better), +0.4 × win rate, and +0.2 per squad MOTM vote won and +0.15 per EA MOTM per game. It's one pick for the whole
+session across both clubs: MADBOYS and GRAYSBOYS games count together, and players need at least
+half of the session's games. Winners get the ⭐ badge; the card counts how many times they've won.
 
 **`/records`** (also 📜 Records on the panel and in the `/stats` menu) shows club records from
 every saved game: biggest win, heaviest defeat, most goals in a game, longest win streak and

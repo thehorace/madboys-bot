@@ -11,8 +11,9 @@ How the pick works (per player, over the games they played in that session):
   + 0.40 x win rate
   + 0.20 per squad MOTM vote won per game, 0.15 per EA man of the match per game
 The position is the one they played most that session.
-Players must have played at least half of their club's games that session (min 1),
-so one great cameo doesn't beat someone who carried the whole night.
+One pick for the whole session across BOTH clubs: a player's MADBOYS and GRAYSBOYS games count
+together. Players must have played at least half of the session's games (min 1), so one great
+cameo doesn't beat someone who carried the whole night.
 """
 
 import io
@@ -98,12 +99,14 @@ def compute(matches: list[dict]) -> Optional[dict]:
     players: dict[tuple, dict] = {}
     for r in rows:
         m = by_id[(r["club_id"], r["match_id"])]
-        key = (r["club_id"], r["name"].casefold())
-        p = players.setdefault(key, {"name": r["name"], "club_id": r["club_id"], "games": 0, "w": 0, "d": 0, "l": 0,
+        key = r["name"].casefold()   # same person whichever club they played for
+        p = players.setdefault(key, {"name": r["name"], "club_id": r["club_id"], "club_games": defaultdict(int),
+                                     "games": 0, "w": 0, "d": 0, "l": 0,
                                      "goals": 0, "assists": 0, "ratings": [], "saves": 0, "tackles": 0,
                                      "ea_motm": 0, "clean_sheets": 0, "defensive": 0, "best": None,
                                      "team_clean_sheets": 0, "positions": defaultdict(int)})
         p["games"] += 1
+        p["club_games"][r["club_id"]] += 1
         p[m["result"].lower()] += 1
         p["goals"] += r["goals"] or 0
         p["assists"] += r["assists"] or 0
@@ -126,7 +129,7 @@ def compute(matches: list[dict]) -> Optional[dict]:
 
     ranked = []
     for p in players.values():
-        need = max(1, math.ceil(club_games[p["club_id"]] / 2))
+        need = max(1, math.ceil(len(matches) / 2))   # half of the whole session, both clubs
         if p["games"] < need or not p["ratings"]:
             continue
         g = p["games"]
@@ -138,7 +141,9 @@ def compute(matches: list[dict]) -> Optional[dict]:
         p["score"] = (p["rating"] + p["bonus"] + 0.4 * p["w"] / g
                       + 0.2 * p["squad_motm"] / g + 0.15 * p["ea_motm"] / g)
         p.pop("ratings")
-        p["club_name"] = club_for(p["club_id"])["name"]
+        per_club = sorted(p.pop("club_games").items(), key=lambda kv: -kv[1])
+        p["club_id"] = per_club[0][0]   # the club they played most for (saved with the award)
+        p["club_name"] = " & ".join(club_for(c)["name"] for c, _ in per_club)
         ranked.append(p)
     if not ranked:
         return None
