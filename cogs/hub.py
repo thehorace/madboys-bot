@@ -631,6 +631,14 @@ class PanelView(TrackedView):
     async def records(self, interaction: discord.Interaction, _):
         await StatsMenu.open(self.bot, interaction, "leaderboard", stat="records")
 
+    @discord.ui.button(label='Weekly Progress',emoji='📈',custom_id='madboys:panel:weekly-progress',row=3)
+    async def weekly_progress(self,interaction:discord.Interaction,_):
+        await self.bot.get_cog('ProgressCog').open_weekly(interaction)
+
+    @discord.ui.button(label='Session Progress',emoji='⏱️',custom_id='madboys:panel:session-progress',row=3)
+    async def session_progress(self,interaction:discord.Interaction,_):
+        await self.bot.get_cog('ProgressCog').open_session(interaction)
+
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
@@ -648,6 +656,8 @@ def panel_embed() -> discord.Embed:
                     "🏅 **My badges** — your badges, and the emoji on your name\n"
                     "🏆 **Awards** — this month's award race (and past months)\n"
                     "📜 **Records** — biggest wins, streaks and best single games\n"
+                    "📈 **Weekly Progress** — compare the last two weeks\n"
+                    "⏱️ **Session Progress** — latest activity and when the recap is expected\n"
                     "🧑‍💼 **Manager** — build & post the lineup (managers only)",
         colour=CLUB_COLOUR)
 

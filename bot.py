@@ -43,6 +43,7 @@ COGS = [
     "cogs.badges",
     "cogs.awards",
     "cogs.nudges",
+    "cogs.progress",
 ]
 
 

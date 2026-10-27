@@ -25,6 +25,7 @@ HELP_SECTIONS = [
         ("/h2h", "Record vs a specific club"),
         ("/scout", "Any opponent's record, form and our head-to-head"),
         ("/recap", "Summary of the last N days"),
+        ("/weeklyprogress", "Compare the last two weeks"),
         ("/motm table", "Squad MOTM awards (voted after every game)"),
     ]),
     ("🏅 Squad", [
@@ -51,6 +52,7 @@ HELP_SECTIONS = [
         ("/session settings", "Admin: daily session time and options"),
         ("/mysession", "Private personal summary after the session finishes"),
         ("/sessionhistory", "Browse finished sessions and your past summaries"),
+        ("/sessionprogress", "Current activity and recap timing"),
         ("/motm close", "Manager: close the open MOTM vote now"),
     ]),
     ("🧑‍💼 Lineups & rotation", [

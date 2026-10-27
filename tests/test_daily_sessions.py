@@ -228,9 +228,18 @@ class DailyPostTests(unittest.IsolatedAsyncioTestCase):
 
     def todays_posted_session(self):
         tz = ZoneInfo(sessions.BOT_TZ)
-        now = datetime.now(tz)
-        if now.hour >= 21:
-            self.skipTest("needs a few hours left in the local day")
+        now = datetime.now(tz).replace(hour=12, minute=0, second=0, microsecond=0)
+        # Schedule editing must be tested even when this suite runs at night.
+        # A timezone-specific test may already own a scoped clock; do not nest
+        # cleanup-managed patches inside it and restore its mock after it exits.
+        if isinstance(sessions.datetime, type):
+            clock_patch = patch.object(sessions, 'datetime', wraps=datetime)
+            clock = clock_patch.start()
+            self.addCleanup(clock_patch.stop)
+            clock.now.side_effect = lambda zone=None: now.astimezone(zone)
+            time_patch = patch.object(sessions.time, 'time', return_value=now.timestamp())
+            time_patch.start()
+            self.addCleanup(time_patch.stop)
         start = now.replace(minute=0, second=0, microsecond=0)
         old = int((start.replace(hour=now.hour + 2)).timestamp())
         with db.connect() as conn:

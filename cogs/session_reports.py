@@ -91,6 +91,29 @@ def add_followup_sessions(gid, now):
             return   # one at a time: the new session covers the games after it
 
 
+def session_activity(conn, session, club_ids, boundary, gap, start_window, assigned):
+    """Shared read-only grouping for archiving and the Session Progress screen."""
+    marks = ','.join('?' for _ in club_ids)
+    args = (*club_ids, session['starts_at'], boundary)
+    rows = [dict(r) for r in conn.execute(
+        f'SELECT * FROM matches WHERE club_id IN ({marks}) AND ts>=? AND ts<?', args)]
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='void_matches'").fetchone():
+        rows += [dict(r, void=True) for r in conn.execute(
+            f'SELECT club_id,match_id,ts FROM void_matches WHERE club_id IN ({marks}) AND ts>=? AND ts<?', args)]
+    rows.sort(key=lambda r: (r['ts'], r['club_id'], r['match_id']))
+    matches, last_activity = [], None
+    for match in rows:
+        if not match.get('void') and match_key(match['match_id'], match['club_id']) in assigned:
+            continue
+        previous = last_activity if last_activity is not None else session['starts_at']
+        if match['ts'] - previous > (gap + MATCH_SECONDS if last_activity is not None else start_window):
+            break
+        last_activity = match['ts']
+        if not match.get('void'):
+            matches.append(match)
+    return matches, last_activity
+
+
 def archive_sessions(gid, now, settings=None, in_voice=False):
     """Group timestamped matches by planned session and inactivity; atomic snapshots."""
     settings = settings or report_settings(gid)
@@ -99,6 +122,9 @@ def archive_sessions(gid, now, settings=None, in_voice=False):
     baseline = int(get_setting(gid, "reports:since") or now)
     if get_setting(gid, "reports:since") is None:
         set_setting(gid, "reports:since", str(now))
+    clubs = monitored_clubs() or [club_for(CLUB_ID)]
+    club_ids = [c['club_id'] for c in clubs]
+    club_names = {c['club_id']: c['name'] for c in clubs}
     with connect() as conn:
         # Only sessions not archived yet (this used to re-check every session ever, every poll).
         sessions = conn.execute("SELECT * FROM sessions WHERE guild_id=? AND (starts_at<=? OR cancelled=1) "
@@ -106,6 +132,9 @@ def archive_sessions(gid, now, settings=None, in_voice=False):
                                 (gid, now)).fetchall()
         if not sessions:
             return
+        # This is one CREATE statement. executescript() would commit earlier
+        # snapshots midway through the batch and defeat rollback on failure.
+        conn.execute(VOID_SCHEMA)
         links = get_all_links(gid)
         # Matches already given to a session: only recent history can overlap these sessions.
         oldest = min(s["starts_at"] for s in sessions)
@@ -116,28 +145,7 @@ def archive_sessions(gid, now, settings=None, in_voice=False):
                 continue
             next_start = conn.execute("SELECT MIN(starts_at) FROM sessions WHERE guild_id=? AND starts_at>? AND cancelled=0", (gid, s["starts_at"])).fetchone()[0]
             boundary = min(next_start or now + 1, now + 1)
-            club_ids = [c['club_id'] for c in monitored_clubs()] or [CLUB_ID]
-            marks = ','.join('?' for _ in club_ids)
-            rows = [dict(r) for r in conn.execute(f"SELECT * FROM matches WHERE club_id IN ({marks}) AND ts>=? AND ts<? ORDER BY ts,club_id,match_id", (*club_ids, s["starts_at"], boundary))]
-            # Forfeits/kick-off disconnects don't count in the recap, but they ARE the squad playing:
-            # they keep the session going.
-            conn.executescript(VOID_SCHEMA)
-            rows += [dict(r, void=True) for r in conn.execute(
-                f"SELECT club_id, match_id, ts FROM void_matches WHERE club_id IN ({marks}) AND ts>=? AND ts<?",
-                (*club_ids, s["starts_at"], boundary))]
-            rows.sort(key=lambda r: (r["ts"], r["club_id"], r["match_id"]))
-            matches, last_activity = [], None
-            for match in rows:
-                if not match.get("void") and match_key(match["match_id"], match['club_id']) in assigned:
-                    continue
-                # A distant game belongs to a different playing session. Timestamps are when a game
-                # ENDS, so the next one gets MATCH_SECONDS on top of the gap for being played.
-                previous = last_activity or s["starts_at"]
-                if match["ts"] - previous > (gap + MATCH_SECONDS if last_activity else start_window):
-                    break
-                last_activity = match["ts"]
-                if not match.get("void"):
-                    matches.append(match)
+            matches, last_activity = session_activity(conn, s, club_ids, boundary, gap, start_window, assigned)
             cancelled = bool(s["cancelled"])
             if not cancelled and last_activity and now - last_activity < gap:
                 continue
@@ -157,7 +165,7 @@ def archive_sessions(gid, now, settings=None, in_voice=False):
                     f"SELECT name,COUNT(*) games,SUM(goals) goals,SUM(assists) assists,AVG(rating) rating,SUM(motm) motm,SUM(saves) saves,SUM(tackles_made) tackles,SUM(passes_made) passes,SUM(pass_attempts) attempts FROM match_players WHERE club_id=? AND match_id IN ({marks}) GROUP BY name COLLATE NOCASE",
                     [cid, *raw_ids])]
                 for p in group:
-                    p.update(club_id=cid, club_name=club_for(cid)['name'])
+                    p.update(club_id=cid, club_name=club_names[cid])
                 players.extend(group)
             for player in players:
                 player["discord_ids"] = [did for did, name in links.items() if name.casefold() == player["name"].casefold()]
@@ -479,13 +487,14 @@ class SessionReportsCog(commands.Cog):
         with connect() as conn:
             pending = conn.execute("SELECT session_id FROM session_history WHERE guild_id=? AND message_id IS NULL", (gid,)).fetchall()
         errors = []
+        attempted_potd = set()
         for r in pending:
             record = history(gid, r[0])[0]
             if record["outcome"] != "completed" or now - record["ended_at"] > 86400:
                 with connect() as conn:
                     conn.execute("UPDATE session_history SET message_id='suppressed' WHERE session_id=?", (r[0],))
                 continue
-            channel_id = report_settings(gid)["channel"]
+            channel_id = settings["channel"]
             choices = [c for c in guild.text_channels if c.name.lower() == "general"] if not channel_id else []
             channel = guild.get_channel(int(channel_id)) if channel_id else choices[0] if len(choices) == 1 else None
             try:
@@ -494,14 +503,41 @@ class SessionReportsCog(commands.Cog):
                 message = await channel.send(embed=recap_embed(record), view=SummaryView(), allowed_mentions=discord.AllowedMentions.none())
                 with connect() as conn:
                     conn.execute("UPDATE session_history SET message_id=? WHERE session_id=?", (str(message.id), r[0]))
+                    if settings['potd']:
+                        conn.execute("INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)",
+                                     (gid, f'potd:pending:{r[0]}', '1'))
             except Exception as exc:
                 errors.append(exc)
                 continue
+            attempted_potd.add(record['session_id'])
             await self.post_player_of_the_day(guild, channel, record)
+        await self.retry_player_of_the_day(guild, now, attempted_potd, settings)
         errors.extend(await self.send_personal_summaries(guild, now))
         if errors:
             raise errors[0]
         await report_health(self.bot, gid, "Session summaries")
+
+    async def retry_player_of_the_day(self, guild, now, attempted=(), settings=None):
+        """Only retry explicitly queued cards, never backfill historical recaps."""
+        gid = str(guild.id)
+        settings = settings or report_settings(gid)
+        with connect() as conn:
+            pending = conn.execute("SELECT s.key,h.session_id,h.ended_at,h.message_id FROM settings s "
+                "LEFT JOIN session_history h ON h.guild_id=s.guild_id AND s.key='potd:pending:'||h.session_id "
+                "WHERE s.guild_id=? AND s.key LIKE 'potd:pending:%'", (gid,)).fetchall()
+        channel = None
+        for row in pending:
+            if not settings['potd'] or row['session_id'] is None or now-row['ended_at'] > 86400 or row['message_id'] in (None,'suppressed'):
+                set_setting(gid, row['key'], None)
+                continue
+            if row['session_id'] in attempted:
+                continue
+            if channel is None:
+                cid = settings['channel']
+                choices = [c for c in guild.text_channels if c.name.lower() == 'general'] if not cid else []
+                channel = guild.get_channel(int(cid)) if cid else choices[0] if len(choices)==1 else None
+            if channel is not None:
+                await self.post_player_of_the_day(guild, channel, history(gid,row['session_id'])[0])
 
     async def post_player_of_the_day(self, guild, channel, record):
         """Card for the session's standout player, posted right under the recap. Never blocks the recap."""
@@ -511,9 +547,11 @@ class SessionReportsCog(commands.Cog):
         gid, sid = str(guild.id), record["session_id"]
         try:
             if potd.already_done(sid) or not report_settings(gid)["potd"]:
+                set_setting(gid, f'potd:pending:{sid}', None)
                 return
             result = await asyncio.to_thread(potd.compute, session_matches(record))
             if result is None:
+                set_setting(gid, f'potd:pending:{sid}', None)
                 return
             winner = result["winner"]
             links = get_all_links(gid)
@@ -529,6 +567,7 @@ class SessionReportsCog(commands.Cog):
             message = await channel.send(embed=embed, file=discord.File(io.BytesIO(png), "player-of-the-day.png"),
                                          allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             potd.save(gid, sid, result, did, str(message.id), int(time.time()))
+            set_setting(gid, f'potd:pending:{sid}', None)
             badges = self.bot.get_cog("BadgesCog")
             if badges and did:
                 await badges.refresh_member(guild, did)

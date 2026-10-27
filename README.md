@@ -331,6 +331,15 @@ download a copy periodically for an independent backup. To restore, stop the
 bot, preserve the current database, replace it with the downloaded copy, remove
 stale `-wal`/`-shm` files while stopped, then restart. There is no automatic restore.
 
+## Weekly Progress and Session Progress
+
+The panel has two private, on-demand screens:
+
+- **Weekly Progress** (`/weeklyprogress [player]`) compares the last seven days with the previous seven days for the selected club. It starts with your linked player, or the club overview if you are not linked. Pick another player or club in the menu. Changes require at least three recorded matches in each period; rating changes also require three rated games per period. Goals and assists compare per match, so playing more games alone does not look like an improvement. Void games are excluded.
+- **Session Progress** (`/sessionprogress`) shows recorded activity across the monitored clubs, counted results, estimated recap timing and why a session is waiting. It includes the voice hold and pending EA checks. Forfeits extend activity without counting as results. Refresh updates the view; it does not trigger EA requests or finish a session. Estimates can change when more games arrive or players leave voice.
+
+These screens do not send scheduled posts or change personal summary/DM settings. After deploying, repost the panel with `/panel` to expose the new buttons, or let an existing sticky panel repost itself. The slash commands also work directly. No new environment variables are needed.
+
 ## Local setup
 
 ```bash
