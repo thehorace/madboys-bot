@@ -51,6 +51,7 @@ SQUAD_PAGES = {
     "awards": ("Monthly awards", "🏆", "This month's award race so far"),
     "records": ("Club records", "📜", "Biggest wins, streaks, best single games"),
     "wrapped": ("Season Wrapped", "🎁", "Your season so far on a card"),
+    "player_twin": ("Player Twin", "🪞", "Which real-life footballer matches your playing style?"),
 }
 
 MENU_TIMEOUT = 14 * 60  # Discord lets us edit an interaction's reply for 15 min
@@ -79,6 +80,8 @@ class StatsMenu(TrackedView):
         self.career = False
         self.partner_of: Optional[str] = None   # Best partnerships: one player's partners (None = top pairs)
         self.wrapped_of: Optional[str] = None   # Season Wrapped: whose card (None = yours)
+        self.twin_of: Optional[str] = None
+        self.twin_roster = roster
         self.attend_period = "30"               # Who shows up: "30", "90" or "all"
         self.award_month: Optional[str] = None  # Monthly awards: "YYYY-MM" (None = this month so far)
         self.embed: discord.Embed = discord.Embed()
@@ -89,7 +92,7 @@ class StatsMenu(TrackedView):
     @classmethod
     @club_scoped
     async def open(cls, bot: commands.Bot, interaction: discord.Interaction, page: str = "home",
-                   stat: Optional[str] = None):
+                   stat: Optional[str] = None, twin_player: Optional[str] = None):
         """Send a new private menu in reply to a slash command or a panel button."""
         from cogs.lineup import get_prefs
         # the main menu and "Me" still steer new players through Setup; Last game, Leaderboard, Awards etc.
@@ -102,8 +105,23 @@ class StatsMenu(TrackedView):
             await open_setup(bot, interaction)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        roster = await S.roster_names(bot.ea)
-        menu = cls(bot, interaction.user, str(interaction.guild_id), roster, md.opponents(club_id(), limit=25))
+        if stat == 'player_twin':
+            import player_twin as T
+            roster = await asyncio.to_thread(T.roster_names)
+            if twin_player and twin_player.strip().casefold() != 'me':
+                resolved, choices = await asyncio.to_thread(T.resolve_name, twin_player)
+                if not resolved:
+                    message = ('More than one player matches. Enter more of their EA name: ' +
+                               ', '.join(discord.utils.escape_markdown(n) for n in choices[:10])) if choices else 'No saved player matches that EA name.'
+                    await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+                    return
+                twin_player = resolved
+            else:
+                twin_player = None
+        else:
+            roster = await S.roster_names(bot.ea)
+        menu = cls(bot, interaction.user, str(interaction.guild_id), roster[:25], md.opponents(club_id(), limit=25))
+        menu.twin_of = twin_player
         if stat:
             menu.stat = stat
         await menu.go(page)
@@ -227,11 +245,15 @@ class StatsMenu(TrackedView):
             btn.callback = self._nav(key)
             self.add_item(btn)
 
-        if self.roster:
+        if self.page == 'leaderboard' and self.stat == 'player_twin':
+            members = discord.ui.UserSelect(placeholder='Pick a linked Discord member…', row=1)
+            members.callback = self._pick_twin_member
+            self.add_item(members)
+        elif self.roster:
             sel = discord.ui.Select(placeholder="👤 Player stats…", row=1, options=[
                 discord.SelectOption(label=n[:100], value=n[:100],
                                      default=self.page in ("player", "compare") and n == self.player)
-                for n in self.roster])
+                for n in self.roster[:25]])
             sel.callback = self._pick_player
             self.add_item(sel)
 
@@ -263,7 +285,7 @@ class StatsMenu(TrackedView):
                 for n in others])
             sel.callback = self._pick_compare
             self.add_item(sel)
-        elif self.page == "leaderboard" and self.stat in ("partners", "attendance", "awards", "wrapped"):
+        elif self.page == "leaderboard" and self.stat in ("partners", "attendance", "awards", "wrapped", "player_twin"):
             picker = self.squad_picker()
             if picker:
                 self.add_item(picker)
@@ -291,8 +313,12 @@ class StatsMenu(TrackedView):
                                   disabled=self.page in ("home", "link"))
         share.callback = self._share
         self.add_item(share)
+        if self.page == 'leaderboard' and self.stat == 'player_twin':
+            search = discord.ui.Button(label='Find player', emoji='🔎', row=4)
+            search.callback = self._find_twin
+            self.add_item(search)
         clubs = monitored_clubs()
-        if len(clubs) > 1:   # only worth a button when there's another club to switch to
+        if len(clubs) > 1 and not (self.page == 'leaderboard' and self.stat == 'player_twin'):
             current = self.club_id or club_id()
             index = next((i for i, c in enumerate(clubs) if c["club_id"] == current), -1)
             nxt = clubs[(index + 1) % len(clubs)]["name"]
@@ -325,6 +351,11 @@ class StatsMenu(TrackedView):
         if key == "wrapped":
             from cogs.insights import build_wrapped
             return await build_wrapped(self.guild_id, self.wrapped_of or get_link(self.guild_id, str(self.user.id)))
+        if key == 'player_twin':
+            import player_twin as T
+            self.twin_roster = await asyncio.to_thread(T.roster_names)
+            from cogs.insights import build_player_twin
+            return await build_player_twin(self.twin_of or get_link(self.guild_id,str(self.user.id)))
         if guild is None:
             return "Couldn't find this server."
         if key == "attendance":
@@ -340,13 +371,15 @@ class StatsMenu(TrackedView):
 
     def squad_picker(self) -> Optional[discord.ui.Select]:
         """Row-3 dropdown for the squad pages: whose partners / which period / which month."""
-        if self.stat == "wrapped":
-            if not self.roster:
+        if self.stat in ('wrapped','player_twin'):
+            roster = self.twin_roster if self.stat == 'player_twin' else self.roster
+            if not roster:
                 return None
-            options = [discord.SelectOption(label="Mine", value="_me", emoji="🎁", default=self.wrapped_of is None)]
-            options += [discord.SelectOption(label=n[:100], value=n[:100], default=n == self.wrapped_of)
-                        for n in self.roster[:24]]
-            sel = discord.ui.Select(placeholder="🎁 Whose Wrapped…", row=3, options=options)
+            selected = self.twin_of if self.stat=='player_twin' else self.wrapped_of
+            options = [discord.SelectOption(label="Mine", value="_me", default=selected is None)]
+            options += [discord.SelectOption(label=n[:100], value=n[:100], default=n == selected)
+                        for n in roster[:24]]
+            sel = discord.ui.Select(placeholder="🪞 Whose Player Twin…" if self.stat=='player_twin' else "🎁 Whose Wrapped…", row=3, options=options)
             sel.callback = self._pick_squad_option
             return sel
         if self.stat == "partners":
@@ -376,7 +409,9 @@ class StatsMenu(TrackedView):
 
     async def _pick_squad_option(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
-        if self.stat == "wrapped":
+        if self.stat == 'player_twin':
+            self.twin_of = None if value=='_me' else value
+        elif self.stat == "wrapped":
             self.wrapped_of = None if value == "_me" else value
         elif self.stat == "partners":
             self.partner_of = None if value == "_all" else value
@@ -385,6 +420,17 @@ class StatsMenu(TrackedView):
         else:
             self.award_month = None if value == "_now" else value
         await self._update(interaction, "leaderboard")
+
+    async def _find_twin(self, interaction):
+        await interaction.response.send_modal(TwinSearch(self))
+
+    async def _pick_twin_member(self, interaction):
+        name = get_link(self.guild_id, str(interaction.data['values'][0]))
+        if not name:
+            await interaction.response.send_message('That member has not linked an EA player yet. Use Find player to search their EA name.', ephemeral=True)
+            return
+        self.twin_of = name
+        await self._update(interaction, 'leaderboard')
 
     async def _my_badges(self, interaction: discord.Interaction):
         badges = self.bot.get_cog("BadgesCog")
@@ -527,6 +573,33 @@ class StatsMenu(TrackedView):
                     f"the bot Send Messages, Embed Links and Attach Files there.")
 
 
+class TwinSearch(discord.ui.Modal, title='Find a Player Twin'):
+    name = discord.ui.TextInput(label='EA name (or part of it)', max_length=100)
+
+    def __init__(self, menu):
+        super().__init__()
+        self.menu = menu
+
+    async def on_submit(self, interaction):
+        if not await self.menu.interaction_check(interaction):
+            return
+        if self.menu.is_finished():
+            await interaction.response.send_message('This menu has expired. Open Player Twin again.', ephemeral=True)
+            return
+        query = self.name.value.strip().casefold()
+        names = [n for n in self.menu.twin_roster if query and query in n.casefold()]
+        exact = next((n for n in names if n.casefold() == query), None)
+        if exact or len(names) == 1:
+            self.menu.twin_of = exact or names[0]
+            self.menu.stat = 'player_twin'
+            with club_scope(self.menu.club_id or club_id()):
+                await self.menu._update(interaction, 'leaderboard')
+            return
+        message = ('Several players match: ' + ', '.join(discord.utils.escape_markdown(n) for n in names[:10]) +
+                   '. Try more of their EA name.') if names else 'No saved player matches that EA name.'
+        await interaction.response.send_message(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
 class ShareChoice(TrackedView):
     """'Share this where?' — a dropdown of the channels you (and the bot) can post in."""
 
@@ -639,6 +712,10 @@ class PanelView(TrackedView):
     async def session_progress(self,interaction:discord.Interaction,_):
         await self.bot.get_cog('ProgressCog').open_session(interaction)
 
+    @discord.ui.button(label='Player Twin',emoji='🪞',custom_id='madboys:panel:player-twin',row=3)
+    async def player_twin(self,interaction:discord.Interaction,_):
+        await StatsMenu.open(self.bot,interaction,'leaderboard',stat='player_twin')
+
 
 def panel_embed() -> discord.Embed:
     return discord.Embed(
@@ -658,6 +735,7 @@ def panel_embed() -> discord.Embed:
                     "📜 **Records** — biggest wins, streaks and best single games\n"
                     "📈 **Weekly Progress** — compare the last two weeks\n"
                     "⏱️ **Session Progress** — latest activity and when the recap is expected\n"
+                    "🪞 **Player Twin** — your real-life footballer style comparison\n"
                     "🧑‍💼 **Manager** — build & post the lineup (managers only)",
         colour=CLUB_COLOUR)
 

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 import db
+import awards as A
 from announce import _named
 from cogs.awards import AwardsCog
 from cogs.link import set_link
@@ -14,6 +15,9 @@ from tests.test_squad_features import Base, SYD, ts
 class AwardsBroadcastTests(Base):
     def setUp(self):
         super().setUp()
+        minimum=patch.object(A,'MIN_POTM_GAMES',3)
+        minimum.start()
+        self.addCleanup(minimum.stop)
         self.general=SimpleNamespace(id=20,name='general',send=AsyncMock(return_value=SimpleNamespace(id=100)))
         self.announcements=SimpleNamespace(id=30,name='announcements',send=AsyncMock(return_value=SimpleNamespace(id=101)))
         self.guild=SimpleNamespace(id=10,text_channels=[self.general,self.announcements])
@@ -70,6 +74,17 @@ class AwardsBroadcastTests(Base):
         self.assertEqual(await self.post(),1)
         self.general.send.assert_awaited_once()
         self.announcements.send.assert_not_awaited()
+
+    async def test_old_minimum_snapshot_gets_one_corrected_broadcast(self):
+        self.assertEqual(await self.post(),2)
+        for i in range(28):
+            self.game(ts(2026,10,10)+i*600,players=[('Ali',{'r':8,'g':1})])
+        with patch.object(A,'MIN_POTM_GAMES',31):
+            self.assertEqual(await self.post(),2)
+            self.assertEqual(await self.post(),0)
+        self.assertEqual(self.general.send.await_count,2)
+        self.assertEqual(self.announcements.send.await_count,2)
+        self.assertIn('31+',self.general.send.call_args.kwargs['embed'].footer.text)
 
     async def test_missing_everyone_permission_retries_only_that_channel_when_fixed(self):
         self.guild.me=SimpleNamespace()

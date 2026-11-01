@@ -246,6 +246,13 @@ class BadgeSafetyTests(Base):
 
 
 class AwardsTests(Base):
+    def setUp(self):
+        super().setUp()
+        # Small fixtures test ranking/rendering; production eligibility has boundary tests.
+        minimum=patch.object(A,'MIN_POTM_GAMES',3)
+        minimum.start()
+        self.addCleanup(minimum.stop)
+
     def october(self):
         # Ali: 4 games avg 8.0, Bob: 4 games avg 7.0 + lots of goals, Cat: 1 game 9.5 (not enough games)
         for i in range(4):
@@ -303,6 +310,12 @@ class AwardsTests(Base):
 
 
 class AwardsRoleTests(Base):
+    def setUp(self):
+        super().setUp()
+        minimum=patch.object(A,'MIN_POTM_GAMES',3)
+        minimum.start()
+        self.addCleanup(minimum.stop)
+
     async def test_combined_post_retries_and_assigns_one_winner(self):
         from cogs.awards import AwardsCog, ROLE_NAME
         import discord

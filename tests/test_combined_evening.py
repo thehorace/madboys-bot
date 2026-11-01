@@ -46,6 +46,12 @@ class CombinedEveningTests(Base):
 
 
 class CombinedMonthlyTests(Base):
+    def setUp(self):
+        super().setUp()
+        minimum=patch.object(A,'MIN_POTM_GAMES',3)
+        minimum.start()
+        self.addCleanup(minimum.stop)
+
     def fill_month(self):
         secondary=next(c['club_id'] for c in monitored_clubs() if c['club_id']!=CLUB_ID)
         self.game(ts(2026,10,3),players=[('Ali',{'r':9,'g':1,'a':1}),('Bob',{'r':7.6})])

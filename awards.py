@@ -13,7 +13,6 @@ for the squad. A club needs MIN_CLUB_GAMES games in the month for awards.
 
 import io
 import json
-import math
 from datetime import datetime
 from typing import Optional
 
@@ -23,6 +22,7 @@ from db import connect
 from fonts import font
 
 MIN_CLUB_GAMES = 3
+MIN_POTM_GAMES = 31
 COMBINED_ID = 0  # separate namespace; existing per-club award records remain intact
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS monthly_awards (
@@ -92,7 +92,7 @@ def compute(cid: int, year: int, month: int, tz) -> Optional[dict]:
         return None
     players = _player_rows(cid, start, end)
     motm = _squad_motm(cid, start, end)
-    need = max(3, math.ceil(0.3 * rec["games"]))
+    need = MIN_POTM_GAMES
     eligible = [p for p in players.values() if p["games"] >= need and p["rating"] is not None]
 
     def pick(rows, key, value_key):

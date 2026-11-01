@@ -161,6 +161,10 @@ class AwardsCog(commands.Cog):
             problems.append('The announcements channel is unavailable.')
         round_key = f'awards:broadcast:{label}:round'
         generation = int(get_setting(gid, round_key) or 0)
+        old_snapshot = get_setting(gid,f'awards:broadcast:{label}:{generation}:snapshot')
+        if old_snapshot and json.loads(old_snapshot).get('min_games') != A.MIN_POTM_GAMES:
+            generation += 1
+            set_setting(gid,round_key,str(generation))
         def delivered(channel_id):
             return get_setting(gid, f'awards:broadcast:{label}:{generation}:{channel_id}') is not None
         if force and channels and not problems and all(delivered(c) for c in channels):

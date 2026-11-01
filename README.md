@@ -268,7 +268,7 @@ never lets a bot rename the server owner.
 
 **Monthly awards**: in the first week of each month (from 10:00 in the session timezone) the
 bot posts one combined awards card across all monitored clubs (3+ games in total): Player of the Month
-(rating weighted across individual games, +0.1 per squad MOTM vote won, minimum 30% of the squad's games), top
+(rating weighted across individual games, +0.1 per squad MOTM vote won, minimum **31 games in that month combined across both clubs**), top
 scorer, top assists, squad MOTM king, most improved and ever-present. Player of the Month gets
 the gold **👑 Player of the Month** role (the bot creates it; needs **Manage Roles** and its own
 role above it) and the 👑 badge. **`/awards`** shows this month's race so far, or any past month.
@@ -338,6 +338,16 @@ bot, preserve the current database, replace it with the downloaded copy, remove
 stale `-wal`/`-shm` files while stopped, then restart. There is no automatic restore.
 
 ## Weekly Progress and Session Progress
+
+Player Twin currently has **64 real footballers** in its style pool: 20 forwards, 21 midfielders, 15 defenders and 8 keepers. Alongside Mbappé, Pedri and Bellingham, options include Werner, Núñez, Firmino, Giroud, Grealish, Saka, Henderson, Milner, Fred, Gallagher, Modrić, Ødegaard, Maguire, Stones, Robertson, Walker, De Gea and Pickford. Supporting roles and quieter statistical spells have their own templates. Current form is reported separately using average EA rating, recorded shot conversion and passing accuracy when sufficient data exists. A defender is not labelled poor just for scoring no goals. These remain role-aware, stats-grounded style comparisons, not random celebrity assignments.
+
+The latest additions are Rooney, Neymar, Suárez, Ronaldinho, Rashford, Watkins, Eto’o, Villa, Xavi, Iniesta, Busquets, Scholes, Beckham, Gerrard, Casemiro, McTominay, Ramos, Marcelo, Piqué, Vidić, Puyol, Trippier, Buffon and Čech. Every new profile has a distinct target pattern and a matching test confirming it can appear as the closest result.
+
+**Player Twin** (`/playertwin [player]`, or **🪞 Player Twin** on the panel) is a private, playful style comparison with a shareable card. It uses your latest 20 saved appearances across the registered clubs and assesses your most-played role, requiring five appearances in that role. Forward, midfield, defender and goalkeeper profiles are separate. Goals, assists, passing, successful tackles and saves supply the evidence; missing pass-attempt data does not become a zero accuracy score. Switching roles does not mix striker numbers into a keeper comparison.
+
+The named players are curated historical style inspirations, with official club/league/UEFA source links in the result. The matching targets are hand-tuned gameplay archetypes, **not measured real-player statistics or an ability rating**. It does not infer pace, dribbling, positioning or off-ball movement. Results include the sample size, sample maturity, observed traits and alternative inspirations, with no invented similarity percentage. A small or empty sample gets an explanation instead of a random footballer. It sends no automatic messages or DMs. Repost `/panel` after deploying to see the new button; the Stats menu also offers Player Twin and a player picker.
+
+To view someone else's twin, use `/playertwin player:EA-name`, **Find player** (full or partial EA name), the saved-player dropdown, or the linked Discord-member picker. Search and autocomplete cover both clubs' saved players, including older players outside the current live roster; ambiguous searches ask for a more specific name. Every successful lookup opens a private menu with **Share**, which posts the displayed player's card to an available channel using the existing channel-permission checks.
 
 The panel has two private, on-demand screens:
 

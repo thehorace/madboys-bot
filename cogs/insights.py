@@ -50,9 +50,33 @@ async def build_wrapped(guild_id, name: Optional[str]):
     return embed, png
 
 
+async def build_player_twin(name):
+    import player_twin as T
+    result=await asyncio.to_thread(T.analyse,name)
+    if isinstance(result,str):
+        return result
+    png=await asyncio.to_thread(T.render_card,result)
+    return T.build_embed(result),png
+
+
+async def twin_autocomplete(interaction: discord.Interaction, current: str):
+    import player_twin as T
+    names = await asyncio.to_thread(T.roster_names, current.strip())
+    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names[:25]]
+
+
 class InsightsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @app_commands.command(name='playertwin',description='Your real-life footballer style twin, based on your recent saved matches')
+    @app_commands.describe(player='Choose a player, or leave blank for your linked EA player')
+    @app_commands.autocomplete(player=twin_autocomplete)
+    @app_commands.guild_only()
+    @club_scoped
+    async def playertwin(self,interaction:discord.Interaction,player:Optional[str]=None):
+        from cogs.hub import StatsMenu
+        await StatsMenu.open(self.bot, interaction, 'leaderboard', stat='player_twin', twin_player=player)
 
     @app_commands.command(name="partners", description="Best partnerships — which pairs win most together")
     @app_commands.describe(player="See one player's best partners (leave blank for the top pairs)")

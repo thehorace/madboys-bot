@@ -35,6 +35,7 @@ HELP_SECTIONS = [
         ("/attendance", "Who shows up — sign-ups vs actually playing"),
         ("/records", "Club records — biggest wins, streaks, best single games"),
         ("/wrapped", "Season Wrapped — your season so far on a card"),
+        ("/playertwin", "Your real-life footballer style twin"),
         ("/reminders", "Turn your 'are you playing tonight?' DMs on or off"),
     ]),
     ("🔗 Setup", [
