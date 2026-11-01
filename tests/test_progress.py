@@ -77,6 +77,7 @@ class WeeklyProgressTests(Base):
 class SessionProgressTests(Base):
     def setUp(self):
         super().setUp()
+        db.set_setting('10','reports:gap','30')
         with db.connect() as conn:
             self.sid=conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by) VALUES ('10','20',?,'daily')",(NOW,)).lastrowid
 

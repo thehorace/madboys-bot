@@ -368,7 +368,7 @@ class StatsMenu(TrackedView):
             options = [discord.SelectOption(label="This month (so far)", value="_now", emoji="⏳",
                                             default=self.award_month is None)]
             options += [discord.SelectOption(label=A.month_label(m), value=m, default=m == self.award_month)
-                        for m in A.months_with_games(club_id(), _tz(self.guild_id))[:24]]
+                        for m in A.months_with_games(A.COMBINED_ID, _tz(self.guild_id))[:24]]
             placeholder = "📅 Pick a month…"
         sel = discord.ui.Select(placeholder=placeholder, row=3, options=options)
         sel.callback = self._pick_squad_option

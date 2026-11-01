@@ -23,6 +23,8 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
         db.init_all()
+        db.set_setting('10','reports:gap','30')
+        db.set_setting('10','reports:evening_gap_v1','1')
         usage.init_usage()
         self.start = 1_800_000_000
         db.set_setting("10", "reports:since", str(self.start - 100))
@@ -146,13 +148,15 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reports.history("10")[0]["outcome"], "cancelled")
         self.channel.send.assert_awaited_once()
 
-    async def test_session_ends_30_minutes_after_the_last_game(self):
+    async def test_default_keeps_evening_open_for_two_hours(self):
         db.set_setting("10", "reports:gap", None)            # default
         self.game("a", self.start + 2700)                     # kicked off 45 min late: still this session
         self.game("b", self.start + 4200)
         await self.poll(self.start + 4200 + 1700)             # 28 min after the last game: still open
         self.channel.send.assert_not_awaited()
-        await self.poll(self.start + 4200 + 1810)             # 30 min passed: recap goes out
+        await self.poll(self.start + 4200 + 1810)             # 30 minutes must no longer end the evening
+        self.channel.send.assert_not_awaited()
+        await self.poll(self.start + 4200 + 7210)
         self.channel.send.assert_awaited_once()
         self.assertEqual(json.loads(reports.history("10")[0]["match_ids"]), ["a", "b"])
 
@@ -161,14 +165,14 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         await self.poll(self.start + 3600)
         self.assertEqual(reports.history("10"), [])           # an hour in with no game: keep waiting
         self.game("a", self.start + 5400)
-        await self.poll(self.start + 5400 + 1900)
+        await self.poll(self.start + 5400 + 7210)
         self.assertEqual(reports.history("10")[0]["outcome"], "completed")
 
-    async def test_existing_servers_switch_to_30_minutes_once(self):
-        db.set_setting("10", "reports:gap_v30", None)
-        db.set_setting("10", "reports:gap", "120")
+    async def test_existing_short_default_switches_to_two_hours_once(self):
+        db.set_setting("10", "reports:evening_gap_v1", None)
+        db.set_setting("10", "reports:gap", "30")
         await self.poll(self.start + 10)
-        self.assertEqual(reports.report_settings("10")["gap"], 30)
+        self.assertEqual(reports.report_settings("10")["gap"], 120)
         db.set_setting("10", "reports:gap", "60")           # an admin changes it later: respected
         await self.poll(self.start + 20)
         self.assertEqual(reports.report_settings("10")["gap"], 60)

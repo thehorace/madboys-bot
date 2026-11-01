@@ -104,14 +104,19 @@ def _squad_motm_wins(ea_name: str) -> list[int]:
 def _potm_wins(guild_id: str, ea_name: str) -> list[tuple[int, str]]:
     with connect() as conn:
         try:
-            rows = conn.execute("SELECT month, data, posted_at FROM monthly_awards WHERE guild_id=?", (guild_id,)).fetchall()
+            rows = conn.execute("SELECT club_id,month,data,posted_at FROM monthly_awards WHERE guild_id=?", (guild_id,)).fetchall()
         except Exception:   # awards table not created yet
             return []
     out = []
+    combined = {r['month'] for r in rows if r['club_id'] == 0}
+    seen = set()
     for r in rows:
+        if (r['month'] in combined and r['club_id'] != 0) or r['month'] in seen:
+            continue
         potm = (json.loads(r["data"]).get("potm") or {}).get("name", "")
         if potm.casefold() == ea_name.casefold():
             out.append((r["posted_at"] or 0, r["month"]))
+            seen.add(r['month'])
     return sorted(out)
 
 

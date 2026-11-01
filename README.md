@@ -267,11 +267,17 @@ badges. Nicknames need the bot to have **Manage Nicknames** and a role above the
 never lets a bot rename the server owner.
 
 **Monthly awards**: in the first week of each month (from 10:00 in the session timezone) the
-bot posts last month's awards card for each club that played 3+ games: Player of the Month
-(best average rating, +0.1 per squad MOTM vote won, minimum 30% of the club's games), top
+bot posts one combined awards card across all monitored clubs (3+ games in total): Player of the Month
+(rating weighted across individual games, +0.1 per squad MOTM vote won, minimum 30% of the squad's games), top
 scorer, top assists, squad MOTM king, most improved and ever-present. Player of the Month gets
 the gold **👑 Player of the Month** role (the bot creates it; needs **Manage Roles** and its own
 role above it) and the 👑 badge. **`/awards`** shows this month's race so far, or any past month.
+The combined award supersedes legacy per-club winners for that month's role and badge.
+The congratulations message and award card go to both **#general** and the configured **announcements** channel, with **one @everyone ping per destination** and a mention of the winner. If both settings resolve to the same channel, only one message is sent. Each successful delivery is remembered across restarts, so retries send only to missing destinations. The bot needs **Mention Everyone**, **Send Messages**, **Embed Links** and **Attach Files** in both channels.
+
+Authorized usage viewers can run **`/resendawards month:2026-10`** to resend the corrected combined award. If a prior delivery is incomplete, it retries only the missing channel; after both deliveries have completed, an explicit resend starts a fresh broadcast with new pings. It is limited to completed months and has a one-minute cooldown. `/awards` remains a normal lookup and never broadcasts or pings everyone.
+
+Session recaps default to **two hours after the last recorded activity**, keeping club switches and delayed EA results in one evening. Existing 30-minute defaults migrate once; later changes in the private settings panel are respected. For an already split night, authorized usage viewers can run **`/sessionmerge keep:34 source:35`**. It combines history and recalculates Player of the Day, updates existing recap/award messages where possible, and retains the original snapshots in an audit table. It sends no replacement personal DMs. Both completed sessions must belong to the same server and be within 12 hours; rerunning the command retries message edits without merging twice.
 
 **`/partners`** ranks the pairs who win most when they play together (5+ games together, or 3+
 while the club has few games saved); **`/partners player:`** shows one player's best partners.

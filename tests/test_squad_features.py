@@ -303,7 +303,7 @@ class AwardsTests(Base):
 
 
 class AwardsRoleTests(Base):
-    async def test_one_club_failing_still_gives_the_other_club_its_role(self):
+    async def test_combined_post_retries_and_assigns_one_winner(self):
         from cogs.awards import AwardsCog, ROLE_NAME
         import discord
         for club in (CLUB_ID, 754785):
@@ -317,7 +317,7 @@ class AwardsRoleTests(Base):
 
         async def send(**kw):
             calls["n"] += 1
-            if calls["n"] == 2:
+            if calls["n"] == 1:
                 raise discord.HTTPException(SimpleNamespace(status=500, reason="x"), "boom")
             return SimpleNamespace(id=calls["n"])
         channel = SimpleNamespace(send=AsyncMock(side_effect=send))
@@ -335,14 +335,12 @@ class AwardsRoleTests(Base):
         cog.bot = SimpleNamespace(get_cog=lambda n: SimpleNamespace(channel_id_for=lambda g: 20) if n == "MatchdayCog" else None,
                                   get_channel=lambda cid: channel)
         with patch("cogs.awards._tz", return_value=SYD), patch("cogs.awards.report_health", AsyncMock()):
-            await cog.post_due(guild, datetime(2026, 11, 1, 10, tzinfo=SYD))    # 2nd club's post fails
-            first = [m for m in (ali, gra) if m.add_roles.await_count]
-            self.assertEqual(len(first), 1)                                     # the posted club's winner got it
-            role.members = first
-            first[0].roles = [role]                                             # Discord now shows the role
-            await cog.post_due(guild, datetime(2026, 11, 1, 11, tzinfo=SYD))    # retry posts the other club
+            self.assertEqual(await cog.post_due(guild, datetime(2026, 11, 1, 10, tzinfo=SYD)),0)
+            ali.add_roles.assert_not_awaited()
+            gra.add_roles.assert_not_awaited()
+            self.assertEqual(await cog.post_due(guild, datetime(2026, 11, 1, 11, tzinfo=SYD)),1)
         ali.add_roles.assert_awaited_once()
-        gra.add_roles.assert_awaited_once()
+        gra.add_roles.assert_not_awaited()
         ali.remove_roles.assert_not_awaited()                                   # both clubs' winners keep it
         gra.remove_roles.assert_not_awaited()
 

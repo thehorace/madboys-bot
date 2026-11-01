@@ -14,6 +14,8 @@ START = 1_800_000_000
 class OctoberReviewTests(Base):
     def setUp(self):
         super().setUp()
+        db.set_setting('10','reports:gap','30')
+        db.set_setting('10','reports:evening_gap_v1','1')
         db.set_setting('10','reports:since',str(START-100))
         db.set_setting('10','reports:gap_v30','1')
         db.set_setting('10','reports:dms','0')

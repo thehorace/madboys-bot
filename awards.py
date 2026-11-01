@@ -1,5 +1,5 @@
 """
-Monthly awards, per club, from the games the bot saved that month:
+Monthly awards from saved games, supporting a single club or a combined squad scope:
 
   👑 Player of the Month  best average rating (+0.1 per squad MOTM vote won), min games played
   ⚽ Top scorer / 🅰️ Top assister
@@ -23,6 +23,7 @@ from db import connect
 from fonts import font
 
 MIN_CLUB_GAMES = 3
+COMBINED_ID = 0  # separate namespace; existing per-club award records remain intact
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS monthly_awards (
     guild_id   TEXT NOT NULL,
@@ -52,19 +53,23 @@ def previous_month(year: int, month: int) -> tuple[int, int]:
 
 
 def _player_rows(cid: int, start: int, end: int) -> dict[str, dict]:
+    ids = [cid] if isinstance(cid, int) else list(cid)
+    marks = ','.join('?' for _ in ids)
     with connect() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT MIN(mp.name) AS name, COUNT(*) AS games, SUM(mp.goals) AS goals, SUM(mp.assists) AS assists,
                    AVG(mp.rating) AS rating
             FROM match_players mp JOIN matches m ON m.club_id = mp.club_id AND m.match_id = mp.match_id
-            WHERE mp.club_id = ? AND m.ts >= ? AND m.ts < ? GROUP BY LOWER(mp.name)""", (cid, start, end)).fetchall()
+            WHERE mp.club_id IN ({marks}) AND m.ts >= ? AND m.ts < ? GROUP BY LOWER(mp.name)""", (*ids, start, end)).fetchall()
     return {r["name"].casefold(): dict(r) for r in rows}
 
 
 def _squad_motm(cid: int, start: int, end: int) -> dict[str, int]:
+    ids = [cid] if isinstance(cid, int) else list(cid)
+    marks = ','.join('?' for _ in ids)
     with connect() as conn:
-        rows = conn.execute("SELECT winners FROM motm_polls WHERE closed=1 AND club_id=? AND closes_at>=? AND closes_at<?",
-                            (cid, start, end)).fetchall()
+        rows = conn.execute(f"SELECT winners FROM motm_polls WHERE closed=1 AND club_id IN ({marks}) AND closes_at>=? AND closes_at<?",
+                            (*ids, start, end)).fetchall()
     wins: dict[str, int] = {}
     for r in rows:
         for w in json.loads(r["winners"] or "[]"):
@@ -75,10 +80,14 @@ def _squad_motm(cid: int, start: int, end: int) -> dict[str, int]:
 def compute(cid: int, year: int, month: int, tz) -> Optional[dict]:
     """The month's awards for one club, or None if it played fewer than MIN_CLUB_GAMES games."""
     start, end = month_bounds(year, month, tz)
+    ids = [cid] if isinstance(cid, int) else list(cid)
+    if not ids:
+        return None
+    marks = ','.join('?' for _ in ids)
     with connect() as conn:
-        rec = conn.execute("""SELECT COUNT(*) AS games, SUM(result='W') AS w, SUM(result='D') AS d,
+        rec = conn.execute(f"""SELECT COUNT(*) AS games, SUM(result='W') AS w, SUM(result='D') AS d,
                                      SUM(result='L') AS l, SUM(our_goals) AS gf, SUM(opp_goals) AS ga
-                              FROM matches WHERE club_id=? AND ts>=? AND ts<?""", (cid, start, end)).fetchone()
+                              FROM matches WHERE club_id IN ({marks}) AND ts>=? AND ts<?""", (*ids, start, end)).fetchone()
     if not rec or rec["games"] < MIN_CLUB_GAMES:
         return None
     players = _player_rows(cid, start, end)
@@ -124,20 +133,42 @@ def compute(cid: int, year: int, month: int, tz) -> Optional[dict]:
     return out
 
 
+def compute_combined(year, month, tz):
+    clubs = award_clubs()
+    result = compute(tuple(c['club_id'] for c in clubs), year, month, tz)
+    if result:
+        result.update(scope='combined', club_ids=[c['club_id'] for c in clubs], club_names=[c['name'] for c in clubs])
+    return result
+
+
+def award_clubs():
+    """Disabling live tracking must not erase a club's historical monthly games."""
+    with connect() as conn:
+        return [dict(r) for r in conn.execute('SELECT club_id,name FROM monitored_clubs ORDER BY club_id')]
+
+
 def months_with_games(cid: int, tz, limit: int = 24) -> list[str]:
     """Past months (newest first, not counting this one) where this club played enough games for awards."""
     from collections import Counter
+    if cid == COMBINED_ID:
+        ids = [c['club_id'] for c in award_clubs()]
+    else:
+        ids = [cid]
+    if not ids:
+        return []
     with connect() as conn:
-        stamps = [r[0] for r in conn.execute("SELECT ts FROM matches WHERE club_id=?", (cid,))]
+        stamps = [r[0] for r in conn.execute(f"SELECT ts FROM matches WHERE club_id IN ({','.join('?' for _ in ids)})", ids)]
     now = datetime.now(tz)
     this = f"{now.year:04d}-{now.month:02d}"
     counts = Counter(datetime.fromtimestamp(t, tz).strftime("%Y-%m") for t in stamps if t)
     return sorted((m for m, n in counts.items() if n >= MIN_CLUB_GAMES and m != this), reverse=True)[:limit]
 
 
-def save(guild_id: str, cid: int, awards: dict, message_id: Optional[str], posted_at: int):
-    with connect() as conn:
-        conn.execute("""INSERT INTO monthly_awards (guild_id, club_id, month, data, message_id, posted_at)
+def save(guild_id: str, cid: int, awards: dict, message_id: Optional[str], posted_at: int, connection=None):
+    if connection is None:
+        with connect() as conn:
+            return save(guild_id,cid,awards,message_id,posted_at,connection=conn)
+    connection.execute("""INSERT INTO monthly_awards (guild_id, club_id, month, data, message_id, posted_at)
                         VALUES (?,?,?,?,?,?) ON CONFLICT(guild_id, club_id, month) DO UPDATE SET
                         data=excluded.data, message_id=excluded.message_id, posted_at=excluded.posted_at""",
                      (guild_id, cid, awards["month"], json.dumps(awards), message_id, posted_at))

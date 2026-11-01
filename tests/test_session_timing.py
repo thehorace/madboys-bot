@@ -21,6 +21,8 @@ class SessionTimingTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         db.init_all()
+        db.set_setting('10','reports:gap','30')
+        db.set_setting('10','reports:evening_gap_v1','1')
         db.set_setting("10", "reports:since", str(S - 100))
         db.set_setting("10", "reports:gap_v30", "1")
         with db.connect() as conn:
@@ -107,6 +109,8 @@ class TonightEndToEndTests(unittest.IsolatedAsyncioTestCase):
         p.start()
         self.addCleanup(p.stop)
         db.init_all()
+        db.set_setting('10','reports:gap','30')
+        db.set_setting('10','reports:evening_gap_v1','1')
         from unittest.mock import AsyncMock
         from cogs.link import set_link
         db.set_setting("10", "reports:since", str(S - 86400))

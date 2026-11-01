@@ -1,9 +1,8 @@
 """
 Monthly awards on Discord.
 
-  - In the first week of each month (from 10:00 in the session timezone), last month's
-    awards card is posted for every club that played enough games, in the announcements
-    channel. Each club/month is posted once, even across restarts.
+  - In the first week of each month, one combined awards card covers all monitored
+    clubs. Player totals and ratings are computed from individual match rows.
   - Player of the Month gets the gold "👑 Player of the Month" role (taken off last month's
     winners) and the 👑 badge on their nickname.
   - /awards shows this month so far, or any past month (e.g. 2026-10).
@@ -12,6 +11,7 @@ The role needs the bot to have Manage Roles; the bot creates the role if it's mi
 """
 import asyncio
 import io
+import json
 import logging
 import re
 import time
@@ -28,6 +28,7 @@ from cogs.link import find_discord_id_by_ea_name
 from cogs.operations import report_health
 from cogs.stats import send_screen
 from config import CLUB_COLOUR, GUILD_ID
+from db import connect, get_setting, set_setting
 from utils import survive
 
 log = logging.getLogger("madboys-bot.awards")
@@ -80,13 +81,15 @@ async def build_awards(guild_id: str, month: Optional[str] = None):
         year, mon = now.year, now.month
     if (year, mon) > (now.year, now.month):
         return "That month hasn't happened yet."
-    a = A.compute(club_id(), year, mon, tz)
+    clubs = A.award_clubs()
+    title = ' & '.join(c['name'] for c in clubs)
+    a = await asyncio.to_thread(A.compute_combined, year, mon, tz)
     if not a:
-        return (f"{club_name()} needs at least {A.MIN_CLUB_GAMES} saved games in "
+        return (f"The squad needs at least {A.MIN_CLUB_GAMES} saved games in "
                 f"{A.month_label(f'{year:04d}-{mon:02d}')} for awards.")
     so_far = (year, mon) == (now.year, now.month)
-    png = await asyncio.to_thread(A.render_card, club_name(), a)   # ~0.1s of drawing: keep it off the main loop
-    return awards_embed(guild_id, club_name(), a, so_far), png
+    png = await asyncio.to_thread(A.render_card, title, a)
+    return awards_embed(guild_id, title, a, so_far), png
 
 
 class AwardsCog(commands.Cog):
@@ -115,57 +118,140 @@ class AwardsCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def post_due(self, guild: discord.Guild, now: Optional[datetime] = None) -> int:
-        """Post last month's awards for any club that hasn't had them yet. Returns cards posted."""
+        """Post one combined monthly card, even when legacy per-club cards already exist."""
         gid = str(guild.id)
         tz = _tz(gid)
         now = (now or datetime.now(tz)).astimezone(tz)
         if now.day > CATCH_UP_DAYS or (now.day == 1 and now.hour < POST_HOUR):
             return 0
         year, month = A.previous_month(now.year, now.month)
+        return await self.broadcast(guild, year, month)
+
+    async def broadcast(self, guild, year, month, force=False):
+        locks = getattr(self, '_broadcast_locks', None)
+        if locks is None:
+            self._broadcast_locks = locks = {}
+        async with locks.setdefault(str(guild.id), asyncio.Lock()):
+            return await self._broadcast(guild, year, month, force)
+
+    async def _broadcast(self, guild, year, month, force):
+        from announce import refresh_named, announce_channel_id
+        gid = str(guild.id)
+        tz = _tz(gid)
         label = f"{year:04d}-{month:02d}"
         tracker = self.bot.get_cog("MatchdayCog")
         cid = tracker.channel_id_for(gid) if tracker else None
-        channel = (self.bot.get_channel(int(cid)) or await self.bot.fetch_channel(int(cid))) if cid else None
+        problems = []
+        channels = {}
+        if hasattr(guild, 'text_channels'):
+            refresh_named(guild)
+            general = [c for c in guild.text_channels if c.name.lower() == 'general']
+            if len(general) == 1:
+                channels[str(general[0].id)] = general[0]
+            else:
+                problems.append('There must be one unambiguous #general channel.')
+            cid = announce_channel_id(gid, cid)
+        try:
+            channel = (self.bot.get_channel(int(cid)) or await self.bot.fetch_channel(int(cid))) if cid else None
+            if channel:
+                channels[str(cid)] = channel
+            else:
+                problems.append('Choose an announcements channel with /announce set.')
+        except (discord.HTTPException, ValueError):
+            problems.append('The announcements channel is unavailable.')
+        round_key = f'awards:broadcast:{label}:round'
+        generation = int(get_setting(gid, round_key) or 0)
+        def delivered(channel_id):
+            return get_setting(gid, f'awards:broadcast:{label}:{generation}:{channel_id}') is not None
+        if force and channels and not problems and all(delivered(c) for c in channels):
+            generation += 1
+            set_setting(gid, round_key, str(generation))
+        pending = [(cid,channel) for cid,channel in channels.items() if not delivered(cid)]
+        if not pending:
+            if problems:
+                await report_health(self.bot,gid,'Monthly awards',' '.join(problems))
+            return 0
+        previous_winners = self.month_winners(gid, label)
+        snapshot_key = f'awards:broadcast:{label}:{generation}:snapshot'
+        saved_snapshot = get_setting(gid,snapshot_key)
+        a = json.loads(saved_snapshot) if saved_snapshot else await asyncio.to_thread(A.compute_combined, year, month, tz)
+        if not a:
+            A.save(gid, A.COMBINED_ID, {'month':label,'skipped':True}, None, int(time.time()))
+            return 0
+        if not saved_snapshot:
+            set_setting(gid,snapshot_key,json.dumps(a))
+        title = ' & '.join(a['club_names'])
+        png = await asyncio.to_thread(A.render_card, title, a)
+        winner = a.get('potm')
+        did = find_discord_id_by_ea_name(gid,winner['name']) if winner else None
+        who = f'<@{did}>' if did else f"**{discord.utils.escape_markdown(winner['name'])}**" if winner else None
+        content = f'@everyone\n👑 Congratulations {who} — **Player of the Month for {A.month_label(label)}!**' if winner else f'🏆 {A.month_label(label)} squad awards'
+        content += f'\nCombined performances across **{title}**.'
+        if winner:
+            content += f"\n{winner['games']} matches · {winner['rating']:.2f} average rating · {winner['goals']} goals · {winner['assists']} assists. Well played! 🎉"
+        if previous_winners:
+            content += '\nThis combined result supersedes the earlier awards for this month.'
         posted = 0
-        for club in monitored_clubs():
-            if A.already_posted(gid, club["club_id"], label):
-                continue
-            a = A.compute(club["club_id"], year, month, tz)
-            if not a:   # too few games: remember so we don't keep checking
-                A.save(gid, club["club_id"], {"month": label, "skipped": True}, None, int(time.time()))
-                continue
-            if channel is None:
-                await report_health(self.bot, gid, "Monthly awards", "No announcements/results channel to post the awards in.")
-                break
-            try:   # one club failing must not stop the other club's card (or the roles below)
-                png = await asyncio.to_thread(A.render_card, club["name"], a)
-                msg = await channel.send(content=f"🏆 **{club['name']} — {A.month_label(label)} awards!**",
-                                         embed=awards_embed(gid, club["name"], a),
-                                         file=discord.File(io.BytesIO(png), "awards.png"),
-                                         allowed_mentions=discord.AllowedMentions.none())
+        for cid, channel in pending:
+            if winner and hasattr(channel,'permissions_for') and getattr(guild,'me',None):
+                perms = channel.permissions_for(guild.me)
+                if not perms.mention_everyone:
+                    problems.append(f'Missing Mention Everyone permission in <#{cid}>.')
+                    continue
+            try:
+                msg = await channel.send(content=content,embed=awards_embed(gid,title,a),
+                    file=discord.File(io.BytesIO(png),'awards.png'),
+                    allowed_mentions=discord.AllowedMentions(everyone=bool(winner),users=[discord.Object(id=int(did))] if did else False,roles=False,replied_user=False))
             except discord.HTTPException:
-                log.exception("Couldn't post %s's monthly awards", club["name"])
-                await report_health(self.bot, gid, "Monthly awards", "Couldn't post a monthly awards card. Check channel permissions.")
+                log.exception('Monthly awards delivery failed for channel %s',cid)
+                problems.append(f'Could not send the awards to <#{cid}>; check channel permissions.')
                 continue
-            A.save(gid, club["club_id"], a, str(msg.id), int(time.time()))
+            with connect() as conn:
+                conn.execute('INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)',
+                             (gid,f'awards:broadcast:{label}:{generation}:{cid}',str(msg.id)))
+                A.save(gid,A.COMBINED_ID,a,str(msg.id),int(time.time()),connection=conn)
             posted += 1
         if posted:
-            # Every club's winner for this month (from what's saved, so a card posted on an earlier
-            # run still counts) gets the role; anyone else loses it.
-            winners = self.month_winners(gid, label)
-            await self.update_role(guild, winners)
-            badges = self.bot.get_cog("BadgesCog")
-            for did in winners:
-                if badges:
-                    await badges.refresh_member(guild, did)
-            await report_health(self.bot, gid, "Monthly awards")
+            winners = self.month_winners(gid,label)
+            await self.update_role(guild,winners)
+            badges = self.bot.get_cog('BadgesCog')
+            if badges:
+                for did in set(previous_winners+winners):
+                    await badges.refresh_member(guild,did)
+        await report_health(self.bot,gid,'Monthly awards',' '.join(problems) if problems else None)
         return posted
+
+    @app_commands.command(name='resendawards',description='Private: resend combined monthly congratulations with @everyone to general and announcements')
+    @app_commands.guild_only()
+    @app_commands.checks.cooldown(1,60,key=lambda i:i.guild_id)
+    async def resendawards(self,interaction:discord.Interaction,month:Optional[str]=None):
+        from cogs.usage import can_view
+        if not can_view(interaction.user,interaction.guild):
+            await interaction.response.send_message('This broadcast tool is private.',ephemeral=True)
+            return
+        now = datetime.now(_tz(str(interaction.guild_id)))
+        if month is None:
+            year,mon = A.previous_month(now.year,now.month)
+        else:
+            match = re.fullmatch(r'(\d{4})-(\d{1,2})',month.strip())
+            if not match or not 1<=int(match[1])<=9998 or not 1<=int(match[2])<=12:
+                await interaction.response.send_message('Use a completed month such as 2026-10.',ephemeral=True)
+                return
+            year,mon = int(match[1]),int(match[2])
+        if (year,mon)>=(now.year,now.month):
+            await interaction.response.send_message('Choose a completed month.',ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True,thinking=True)
+        posted = await self.broadcast(interaction.guild,year,mon,force=True)
+        await interaction.followup.send(f'Sent monthly awards to {posted} channel(s). Each successful channel gets one @everyone ping. If a channel is missing, check Bot status for permissions or channel setup, then retry; successful channels will not be repeated while that delivery is incomplete.',ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
     def month_winners(self, gid: str, label: str) -> list[str]:
         import json
         from db import connect
         with connect() as conn:
-            rows = conn.execute("SELECT data FROM monthly_awards WHERE guild_id=? AND month=?", (gid, label)).fetchall()
+            rows = conn.execute("SELECT club_id,data FROM monthly_awards WHERE guild_id=? AND month=?", (gid, label)).fetchall()
+        combined = [r for r in rows if r['club_id'] == A.COMBINED_ID]
+        rows = combined or rows
         out = []
         for r in rows:
             potm = json.loads(r["data"]).get("potm")

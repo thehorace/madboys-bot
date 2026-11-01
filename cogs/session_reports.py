@@ -19,7 +19,7 @@ from clubs import monitored_clubs, match_key, match_club, raw_match_key, club_fo
 from match_data import VOID_SCHEMA
 
 log = logging.getLogger("madboys-bot.session_reports")
-DEFAULT_GAP = 30       # a session ends this many minutes after its last game
+DEFAULT_GAP = 120      # keep one evening together through queues, club switches and EA delays
 START_WINDOW = 120     # ...but the first game may come up to this long after kick-off
 MATCH_SECONDS = 15 * 60   # EA times a game by when it ENDS: allow for the next game being played
 VOICE_HOLD = 2 * 3600     # squad still together in voice: keep the session open (up to this long)
@@ -39,7 +39,7 @@ def report_settings(gid):
 
 def history(gid, session_id=None, offset=0):
     with connect() as conn:
-        query = "SELECT h.*,s.starts_at,s.note FROM session_history h JOIN sessions s ON s.id=h.session_id WHERE h.guild_id=?"
+        query = "SELECT h.*,s.starts_at,s.note FROM session_history h JOIN sessions s ON s.id=h.session_id WHERE h.guild_id=? AND h.outcome!='merged'"
         args = [gid]
         if session_id is not None:
             query += " AND h.session_id=?"
@@ -472,12 +472,69 @@ class SessionReportsCog(commands.Cog):
         import potd
         potd.init_potd()
 
+    @app_commands.command(name='sessionmerge',description='Private: merge two completed sessions from the same evening and update their posts')
+    @app_commands.guild_only()
+    async def sessionmerge(self,interaction:discord.Interaction,keep:int,source:int):
+        from cogs.usage import can_view
+        if not can_view(interaction.user,interaction.guild):
+            await interaction.response.send_message('This repair tool is private.',ephemeral=True)
+            return
+        import asyncio
+        import potd
+        from session_repair import merge_sessions
+        from cogs.sessions import _tz
+        await interaction.response.defer(ephemeral=True,thinking=True)
+        try:
+            repair=await asyncio.to_thread(merge_sessions,str(interaction.guild_id),keep,source)
+        except ValueError as exc:
+            await interaction.followup.send(str(exc),ephemeral=True)
+            return
+        gid=str(interaction.guild_id)
+        cid=report_settings(gid)['channel']
+        choices=[c for c in interaction.guild.text_channels if c.name.lower()=='general'] if not cid else []
+        channel=interaction.guild.get_channel(int(cid)) if cid else choices[0] if len(choices)==1 else None
+        failed=[]
+        async def edit(mid,**kwargs):
+            if not mid or mid=='suppressed':
+                return
+            try:
+                if channel is None:
+                    raise RuntimeError('Recap channel unavailable')
+                message=await channel.fetch_message(int(mid))
+                await message.edit(allowed_mentions=discord.AllowedMentions.none(),**kwargs)
+            except (discord.HTTPException,ValueError,RuntimeError):
+                failed.append(str(mid))
+        await edit(repair['target']['message_id'],embed=recap_embed(repair['target']),view=SummaryView())
+        await edit(repair['source']['message_id'],content=f'This was part of session #{keep}. Its results are now included in that recap.',embed=None,view=None,attachments=[])
+        result=repair['result']
+        for old in repair['old_potd']:
+            if old['message_id']==repair['award_message_id'] and result:
+                winner=result['winner']
+                total=potd.count_for(gid,winner['name'])
+                png=await asyncio.to_thread(potd.render_card,result,_tz(gid),total)
+                embed=discord.Embed(description=f"🌟 **{display_name(winner['name'])}** is Player of the Day for the full session — {winner['games']} games, {winner['rating']:.1f} average rating.",colour=CLUB_COLOUR)
+                embed.set_image(url='attachment://player-of-the-day.png')
+                await edit(old['message_id'],embed=embed,content=None,attachments=[discord.File(io.BytesIO(png),'player-of-the-day.png')])
+            else:
+                await edit(old['message_id'],content=f'This split-session award has been superseded by the full session #{keep}.',embed=None,view=None,attachments=[])
+        badges=self.bot.get_cog('BadgesCog')
+        if badges:
+            ids={p['discord_id'] for p in repair['old_potd'] if p['discord_id']}
+            ids.update(d for p in json.loads(repair['target']['players']) for d in p.get('discord_ids',[]))
+            for did in ids:
+                await badges.refresh_member(interaction.guild,did)
+        text=f'Merged session #{source} into #{keep}. History and Player of the Day now use the full evening. No new summary DMs were sent.'
+        if failed:
+            text+=' Some existing posts could not be edited. Check the recap channel and message permissions, then run this command again.'
+        await interaction.followup.send(text,ephemeral=True)
+
     async def after_poll(self, guild):
         gid = str(guild.id)
         now = int(time.time())
-        if get_setting(gid, "reports:gap_v30") is None:   # one-time switch to "end 30 min after the last game"
-            set_setting(gid, "reports:gap", str(DEFAULT_GAP))
-            set_setting(gid, "reports:gap_v30", "1")
+        if get_setting(gid, 'reports:evening_gap_v1') is None:
+            if get_setting(gid, 'reports:gap') in (None, '30'):
+                set_setting(gid, 'reports:gap', str(DEFAULT_GAP))
+            set_setting(gid, 'reports:evening_gap_v1', '1')
         settings = report_settings(gid)   # read once per check
         add_followup_sessions(gid, now)
         archive_sessions(gid, now, settings, in_voice=squad_in_voice(guild))
