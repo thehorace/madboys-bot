@@ -349,6 +349,10 @@ The named players are curated historical style inspirations, with official club/
 
 To view someone else's twin, use `/playertwin player:EA-name`, **Find player** (full or partial EA name), the saved-player dropdown, or the linked Discord-member picker. Search and autocomplete cover both clubs' saved players, including older players outside the current live roster; ambiguous searches ask for a more specific name. Every successful lookup opens a private menu with **Share**, which posts the displayed player's card to an available channel using the existing channel-permission checks.
 
+Primary twins are unique across the shared MADBOYS FC / GRAYSBOYS saved squad. All EA identities with enough usable games are considered together: the strongest statistical claims get first choice, then each player gets their closest available role match. Results are deterministic for the same data and do not depend on search order; new match data can change assignments. Other statistical alternatives are hidden to keep the assigned twin clear. If a role's pool is exhausted, the bot explains that more profiles are needed rather than duplicating a twin. Defence uses its own passing/tackling scales and weights, so lower raw action counts do not automatically imply the lowest-volume profile.
+
+`fauzan0410` has a **Kylian Mbappé** override by request, reserved while that EA identity has a usable sample. The embed and shared card use the standard Player Twin presentation without an override label. The recorded role and all EA statistics remain unchanged; the override still requires the normal minimum sample.
+
 The panel has two private, on-demand screens:
 
 - **Weekly Progress** (`/weeklyprogress [player]`) compares the last seven days with the previous seven days for the selected club. It starts with your linked player, or the club overview if you are not linked. Pick another player or club in the menu. Changes require at least three recorded matches in each period; rating changes also require three rated games per period. Goals and assists compare per match, so playing more games alone does not look like an improvement. Void games are excluded.

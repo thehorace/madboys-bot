@@ -62,7 +62,7 @@ class PlayerTwinTests(Base):
             for name,_,_,targets,_ in profiles:
                 with self.subTest(player=name):
                     stats={'goals':targets.get('goals',0)*1.5,'creation':targets.get('creation',0),
-                           'circulation':targets['circulation']*35,'defence':targets.get('defence',0)*5,
+                           'circulation':targets['circulation']*(25 if role=='DEF' else 35),'defence':targets.get('defence',0)*(2 if role=='DEF' else 5),
                            'saving':targets.get('saving',0)*6}
                     for i in range(5):
                         mid=self.game(ts(2026,10,3)+i,players=[(name,{'pos':role})])
@@ -76,8 +76,61 @@ class PlayerTwinTests(Base):
         self.appearances('midfielder',passes=40,attempts=43,tackles=4,name='Controller')
         self.appearances('defender',passes=10,attempts=15,tackles=5,name='Stopper')
         self.appearances('defender',assists=1,passes=28,attempts=32,tackles=2,name='Supplier')
-        for name,expected in [('Creator','David Beckham'),('Controller','Rodri'),('Stopper','Nemanja Vidić'),('Supplier','Trent Alexander-Arnold')]:
+        for name,expected in [('Creator','David Beckham'),('Controller','Rodri'),('Stopper','Nemanja Vidić'),('Supplier','Andy Robertson')]:
             self.assertEqual(T.analyse(name)['matches'][0][0],expected)
+
+    async def test_identical_defenders_receive_distinct_stable_twins(self):
+        for name in ['CB One','CB Two','CB Three','CB Four']:
+            self.appearances('defender',passes=8,attempts=12,tackles=1,name=name)
+        names=['CB One','CB Two','CB Three','CB Four']
+        first={n:T.analyse(n)['matches'][0][0] for n in names}
+        second={n:T.analyse(n)['matches'][0][0] for n in reversed(names)}
+        self.assertEqual(first,second)
+        self.assertEqual(len(set(first.values())),4)
+        self.assertLessEqual(list(first.values()).count('Harry Maguire'),1)
+        self.assertTrue(all(p in {p[0] for p in T.PROFILES['DEF']} for p in first.values()))
+        embed=T.build_embed(T.analyse('CB One'))
+        self.assertTrue(any(f.name=='Unique squad twin' for f in embed.fields))
+
+    async def test_fauz_mbappe_is_reserved_with_standard_presentation(self):
+        self.appearances('defender',passes=20,tackles=1,name='FAUZAN0410')
+        self.appearances('forward',goals=1,passes=14,assists=1,name='Attacker')
+        result=T.analyse('fauzan0410')
+        self.assertEqual(result['matches'][0][0],'Kylian Mbappé')
+        self.assertEqual(result['role'],'DEF')
+        self.assertEqual(result['stats']['goals'],0)
+        self.assertEqual(result['assignment'],'Unique squad twin')
+        self.assertNotEqual(T.analyse('Attacker')['matches'][0][0],'Kylian Mbappé')
+        embed=T.build_embed(result)
+        self.assertIn('your squad style twin',embed.description)
+        self.assertNotIn('club pick',str(embed.to_dict()).lower())
+        self.assertNotIn('by request',str(embed.to_dict()).lower())
+        self.assertTrue(T.render_card(result).startswith(b'\x89PNG'))
+
+    async def test_same_ea_identity_across_clubs_uses_one_assignment(self):
+        secondary=next(c['club_id'] for c in monitored_clubs() if c['club_id']!=CLUB_ID)
+        self.appearances('defender',passes=10,tackles=1,name='Shared')
+        self.appearances('defender',passes=10,tackles=1,name='shared',club=secondary,offset=10000)
+        self.appearances('defender',passes=10,tackles=1,name='Other')
+        result=T.analyse('Shared')
+        self.assertEqual(result['games'],10)
+        self.assertEqual(result['matches'][0][0],T.analyse('SHARED')['matches'][0][0])
+        self.assertNotEqual(result['matches'][0][0],T.analyse('Other')['matches'][0][0])
+
+    async def test_exhausted_role_pool_does_not_silently_duplicate_twins(self):
+        for i in range(len(T.PROFILES['GK'])+1):
+            self.appearances('goalkeeper',saves=2,name=f'Keeper {i}')
+        results=[T.analyse(f'Keeper {i}') for i in range(len(T.PROFILES['GK'])+1)]
+        assigned=[r['matches'][0][0] for r in results if isinstance(r,dict)]
+        self.assertEqual(len(assigned),len(set(assigned)))
+        self.assertEqual(len(assigned),len(T.PROFILES['GK']))
+        self.assertTrue(any(isinstance(r,str) and 'already assigned' in r for r in results))
+
+    async def test_defence_weights_do_not_treat_one_tackle_as_a_poor_spell(self):
+        self.appearances('defender',passes=20,attempts=22,tackles=1)
+        result=T.analyse('Ali')
+        self.assertNotEqual(result['matches'][0][0],'Harry Maguire')
+        self.assertIn('Solid spell',result['form'][0])
 
     async def test_keeper_only_matches_keeper_profiles(self):
         self.appearances('goalkeeper',saves=8,passes=3,attempts=4,name='Saves')

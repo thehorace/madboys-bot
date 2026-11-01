@@ -79,27 +79,7 @@ def resolve_name(query):
     return (exact or names[0],[]) if exact or len(names)==1 else (None,names)
 
 
-def analyse(name):
-    if not name:
-        return 'Link your EA player through Setup first, or choose a player with `/playertwin`.'
-    # Registry includes disabled clubs: pausing their tracker must not erase history.
-    with connect() as conn:
-        ids = [r[0] for r in conn.execute('SELECT club_id FROM monitored_clubs')]
-        if not ids:
-            return 'No club history is configured yet.'
-        rows = [dict(r) for r in conn.execute(
-            f'SELECT p.*,m.ts FROM match_players p JOIN matches m ON m.club_id=p.club_id AND m.match_id=p.match_id '
-            f'WHERE p.name=? COLLATE NOCASE AND p.club_id IN ({",".join("?" for _ in ids)}) '
-            'AND p.persona_id=(SELECT MIN(q.persona_id) FROM match_players q WHERE q.club_id=p.club_id '
-            'AND q.match_id=p.match_id AND q.name=? COLLATE NOCASE) '
-            'ORDER BY m.ts DESC,m.club_id,m.match_id,p.persona_id LIMIT ?',(name,*ids,name,WINDOW))]
-    # One appearance per club+match, even if duplicate persona rows use the same name.
-    unique = {}
-    for row in rows:
-        unique.setdefault((row['club_id'],row['match_id']),row)
-        if len(unique)==WINDOW:
-            break
-    recent = list(unique.values())
+def _analyse_sample(name, recent):
     if not recent:
         return f'No saved matches for **{discord.utils.escape_markdown(name[:80])}** yet.'
     counts = Counter(ROLES.get((r['pos'] or '').lower()) for r in recent)
@@ -127,6 +107,11 @@ def analyse(name):
     if stats['precision'] is not None and total('pass_attempts')>=50 and stats['precision']<.65:
         form.append(f"Passing has been patchy · {stats['precision']:.0%} accuracy")
     scales = {'goals':1.5,'creation':1,'circulation':35,'defence':5,'saving':6}
+    if role == 'DEF':
+        scales.update(circulation=25, defence=2)
+    weights = dict(WEIGHTS)
+    if role == 'DEF':
+        weights.update(goals=.5, creation=1, circulation=2, defence=3, precision=1)
     features = {key:min(1,value/scales[key]) if key in scales else max(0,min(1,(value-.6)/.35))
                 for key,value in stats.items() if value is not None}
     profiles = PROFILES[role]
@@ -135,32 +120,106 @@ def analyse(name):
         return 'I have the appearances, but not enough recorded actions to identify a playing style yet.'
     def distance(profile):
         targets = profile[3]
-        keys = targets.keys() & features.keys()
-        return sum(WEIGHTS[k]*(features[k]-targets[k])**2 for k in keys)/sum(WEIGHTS[k] for k in keys)
+        keys = sorted(targets.keys() & features.keys())
+        return sum(weights[k]*(features[k]-targets[k])**2 for k in keys)/sum(weights[k] for k in keys)
     ranked = sorted(profiles,key=distance)
     evidence = []
     units = {'goals':'goals per game','creation':'assists per game','circulation':'completed passes per game',
              'defence':'successful tackles per game','saving':'saves per game'}
-    for key in sorted(relevant-{'precision'},key=lambda k:features.get(k,0)*WEIGHTS[k],reverse=True):
+    for key in sorted(relevant-{'precision'},key=lambda k:(-features.get(k,0)*weights[k], k)):
         if stats[key]>0:
             evidence.append(f"{stats[key]:.2f} {units[key]}")
     if stats['precision'] is not None:
         evidence.append(f"{stats['precision']:.0%} passing accuracy")
     return {'name':recent[0]['name'],'role':role,'games':n,'recent_games':len(recent),'stats':stats,
-            'matches':ranked,'evidence':evidence[:3],'form':form[:2],
+            'matches':ranked,'scores':{p[0]:distance(p) for p in ranked},'evidence':evidence[:3],'form':form[:2],
             'confidence':'Early read' if n<10 else 'Taking shape' if n<15 else 'More settled sample'}
+
+
+# Explicit club joke, not an inferred match or a change to recorded EA stats.
+CLUB_PICKS = {'fauzan0410': 'Kylian Mbappé'}
+
+
+def _samples():
+    """One snapshot for the entire shared squad, capped per EA identity.
+
+    Read both clubs together so the same person never reserves two twins.
+    Duplicate persona rows are removed before applying the appearance limit.
+    """
+    with connect() as conn:
+        rows = conn.execute('''
+            SELECT * FROM (
+                SELECT p.*, m.ts, ROW_NUMBER() OVER (
+                    PARTITION BY LOWER(p.name)
+                    ORDER BY m.ts DESC, p.club_id, p.match_id, p.persona_id
+                ) AS recent_index
+                FROM match_players p
+                JOIN monitored_clubs c ON c.club_id=p.club_id
+                JOIN matches m ON m.club_id=p.club_id AND m.match_id=p.match_id
+                WHERE p.persona_id=(SELECT MIN(q.persona_id) FROM match_players q
+                    WHERE q.club_id=p.club_id AND q.match_id=p.match_id
+                    AND q.name=p.name COLLATE NOCASE)
+            ) WHERE recent_index<=? ORDER BY LOWER(name), recent_index
+        ''', (WINDOW,)).fetchall()
+    samples = {}
+    for row in rows:
+        samples.setdefault(row['name'].casefold(), []).append(dict(row))
+    return samples
+
+
+def analyse(name):
+    if not name:
+        return 'Link your EA player through Setup first, or choose a player with `/playertwin`.'
+    samples = _samples()
+    key = name.casefold()
+    result = _analyse_sample(name, samples.get(key, []))
+    if isinstance(result, str):
+        return result
+    results = {n: _analyse_sample(rows[0]['name'], rows) for n, rows in samples.items()}
+    results = {n: r for n, r in results.items() if isinstance(r, dict)}
+    used, assignments = set(), {}
+    for n, twin in CLUB_PICKS.items():
+        if n in results:
+            profile = next(p for group in PROFILES.values() for p in group if p[0] == twin)
+            used.add(twin)
+            assignments[n] = profile
+    # Give the strongest statistical claims first choice. Ties use sample size
+    # and EA name, so lookup order, process restarts and SQL order cannot decide.
+    def priority(item):
+        n, r = item
+        scores = sorted(r['scores'].values())
+        return (-round(scores[1]-scores[0], 12), -r['games'], n)
+    for n, r in sorted(results.items(), key=priority):
+        if n in assignments:
+            continue
+        available = next((p for p in r['matches'] if p[0] not in used), None)
+        if available:
+            assignments[n] = available
+            used.add(available[0])
+    selected = assignments.get(key)
+    if selected is None:
+        return (f"All {len(PROFILES[result['role']])} {LABELS[result['role']].lower()} twins are already "
+                'assigned in the shared squad. More profiles are needed to give you a unique twin.')
+    result['matches'] = [selected] + [p for p in result['matches'] if p[0] != selected[0]]
+    result['assignment'] = 'Unique squad twin'
+    result['reassigned'] = selected[0] != min(result['scores'], key=result['scores'].get)
+    return result
 
 
 def build_embed(result):
     best=result['matches'][0]
     name=discord.utils.escape_markdown(discord.utils.escape_mentions(result['name'][:80]))
+    intro = 'your squad style twin is' if result.get('assignment') else 'your closest style inspiration is'
     embed=discord.Embed(title='🪞 Your Player Twin',colour=CLUB_COLOUR,
-        description=f"**{name}**, your closest style inspiration is…\n\n**{best[0]}**\n*{best[1]}* · {best[2]}")
+        description=f"**{name}**, {intro}…\n\n**{best[0]}**\n*{best[1]}* · {best[2]}")
+    if result.get('assignment'):
+        explanation = 'One primary twin per EA player across both clubs. A fun style inspiration, not an ability rating.'
+        embed.add_field(name=result['assignment'], value=explanation, inline=False)
     embed.add_field(name='Your recorded signature',value='\n'.join(f'• {line}' for line in result['evidence']),inline=False)
     if result.get('form'):
         embed.add_field(name='Your current spell',value='\n'.join(result['form'])+'\nForm describes your saved games, not the real player’s ability.',inline=False)
     others=result['matches'][1:3]
-    if others:
+    if others and not result.get('assignment'):
         embed.add_field(name='Also gives shades of…',value='\n'.join(f'**{p[0]}** — {p[1].lower()}' for p in others),inline=False)
     embed.add_field(name='The sample',value=f"{result['games']} {LABELS[result['role']].lower()} games from your latest {result['recent_games']} appearances across the clubs. **{result['confidence']}**.",inline=False)
     embed.add_field(name='For fun, not a scouting verdict',value=f"Curated style archetypes, not real-player stat matching or an ability rating. Pace, dribbling and off-ball movement aren't assessed. [Style inspiration]({best[4]})",inline=False)
@@ -187,7 +246,8 @@ def render_card(result):
         label,f=_fit(draw,result['form'][0],1100,20)
         draw.text((50,491),label,font=f,fill=gold)
     draw.text((50,526),f"{result['games']} games in role  /  {result['confidence']}",font=font(23),fill=(180,192,211))
-    draw.text((50,575),'Play style, not ability. A fun EA match-stat comparison.',font=font(21),fill=(180,192,211))
+    footer = 'Unique squad twin / Play style, not ability' if result.get('assignment') else 'Play style, not ability. A fun EA match-stat comparison.'
+    draw.text((50,575),footer,font=font(21),fill=(180,192,211))
     output=io.BytesIO()
     image.save(output,format='PNG')
     return output.getvalue()
