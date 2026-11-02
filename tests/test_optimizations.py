@@ -157,11 +157,15 @@ class SharePermissionTests(unittest.IsolatedAsyncioTestCase):
         from cogs.hub import StatsMenu
         menu = object.__new__(StatsMenu)
         menu.guild_id, menu.png, menu.embed = "10", None, discord.Embed(title="Stats")
-        target = SimpleNamespace(mention="#results", send=AsyncMock(), permissions_for=lambda _: target_access)
-        source = SimpleNamespace(permissions_for=lambda _: SimpleNamespace(send_messages=False))
+        bot_access=SimpleNamespace(view_channel=True,send_messages=True,embed_links=True,attach_files=True)
+        me=SimpleNamespace(id=999)
+        target = SimpleNamespace(mention="#results", send=AsyncMock(), permissions_for=lambda who: bot_access if who is me else target_access)
+        source = SimpleNamespace(permissions_for=lambda _: SimpleNamespace(view_channel=True,send_messages=False))
         menu.bot = SimpleNamespace(get_cog=lambda _: SimpleNamespace(channel_id_for=lambda _: 20), get_channel=lambda _: target)
-        interaction = SimpleNamespace(user=SimpleNamespace(mention="@Fauz"), channel=source, extras={},
+        guild=SimpleNamespace(id=10,me=me,text_channels=[])
+        interaction = SimpleNamespace(user=SimpleNamespace(id=42,mention="@Fauz"), guild=guild,channel=source, extras={},
             response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock()))
+        menu.user=interaction.user
         return menu, interaction, target
 
     async def test_share_cannot_write_into_hidden_or_read_only_destination(self):

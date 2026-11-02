@@ -165,6 +165,7 @@ class ShareChoiceTests(Base):
         set_setting("10", "announce:channel", "3")
         menu = object.__new__(StatsMenu)
         menu.guild_id, menu.png, menu.embed = "10", b"png", discord.Embed(title="Stats")
+        menu.user = user
         chans = {1: gameday, 2: general, 3: announcements}
         menu.bot = SimpleNamespace(get_cog=lambda _: None, get_channel=lambda cid: chans.get(cid))
         inter = SimpleNamespace(user=user, channel=gameday, guild=guild, extras={},
@@ -182,7 +183,7 @@ class ShareChoiceTests(Base):
         await menu._share(inter)
         view = inter.response.send_message.await_args.kwargs["view"]
         self.assertIsInstance(view, ShareChoice)
-        pick = SimpleNamespace(data={"values": ["3"]}, user=inter.user, extras={},
+        pick = SimpleNamespace(data={"values": ["3"]}, user=inter.user, guild=inter.guild, extras={},
                                response=SimpleNamespace(defer=AsyncMock()), edit_original_response=AsyncMock())
         with patch("cogs.hub.S.card_file", return_value=None):
             await view._pick(pick)
@@ -194,3 +195,34 @@ class ShareChoiceTests(Base):
         menu, inter, *_ = self.setup_share(allow, user_can_announce=False)
         targets, _ = menu._share_destinations(inter)
         self.assertNotIn("announcements", [t.name for t in targets])
+
+    async def test_share_rechecks_revoked_user_and_bot_permissions(self):
+        from cogs.hub import ShareChoice
+        allow=SimpleNamespace(view_channel=True,send_messages=True,embed_links=True,attach_files=True)
+        deny=SimpleNamespace(view_channel=True,send_messages=False,embed_links=True,attach_files=True)
+        menu,inter,_,_,target=self.setup_share(allow)
+        view=ShareChoice(menu,[target])
+        target.permissions_for=lambda who:allow if who is inter.guild.me else deny
+        pick=SimpleNamespace(data={'values':['3']},user=inter.user,guild=inter.guild,extras={},
+            response=SimpleNamespace(defer=AsyncMock(),send_message=AsyncMock()),edit_original_response=AsyncMock())
+        await view._pick(pick)
+        target.send.assert_not_awaited()
+        self.assertIn('no longer have permission',pick.edit_original_response.call_args.kwargs['content'])
+        view=ShareChoice(menu,[target])
+        menu.png=None  # permissions must follow the captured card, not a newer screen
+        no_files=SimpleNamespace(view_channel=True,send_messages=True,embed_links=True,attach_files=False)
+        target.permissions_for=lambda who:no_files if who is inter.guild.me else allow
+        await view._pick(pick)
+        target.send.assert_not_awaited()
+        self.assertIn('bot no longer has',pick.edit_original_response.call_args.kwargs['content'])
+
+    async def test_share_picker_rejects_another_user(self):
+        from cogs.hub import ShareChoice
+        allow=SimpleNamespace(view_channel=True,send_messages=True,embed_links=True,attach_files=True)
+        menu,inter,_,_,target=self.setup_share(allow)
+        view=ShareChoice(menu,[target])
+        pick=SimpleNamespace(data={'values':['3']},user=SimpleNamespace(id=999),guild=inter.guild,extras={},
+            response=SimpleNamespace(defer=AsyncMock(),send_message=AsyncMock()),edit_original_response=AsyncMock())
+        await view._pick(pick)
+        target.send.assert_not_awaited()
+        pick.response.send_message.assert_awaited_once()

@@ -61,7 +61,7 @@ def status_embed(bot, gid):
     def stamp(value):
         return f"<t:{int(value)}:R>" if value else "Not checked yet"
     if tracker:
-        state = "Stopped" if not tracker.ticker.is_running() else "Partial check — session summaries waiting" if getattr(tracker, "last_poll_partial", False) else "Check failed" if tracker.last_poll_ok is False else "Waiting for first check" if tracker.last_poll_ok is None else "Running"
+        state = "Stopped" if not tracker.ticker.is_running() else "Incomplete EA coverage — recaps can finish" if getattr(tracker, "last_poll_degraded", False) else "Partial check — session summaries waiting" if getattr(tracker, "last_poll_partial", False) else "Check failed" if tracker.last_poll_ok is False else "Waiting for first check" if tracker.last_poll_ok is None else "Running"
         cid = tracker.channel_id_for(gid)
         successful = getattr(tracker, "last_success_at", None) or get_setting(gid, "matchday:last_success")
         embed.add_field(name="Match tracker", value=f"**{state}**\nLast attempt: {stamp(tracker.last_poll_at)}\nLast successful check: {stamp(successful)}\nNext check: {stamp(tracker.next_poll_at)}\nResults: {'On' if tracker.posting_enabled(gid) else 'Off'} · {f'<#{cid}>' if cid else 'No channel'}\nLatest game: {stamp(match_data.latest_match_ts(CLUB_ID))}", inline=False)

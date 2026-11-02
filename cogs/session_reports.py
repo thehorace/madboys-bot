@@ -1,5 +1,6 @@
 """Durable session recaps; private player summaries never use RSVP as attendance."""
 import io
+import asyncio
 import json
 import logging
 import time
@@ -176,6 +177,9 @@ def archive_sessions(gid, now, settings=None, in_voice=False):
             conn.execute("INSERT INTO session_history VALUES (?,?,?,?,?,?,?,?)", (s["id"], gid,
                 matches[-1]["ts"] if matches else now, "cancelled" if cancelled else "completed" if matches else "no games",
                 json.dumps(ids), json.dumps(rsvps), json.dumps(players), message))
+            if matches and settings.get('coverage_incomplete'):
+                conn.execute('INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)',
+                             (gid,f"session:partial:{s['id']}",'1'))
             if message is None and ids and settings["dms"]:
                 recipients = {did for p in players for did in p["discord_ids"]}
                 conn.executemany("INSERT OR IGNORE INTO session_summary_dms (session_id,discord_id) VALUES (?,?)",
@@ -242,6 +246,8 @@ def compact_recap(record, rows):
         lines += [''] + [h for h in highlights if h] if any(highlights) else []
         embed.add_field(name=f"🛡️ {club_for(cid)['name']}", value='\n'.join(lines), inline=False)
     embed.set_footer(text=f"Session #{record['session_id']} • Full results and squad stats below • EA recorded matches")
+    if record.get('guild_id') and get_setting(record['guild_id'],f"session:partial:{record['session_id']}") == '1':
+        embed.set_footer(text=embed.footer.text+' • EA coverage incomplete; some games may be missing')
     return embed
 
 
@@ -529,15 +535,31 @@ class SessionReportsCog(commands.Cog):
         await interaction.followup.send(text,ephemeral=True)
 
     async def after_poll(self, guild):
+        await self._run_serialized(guild, finalize=True)
+
+    async def retry_pending(self, guild):
+        """Retry archived deliveries during EA outages, without closing sessions."""
+        await self._run_serialized(guild, finalize=False)
+
+    async def _run_serialized(self, guild, *, finalize):
+        if not hasattr(self, '_delivery_lock'):
+            self._delivery_lock = asyncio.Lock()
+        async with self._delivery_lock:
+            await self._run_reports(guild, finalize=finalize)
+
+    async def _run_reports(self, guild, *, finalize):
         gid = str(guild.id)
         now = int(time.time())
-        if get_setting(gid, 'reports:evening_gap_v1') is None:
+        if finalize and get_setting(gid, 'reports:evening_gap_v1') is None:
             if get_setting(gid, 'reports:gap') in (None, '30'):
                 set_setting(gid, 'reports:gap', str(DEFAULT_GAP))
             set_setting(gid, 'reports:evening_gap_v1', '1')
         settings = report_settings(gid)   # read once per check
-        add_followup_sessions(gid, now)
-        archive_sessions(gid, now, settings, in_voice=squad_in_voice(guild))
+        if finalize:
+            add_followup_sessions(gid, now)
+            tracker=self.bot.get_cog('MatchdayCog')
+            snapshot_settings={**settings,'coverage_incomplete':bool(getattr(tracker,'last_poll_degraded',False))}
+            archive_sessions(gid, now, snapshot_settings, in_voice=squad_in_voice(guild))
         if not settings["enabled"]:
             with connect() as conn:
                 conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))
@@ -557,7 +579,11 @@ class SessionReportsCog(commands.Cog):
             try:
                 if channel is None:
                     raise RuntimeError("Session recap channel is unavailable. Choose General in the summary settings.")
-                message = await channel.send(embed=recap_embed(record), view=SummaryView(), allowed_mentions=discord.AllowedMentions.none())
+                embed = recap_embed(record)
+                tracker = self.bot.get_cog('MatchdayCog')
+                if getattr(tracker, 'last_poll_degraded', False) and 'EA coverage incomplete' not in embed.footer.text:
+                    embed.set_footer(text=embed.footer.text + ' • EA coverage incomplete; some games may be missing')
+                message = await channel.send(embed=embed, view=SummaryView(), allowed_mentions=discord.AllowedMentions.none())
                 with connect() as conn:
                     conn.execute("UPDATE session_history SET message_id=? WHERE session_id=?", (str(message.id), r[0]))
                     if settings['potd']:
@@ -603,7 +629,7 @@ class SessionReportsCog(commands.Cog):
         from cogs.sessions import _tz
         gid, sid = str(guild.id), record["session_id"]
         try:
-            if potd.already_done(sid) or not report_settings(gid)["potd"]:
+            if not report_settings(gid)["potd"] or potd.already_done(sid):
                 set_setting(gid, f'potd:pending:{sid}', None)
                 return
             result = await asyncio.to_thread(potd.compute, session_matches(record))

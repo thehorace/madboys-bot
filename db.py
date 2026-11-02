@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_ts ON matches (club_id, ts);
 CREATE INDEX IF NOT EXISTS idx_matches_opponent ON matches (club_id, opp_id, ts);
 
+CREATE TABLE IF NOT EXISTS matchday_outbox (
+    guild_id TEXT NOT NULL,
+    club_id INTEGER NOT NULL,
+    match_id TEXT NOT NULL,
+    queued_at INTEGER NOT NULL,
+    PRIMARY KEY (guild_id,club_id,match_id)
+);
+
 CREATE TABLE IF NOT EXISTS match_players (
     club_id         INTEGER NOT NULL,
     match_id        TEXT NOT NULL,

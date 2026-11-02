@@ -175,7 +175,7 @@ def analyse(name):
     result = _analyse_sample(name, samples.get(key, []))
     if isinstance(result, str):
         return result
-    results = {n: _analyse_sample(rows[0]['name'], rows) for n, rows in samples.items()}
+    results = {n: result if n == key else _analyse_sample(rows[0]['name'], rows) for n, rows in samples.items()}
     results = {n: r for n, r in results.items() if isinstance(r, dict)}
     used, assignments = set(), {}
     for n, twin in CLUB_PICKS.items():

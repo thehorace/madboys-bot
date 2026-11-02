@@ -254,7 +254,10 @@ class PlayerTwinTests(Base):
         menu=interaction.followup.send.call_args.kwargs['view']
         self.assertEqual(menu.twin_of,'Other')
         self.assertIn('Other',menu.embed.description)
-        target=SimpleNamespace(id=1,name='general',mention='#general',send=AsyncMock())
+        interaction.guild=SimpleNamespace(id=10,me=SimpleNamespace(id=1))
+        permissions=SimpleNamespace(view_channel=True,send_messages=True,embed_links=True,attach_files=True)
+        target=SimpleNamespace(id=1,name='general',mention='#general',send=AsyncMock(),
+                               permissions_for=lambda _:permissions,guild=interaction.guild)
         choice=ShareChoice(menu,[target])
         original_embed,original_png=menu.embed,menu.png
         menu.embed=discord.Embed(title='Different screen')

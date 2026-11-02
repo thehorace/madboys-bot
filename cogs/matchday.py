@@ -33,6 +33,7 @@ Commands:
 
 from clubs import club_id, club_name, club_scope, club_scoped, monitored_clubs
 import asyncio
+import json
 import logging
 import re
 import time
@@ -100,49 +101,68 @@ def _tz() -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-def build_recap_embed(days: int = 7, end: Optional[datetime] = None) -> Optional[discord.Embed]:
+def build_recap_embed(days: int = 7, end: Optional[datetime] = None, *, combined=False) -> Optional[discord.Embed]:
     end = end or datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    rows = md.matches_between(club_id(), int(start.timestamp()), int(end.timestamp()) + 1)
-    if not rows:
-        return None
-
-    w = sum(r["result"] == "W" for r in rows)
-    d = sum(r["result"] == "D" for r in rows)
-    l = sum(r["result"] == "L" for r in rows)
-    gf = sum(r["our_goals"] for r in rows)
-    ga = sum(r["opp_goals"] for r in rows)
-    newest_first = list(reversed(rows))
-
-    embed = discord.Embed(
-        title=f"🗓️ {club_name()} — {'Weekly' if days == 7 else f'{days}-day'} Recap",
-        description=f"**{len(rows)} games** • W{w} D{d} L{l} • {gf} scored, {ga} conceded\n"
-                    f"{md.form_string(newest_first[:15])}",
-        colour=CLUB_COLOUR,
-    )
-
-    totals = md.player_totals(club_id(), int(start.timestamp()), int(end.timestamp()) + 1)
-
-    def top(key: str, fmt, min_games: int = 1):
-        pool = [t for t in totals if (t["games"] or 0) >= min_games and t[key]]
+    start_ts, end_ts = int(start.timestamp()), int(end.timestamp())
+    with connect() as conn:
+        clubs = [dict(c) for c in conn.execute('SELECT club_id,name FROM monitored_clubs ORDER BY club_id=? DESC,club_id', (CLUB_ID,))] if combined else [{'club_id':club_id(),'name':club_name()}]
+        if not clubs:
+            return None
+        ids = [c['club_id'] for c in clubs]
+        marks = ','.join('?' for _ in ids)
+        args = (*ids, start_ts, end_ts)
+        rows = [dict(r) for r in conn.execute(f'SELECT * FROM matches WHERE club_id IN ({marks}) AND ts>=? AND ts<? ORDER BY ts,club_id,match_id', args)]
+        if not rows:
+            return None
+        totals = [dict(r) for r in conn.execute(f"""
+            WITH appearances AS (
+                SELECT p.*, ROW_NUMBER() OVER (
+                    PARTITION BY p.club_id,p.match_id,LOWER(p.name) ORDER BY p.persona_id
+                ) AS persona_row
+                FROM matches m JOIN match_players p ON p.club_id=m.club_id AND p.match_id=m.match_id
+                WHERE m.club_id IN ({marks}) AND m.ts>=? AND m.ts<?
+            )
+            SELECT MIN(name) AS name,COUNT(*) AS games,SUM(goals) AS goals,SUM(assists) AS assists,
+                   AVG(rating) AS rating,COUNT(rating) AS rated_games,SUM(motm) AS motm
+            FROM appearances WHERE persona_row=1 GROUP BY LOWER(name) ORDER BY LOWER(name)
+        """, args)]
+    label = ' & '.join(c['name'] for c in clubs)
+    kind = 'Weekly' if days == 7 else f'{days}-day'
+    w,d,l = (sum(r['result']==code for r in rows) for code in ('W','D','L'))
+    record = ' · '.join(f"{n} {single if n==1 else plural}" for n,single,plural in ((w,'win','wins'),(d,'draw','draws'),(l,'loss','losses')))
+    count_label = 'match' if len(rows)==1 else 'matches'
+    embed = discord.Embed(title=f'🗓️ {kind} recap — {label}'[:256],
+        description=f'<t:{start_ts}:f> → <t:{end_ts}:f>\n\n'
+                    f'**{len(rows)} {count_label} · {record}**\n'
+                    f"⚽ {sum(r['our_goals'] for r in rows)} scored · {sum(r['opp_goals'] for r in rows)} conceded",
+        colour=CLUB_COLOUR)
+    for club in clubs:
+        games = [r for r in rows if r['club_id']==club['club_id']]
+        if not games:
+            continue
+        cw,cd,cl = (sum(r['result']==code for r in games) for code in ('W','D','L'))
+        form = md.form_string(list(reversed(games[-15:])))
+        embed.add_field(name=club['name'],value=f'**{len(games)} matches** · W{cw} D{cd} L{cl}\n'
+            f"{sum(r['our_goals'] for r in games)} scored · {sum(r['opp_goals'] for r in games)} conceded\n"
+            f"Last {min(15,len(games))} {'result' if len(games)==1 else 'results'} (oldest → newest): {form}",inline=False)
+    def top(key, fmt, min_games=1):
+        pool = [t for t in totals if (t['rated_games'] if key=='rating' else t['games'])>=min_games and t[key] is not None and t[key]!=0]
         if not pool:
-            return "—"
-        best = max(pool, key=lambda t: t[key])
-        return f"**{best['name']}** — {fmt(best)}"
-
-    embed.add_field(name="⚽ Top scorer", value=top("goals", lambda t: f"{t['goals']} goals"), inline=True)
-    embed.add_field(name="🅰️ Most assists", value=top("assists", lambda t: f"{t['assists']} assists"), inline=True)
-    embed.add_field(name="⭐ Most MOTMs", value=top("motm", lambda t: f"{t['motm']}"), inline=True)
-    embed.add_field(name="📈 Best avg rating",
-                    value=top("rating", lambda t: f"{t['rating']:.2f} over {t['games']} games",
-                              min_games=max(2, len(rows) // 3)), inline=True)
-
-    wins = [r for r in rows if r["result"] == "W"]
+            return '—'
+        best = max(pool,key=lambda t:t[key])
+        return f"**{discord.utils.escape_markdown(best['name'])}** — {fmt(best)}"
+    embed.add_field(name='⚽ Top scorer',value=top('goals',lambda t:f"{t['goals']} goals"))
+    embed.add_field(name='🅰️ Most assists',value=top('assists',lambda t:f"{t['assists']} assists"))
+    embed.add_field(name='⭐ Most EA MOTMs',value=top('motm',lambda t:str(t['motm'])))
+    minimum = max(2,len(rows)//3)
+    embed.add_field(name='📈 Best average rating',value=top('rating',lambda t:f"{t['rating']:.2f} over {t['rated_games']} rated games",minimum))
+    wins = [r for r in rows if r['result']=='W']
     if wins:
-        big = max(wins, key=lambda r: (r["our_goals"] - r["opp_goals"], r["our_goals"]))
-        embed.add_field(name="💥 Biggest win", value=f"{big['our_goals']}–{big['opp_goals']} vs {big['opp_name']}",
-                        inline=True)
-    embed.set_footer(text=f"{club_name()} • from matches tracked by the bot")
+        big = max(wins,key=lambda r:(r['our_goals']-r['opp_goals'],r['our_goals']))
+        name = next(c['name'] for c in clubs if c['club_id']==big['club_id'])
+        embed.add_field(name='💥 Biggest win',value=f"{name} · {big['our_goals']}–{big['opp_goals']} vs {discord.utils.escape_markdown(big['opp_name'] or 'Opponent')}")
+    embed.set_footer(text=f'Saved EA matches only • Rating needs {minimum}+ rated games • Weekly totals are separate from session recaps')
     return embed
 
 
@@ -295,10 +315,10 @@ class MatchdayCog(commands.Cog):
         self._polling = True
         try:
             count = await self._poll_once()
+            reports = self.bot.get_cog("SessionReportsCog")
+            guild = self.home_guild()
             if self.last_poll_ok:
                 self.last_success_at = time.time()
-                reports = self.bot.get_cog("SessionReportsCog")
-                guild = self.home_guild()
                 if guild:
                     set_setting(str(guild.id), "matchday:last_success", str(int(self.last_success_at)))
                 if reports and guild:
@@ -307,6 +327,12 @@ class MatchdayCog(commands.Cog):
                     except Exception:
                         log.exception("Session summary failed")
                         await report_health(self.bot, str(guild.id), "Session summaries", "Couldn't save or post the session summary. Check the recap channel and logs.")
+            elif reports and guild and callable(getattr(reports, 'retry_pending', None)):
+                try:
+                    await reports.retry_pending(guild)
+                except Exception:
+                    log.exception('Archived session delivery retry failed')
+                    await report_health(self.bot, str(guild.id), 'Session summaries', 'Could not retry an archived recap. Check the recap channel and logs.')
             return count
         except Exception:
             self.last_poll_ok = False
@@ -340,10 +366,17 @@ class MatchdayCog(commands.Cog):
         self._milestone_jobs = []
         for club, raw in zip(clubs, fetched):
             state = self.club_status.setdefault(club['club_id'], {})
-            state.update(name=club['name'], checked_at=time.time())
+            state.update(club_id=club['club_id'], name=club['name'], checked_at=time.time())
             if raw is _FETCH_FAILED:   # already logged by fetch()
                 state.update(ok=False, partial=False, error="EA/relay match check failed")
                 states.append(state)
+                guild = self.home_guild()
+                if guild:
+                    try:
+                        with club_scope(club):
+                            await self._deliver_result_queue(str(guild.id))
+                    except Exception:
+                        log.exception('Queued result delivery failed: %s',club['name'])
                 continue
             try:
                 with club_scope(club):
@@ -370,22 +403,30 @@ class MatchdayCog(commands.Cog):
         await self._track_failing_clubs(states)
         # Session summaries wait for every club, except one that has been failing for hours:
         # otherwise a single broken club would stop everyone's recaps.
-        healthy = [s for s in states if s['ok']]
-        self.last_poll_ok = bool(healthy) and all(s['ok'] or s.get('stale') for s in states)
-        self.last_poll_partial = not self.last_poll_ok and any(s['ok'] or s['partial'] for s in states)
+        responsive = [s for s in states if s['ok'] or s.get('partial')]
+        self.last_poll_ok = bool(responsive) and all(s['ok'] or s.get('stale') for s in states)
+        self.last_poll_degraded = self.last_poll_ok and any(not s['ok'] for s in states)
+        self.last_poll_partial = any(s.get('partial') for s in states) or (not self.last_poll_ok and bool(responsive))
         return total
 
     async def _track_failing_clubs(self, states: list[dict]):
         now = time.time()
         guild = self.home_guild()
         for s in states:
+            key = f"matchday:failing_since:{s['club_id']}"
+            saved_value = get_setting(str(guild.id), key) if guild else None
             if s['ok']:
                 s['failing_since'] = None
                 s['stale'] = False
+                if guild and saved_value is not None:
+                    set_setting(str(guild.id), key, None)
                 if s.pop('alerted', False) and guild:
                     await report_health(self.bot, str(guild.id), f"Club tracking: {s['name']}")
                 continue
-            s['failing_since'] = s.get('failing_since') or now
+            saved = to_int(saved_value)
+            s['failing_since'] = s.get('failing_since') or (saved if 0 < saved <= now else now)
+            if guild and saved_value != str(int(s['failing_since'])):
+                set_setting(str(guild.id), key, str(int(s['failing_since'])))
             s['stale'] = now - s['failing_since'] >= STALE_CLUB_SECONDS
             if s['stale'] and not s.get('alerted') and guild:
                 s['alerted'] = True
@@ -408,6 +449,9 @@ class MatchdayCog(commands.Cog):
         if quiet:
             set_setting("global", quiet_key, None if self.last_poll_ok else "1")
         if not raw_matches:
+            guild = self.home_guild()
+            if guild:
+                await self._deliver_result_queue(str(guild.id))
             return 0
 
         guild = self.home_guild()
@@ -434,6 +478,11 @@ class MatchdayCog(commands.Cog):
             if pm and md.store_match(club_id(), pm, raw):
                 new.append(pm)
 
+        if new and not first_run and guild_id and self.posting_enabled(guild_id):
+            with connect() as conn:
+                conn.executemany('INSERT OR IGNORE INTO matchday_outbox VALUES (?,?,?,?)',
+                    [(guild_id,club_id(),p.match_id,int(time.time())) for p in new])
+
         if voided and not quiet and guild_id and self.posting_enabled(guild_id):
             cid = self.channel_id_for(guild_id)
             channel = await self._channel(cid) if cid else None
@@ -445,6 +494,8 @@ class MatchdayCog(commands.Cog):
                 except discord.HTTPException:
                     log.warning("Couldn't post the void-game note")
         if not new:
+            if guild_id:
+                await self._deliver_result_queue(guild_id)
             return 0
         self.last_new_at = time.time()
         log.info(f"[{club_name()}] {len(new)} new match(es){' (initial backfill, not posting)' if first_run else ''}")
@@ -458,11 +509,8 @@ class MatchdayCog(commands.Cog):
             await self.check_milestones(guild, announce=False)  # seed the baseline
             return len(new)
 
-        if guild_id and self.posting_enabled(guild_id):
-            cid = self.channel_id_for(guild_id)
-            channel = await self._channel(cid) if cid else None
-            if channel:
-                await self._post_results(channel, new, guild_id, pending_by_match)
+        if guild_id:
+            await self._deliver_result_queue(guild_id, pending_by_match)
 
         # private rotation notes for players whose position was confirmed straight from the lineup
         pos_cog = self.bot.get_cog("PositionsCog")
@@ -549,6 +597,33 @@ class MatchdayCog(commands.Cog):
         self._unlinked[pm.match_id] = unmatched
         return pending
 
+    async def _deliver_result_queue(self, guild_id, pending_by_match=None):
+        """Retry only explicitly queued result posts, never old saved history."""
+        with connect() as conn:
+            if not self.posting_enabled(guild_id):
+                conn.execute('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=?',(guild_id,club_id()))
+                return
+            conn.execute('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=? AND queued_at<?',
+                         (guild_id,club_id(),int(time.time())-86400))
+            rows=conn.execute('SELECT m.raw_json FROM matchday_outbox q JOIN matches m ON m.club_id=q.club_id AND m.match_id=q.match_id '
+                'WHERE q.guild_id=? AND q.club_id=? ORDER BY m.ts,m.match_id LIMIT 100',(guild_id,club_id())).fetchall()
+        if not rows:
+            return
+        cid=self.channel_id_for(guild_id)
+        channel=await self._channel(cid) if cid else None
+        if channel is None:
+            return
+        games=[md.parse_match(json.loads(r['raw_json']),club_id()) for r in rows if r['raw_json']]
+        games=[p for p in games if p is not None]
+        if games:
+            await self._post_results(channel,games,guild_id,pending_by_match)
+
+    def _ack_results(self, guild_id, games):
+        if guild_id and games:
+            with connect() as conn:
+                conn.executemany('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=? AND match_id=?',
+                                 [(guild_id,p.club_id,p.match_id) for p in games])
+
     async def _post_results(self, channel: discord.abc.Messageable, new: list[md.ParsedMatch],
                             guild_id: Optional[str] = None, pending_by_match: Optional[dict] = None):
         recent = md.recent_results(club_id(), 5)
@@ -560,6 +635,7 @@ class MatchdayCog(commands.Cog):
                 summary = ", ".join(f"{md.RESULT_EMOJI[p.result]} {p.our_goals}–{p.opp_goals} {p.opp_name}"
                                     for p in skipped)
                 await channel.send(f"📡 Caught up on {len(skipped)} earlier result(s): {clip(summary, 1800)}")
+                self._ack_results(guild_id,skipped)
             for i, pm in enumerate(to_post):
                 embed, file = await md.match_post(pm, footer_extra=footer if i == len(to_post) - 1 else "")
                 rematch = md.rematch_line(club_id(), pm)
@@ -570,17 +646,22 @@ class MatchdayCog(commands.Cog):
                 if view:
                     extra["view"] = view
                 await channel.send(content=f"📡 **{club_name()} — Full time!**", embed=embed, **extra)
+                self._ack_results(guild_id,[pm])
                 # "where did you play?" for anyone whose exact position isn't known
                 pos_cog = self.bot.get_cog("PositionsCog")
                 pending = (pending_by_match or {}).get(pm.match_id)
                 # only ask about the newest game if the bot is catching up on several
-                if pos_cog and guild_id and i == len(to_post) - 1:
+                if pos_cog and guild_id and pm.match_id in (pending_by_match or {}) and i == len(to_post) - 1:
                     await pos_cog.open_prompt(channel, guild_id, pm.match_id,
                                               f"{club_name()} · {pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}", pending or {},
                                               unlinked=self._unlinked.get(pm.match_id, []))
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
             await report_health(self.bot, guild_id, "Match result posting", "The bot can't post results. Check its matchday channel permissions.")
+            return
+        except discord.HTTPException:
+            log.warning('Result delivery failed; unsent results remain queued')
+            await report_health(self.bot,guild_id,'Match result posting','Discord could not accept a result post. Unsent results will retry automatically.')
             return
         await report_health(self.bot, guild_id, "Match result posting")
 
@@ -666,19 +747,24 @@ class MatchdayCog(commands.Cog):
             return
         cid = self.channel_id_for(gid)
         channel = await self._channel(cid) if cid else None
-        for club in monitored_clubs():
-            key = K_LAST_RECAP if club['club_id'] == CLUB_ID else f"{K_LAST_RECAP}:{club['club_id']}"
-            if get_setting(gid, key) == week_key:
-                continue
-            try:
-                with club_scope(club):
-                    embed = build_recap_embed(7)
-                if embed and channel:
-                    await channel.send(embed=embed)
-                if channel:
-                    set_setting(gid, key, week_key)
-            except discord.HTTPException:
-                log.warning("Couldn't post recap for %s", club['name'])
+        key = f'{K_LAST_RECAP}:combined'
+        if not channel or get_setting(gid, key) == week_key:
+            return
+        # Deployment during an already-posted week must not send a duplicate.
+        legacy_keys = [K_LAST_RECAP] + [f"{K_LAST_RECAP}:{c['club_id']}" for c in monitored_clubs() if c['club_id'] != CLUB_ID]
+        if any(get_setting(gid, old) == week_key for old in legacy_keys):
+            set_setting(gid, key, week_key)
+            return
+        try:
+            end = local.replace(hour=RECAP_HOUR, minute=0, second=0, microsecond=0)
+            embed = await asyncio.to_thread(build_recap_embed, 7, end, combined=True)
+            if embed:
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            set_setting(gid, key, week_key)
+            for old in legacy_keys:
+                set_setting(gid, old, week_key)
+        except discord.HTTPException:
+            log.warning('Could not post combined weekly recap')
 
     @recap_loop.before_loop
     async def _before_recap(self):

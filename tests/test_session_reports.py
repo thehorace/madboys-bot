@@ -1,4 +1,5 @@
 import json
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime
@@ -303,6 +304,51 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.channel.send.assert_awaited_once()
         other.send.assert_awaited_once()
         self.assertEqual(self.member.send.await_count, 2)
+
+    async def test_archived_recap_retries_while_ea_is_down_without_closing_new_session(self):
+        self.game('a',self.start+600)
+        self.channel.send.side_effect=RuntimeError('Discord temporarily down')
+        with self.assertRaises(RuntimeError):
+            await self.poll(self.start+8000)
+        self.assertIsNone(reports.history('10')[0]['message_id'])
+        with db.connect() as conn:
+            conn.execute("INSERT INTO sessions (guild_id,channel_id,starts_at,created_by) VALUES ('10','20',?,'daily')",(self.start+9000,))
+        self.game('b',self.start+9600)
+        self.channel.send.side_effect=None
+        tracker=object.__new__(matchday.MatchdayCog)
+        tracker.bot=SimpleNamespace(get_cog=lambda name:self.cog if name=='SessionReportsCog' else None)
+        tracker.home_guild=lambda:self.guild
+        tracker._poll_once=AsyncMock(return_value=0)
+        tracker.last_poll_ok=False
+        with patch.object(reports.time,'time',return_value=self.start+18000):
+            await tracker.poll_once()
+            await tracker.poll_once()
+        self.assertEqual(self.channel.send.await_count,2)  # initial failure, then successful retry
+        self.assertEqual(len(reports.history('10')),1)
+        self.assertEqual(reports.history('10')[0]['message_id'],'99')
+        self.assertFalse(tracker.last_poll_ok)
+
+    async def test_concurrent_archived_retries_do_not_repeat_deliveries(self):
+        self.game('a',self.start+600)
+        with patch.object(reports.time,'time',return_value=self.start+8000):
+            reports.archive_sessions('10',self.start+8000)
+            await asyncio.gather(self.cog.retry_pending(self.guild),self.cog.retry_pending(self.guild))
+        self.channel.send.assert_awaited_once()
+        self.member.send.assert_awaited_once()
+
+    async def test_partial_coverage_warning_survives_a_failed_send_and_recovery(self):
+        tracker=SimpleNamespace(last_poll_degraded=True)
+        self.bot.get_cog=lambda name:tracker if name=='MatchdayCog' else None
+        self.game('a',self.start+600)
+        self.channel.send.side_effect=RuntimeError('Discord temporarily down')
+        with self.assertRaises(RuntimeError):
+            await self.poll(self.start+8000)
+        tracker.last_poll_degraded=False
+        self.channel.send.side_effect=None
+        with patch.object(reports.time,'time',return_value=self.start+8100):
+            await self.cog.retry_pending(self.guild)
+        self.assertIn('EA coverage incomplete',self.channel.send.call_args.kwargs['embed'].footer.text)
+        self.assertIn('EA coverage incomplete',reports.recap_embed(reports.history('10')[0]).footer.text)
 
     async def test_disabled_dms_not_sent_when_enabled_later(self):
         db.set_setting("10", "reports:dms", "0")

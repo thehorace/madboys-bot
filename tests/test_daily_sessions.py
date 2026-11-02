@@ -111,6 +111,24 @@ class DailyPostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.rows()[0]["message_id"], "30")
 
+    async def test_overlapping_daily_posts_only_send_one_everyone_ping(self):
+        entered,release=asyncio.Event(),asyncio.Event()
+        async def send(**kwargs):
+            entered.set()
+            await release.wait()
+            return SimpleNamespace(id=30)
+        self.channel.send.side_effect=send
+        first=asyncio.create_task(self.cog.post_daily_session(self.guild,123))
+        await entered.wait()
+        second=asyncio.create_task(self.cog.post_daily_session(self.guild,123))
+        await asyncio.sleep(0)
+        self.assertEqual(self.channel.send.await_count,1)
+        release.set()
+        await asyncio.gather(first,second)
+        self.channel.send.assert_awaited_once()
+        self.assertEqual(len(self.rows()),1)
+        self.assertTrue(self.channel.send.call_args.kwargs['allowed_mentions'].everyone)
+
     async def test_ambiguous_general_requires_channel_id(self):
         self.guild.text_channels.append(self.channel)
         await self.cog.post_daily_session(self.guild, 123)

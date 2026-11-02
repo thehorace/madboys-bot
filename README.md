@@ -22,7 +22,7 @@ looks up is posted straight away. Each new match is:
 
 Everything the bot posts by itself (results, MOTM votes, milestones, the weekly recap, the final squad list, session summaries, EA news) goes to the channel set with `/announce set`; daily sign-ups (the check-ins) stay in #general; slash commands reply where you use them.
 
-A weekly recap posts on Sunday evening. Set the channel once with
+A combined weekly recap posts on Sunday evening, with a dated seven-day window, combined player totals and separate club results. Form icons explicitly show the latest 15 results per club, rather than implying they cover every match that week. This schedule is independent of the session recap. Set the channel once with
 `/matchday start`; it survives restarts and redeploys.
 
 EA only publishes *finished* matches and has no "match ended" notification,
@@ -278,6 +278,10 @@ The congratulations message and award card go to both **#general** and the confi
 Authorized usage viewers can run **`/resendawards month:2026-10`** to resend the corrected combined award. If a prior delivery is incomplete, it retries only the missing channel; after both deliveries have completed, an explicit resend starts a fresh broadcast with new pings. It is limited to completed months and has a one-minute cooldown. `/awards` remains a normal lookup and never broadcasts or pings everyone.
 
 Session recaps default to **two hours after the last recorded activity**, keeping club switches and delayed EA results in one evening. Existing 30-minute defaults migrate once; later changes in the private settings panel are respected. For an already split night, authorized usage viewers can run **`/sessionmerge keep:34 source:35`**. It combines history and recalculates Player of the Day, updates existing recap/award messages where possible, and retains the original snapshots in an audit table. It sends no replacement personal DMs. Both completed sessions must belong to the same server and be within 12 hours; rerunning the command retries message edits without merging twice.
+
+Brief incomplete EA checks still hold session recaps open. After a club has failed or returned incomplete history continuously for two hours, it stops blocking recaps provided at least one club still returns fresh complete or partial data. The failure timer survives restarts; an outage of every club with no usable responses never counts as an eligible check. Recaps finished with degraded coverage state that some games may be missing, and Bot status distinguishes this from a short partial check that is still waiting. A complete recovery clears the failure timer. Updating to the combined weekly format does not automatically resend a week already posted by the old format.
+
+Already-archived recap posts, personal recap deliveries and queued Player of the Day cards keep retrying during EA outages; these retries cannot archive another session. Delivery runs are serialized to prevent overlapping retries from duplicating a successful send. Incomplete-coverage warnings stay with the saved session even if EA recovers before a failed Discord send is retried. Failed result posts are saved in a per-club database queue and acknowledged individually after Discord accepts them. They retry even when the next EA fetch fails, expire after 24 hours, and are discarded when result posting is disabled. Initial history sync remains quiet. Overlapping daily invitation requests are serialized per server to keep the initial `@everyone` post from being sent twice. Sharing rechecks the owner, destination server and current user/bot permissions at send time, using the captured card's attachment requirements.
 
 **`/partners`** ranks the pairs who win most when they play together (5+ games together, or 3+
 while the club has few games saved); **`/partners player:`** shows one player's best partners.

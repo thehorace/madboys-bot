@@ -562,6 +562,22 @@ class StatsMenu(TrackedView):
         await interaction.response.send_message("📢 Share this where?", view=ShareChoice(self, targets), ephemeral=True)
 
     async def _post_share(self, interaction, target, embed, png) -> str:
+        guild = getattr(interaction, 'guild', None)
+        if (guild is None or str(guild.id) != self.guild_id or interaction.user.id != self.user.id
+                or target is None or not hasattr(target, 'permissions_for')
+                or getattr(getattr(target, 'guild', guild), 'id', None) != guild.id):
+            failed(interaction)
+            return 'This sharing destination is no longer available. Reopen Share.'
+        user_perms = target.permissions_for(interaction.user)
+        if not (user_perms.view_channel and user_perms.send_messages):
+            failed(interaction)
+            return 'You no longer have permission to post in that channel.'
+        me = guild.me
+        bot_perms = target.permissions_for(me) if me is not None else None
+        needs = ['view_channel', 'send_messages', 'embed_links'] + (['attach_files'] if png else [])
+        if bot_perms is None or any(not getattr(bot_perms, name, False) for name in needs):
+            failed(interaction)
+            return 'The bot no longer has the channel permissions needed to share this result.'
         try:
             extra = {"file": S.card_file(png)} if png else {}
             await target.send(content=f"📢 Shared by {interaction.user.mention}", embed=embed,
@@ -615,7 +631,12 @@ class ShareChoice(TrackedView):
         pick.callback = self._pick
         self.add_item(pick)
 
+    async def interaction_check(self, interaction):
+        return await self.menu.interaction_check(interaction)
+
     async def _pick(self, interaction: discord.Interaction):
+        if not await self.interaction_check(interaction):
+            return
         target = self.targets.get(interaction.data["values"][0])
         await interaction.response.defer()
         text = await self.menu._post_share(interaction, target, self.embed, self.png) if target else "That channel's gone."

@@ -735,6 +735,12 @@ class SessionsCog(commands.Cog):
         await interaction.followup.send(f"🚫 Cancelled the session at <t:{s['starts_at']}:F>.")
 
     async def post_daily_session(self, guild: discord.Guild, starts_at: int):
+        if not hasattr(self, '_daily_post_locks'):
+            self._daily_post_locks = {}
+        async with self._daily_post_locks.setdefault(str(guild.id), asyncio.Lock()):
+            return await self._post_daily_session(guild, starts_at)
+
+    async def _post_daily_session(self, guild: discord.Guild, starts_at: int):
         settings = session_settings(str(guild.id))
         if settings["channel_id"]:
             channel = guild.get_channel(int(settings["channel_id"]))
