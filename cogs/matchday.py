@@ -34,6 +34,7 @@ Commands:
 from clubs import club_id, club_name, club_scope, club_scoped, monitored_clubs
 import asyncio
 import json
+import delivery
 import logging
 import re
 import time
@@ -407,6 +408,11 @@ class MatchdayCog(commands.Cog):
         self.last_poll_ok = bool(responsive) and all(s['ok'] or s.get('stale') for s in states)
         self.last_poll_degraded = self.last_poll_ok and any(not s['ok'] for s in states)
         self.last_poll_partial = any(s.get('partial') for s in states) or (not self.last_poll_ok and bool(responsive))
+        if states and all(s['ok'] for s in states):
+            guild=self.home_guild()
+            self.last_complete_at=time.time()
+            if guild:
+                set_setting(str(guild.id),'matchday:last_complete',str(int(self.last_complete_at)))
         return total
 
     async def _track_failing_clubs(self, states: list[dict]):
@@ -599,24 +605,44 @@ class MatchdayCog(commands.Cog):
 
     async def _deliver_result_queue(self, guild_id, pending_by_match=None):
         """Retry only explicitly queued result posts, never old saved history."""
+        key=f'{guild_id}:{club_id()}'
         with connect() as conn:
             if not self.posting_enabled(guild_id):
                 conn.execute('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=?',(guild_id,club_id()))
+                conn.execute("DELETE FROM delivery_jobs WHERE kind='result' AND job_key=?",(key,))
                 return
             conn.execute('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=? AND queued_at<?',
                          (guild_id,club_id(),int(time.time())-86400))
             rows=conn.execute('SELECT m.raw_json FROM matchday_outbox q JOIN matches m ON m.club_id=q.club_id AND m.match_id=q.match_id '
                 'WHERE q.guild_id=? AND q.club_id=? ORDER BY m.ts,m.match_id LIMIT 100',(guild_id,club_id())).fetchall()
         if not rows:
+            delivery.ack('result',key)
+            return
+        delivery.enqueue('result',key,guild_id,club_id(),{})
+        job=delivery.get('result',key)
+        if job and job['expires_at']<=time.time():
+            delivery.ack('result',key)
+            delivery.enqueue('result',key,guild_id,club_id(),{})
+            job=delivery.get('result',key)
+        if not delivery.due(job):
             return
         cid=self.channel_id_for(guild_id)
         channel=await self._channel(cid) if cid else None
         if channel is None:
+            delivery.fail(job,RuntimeError('Result channel unavailable'))
             return
         games=[md.parse_match(json.loads(r['raw_json']),club_id()) for r in rows if r['raw_json']]
         games=[p for p in games if p is not None]
         if games:
-            await self._post_results(channel,games,guild_id,pending_by_match)
+            try:
+                success=await self._post_results(channel,games,guild_id,pending_by_match)
+            except Exception as exc:
+                delivery.fail(job,exc)
+                raise
+            if success is False:
+                delivery.fail(job,RuntimeError('Discord result delivery failed'))
+            else:
+                delivery.ack('result',key)
 
     def _ack_results(self, guild_id, games):
         if guild_id and games:
@@ -658,17 +684,15 @@ class MatchdayCog(commands.Cog):
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
             await report_health(self.bot, guild_id, "Match result posting", "The bot can't post results. Check its matchday channel permissions.")
-            return
+            return False
         except discord.HTTPException:
             log.warning('Result delivery failed; unsent results remain queued')
             await report_health(self.bot,guild_id,'Match result posting','Discord could not accept a result post. Unsent results will retry automatically.')
-            return
+            return False
         await report_health(self.bot, guild_id, "Match result posting")
 
-        # squad MOTM vote for the newest match only (no vote spam after a catch-up)
-        motm = self.bot.get_cog("MotmCog")
-        if motm and guild_id and to_post:
-            await motm.open_poll(channel, guild_id, to_post[-1])
+        # EA's MOTM stays on the result card; automatic squad voting is retired.
+        return True
 
     async def check_milestones(self, guild: Optional[discord.Guild], announce: bool,
                                matches: Optional[list[md.ParsedMatch]] = None):

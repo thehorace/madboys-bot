@@ -166,6 +166,11 @@ class EAClient:
         return data if data is not None else fallback()
 
     async def _fetch(self, key: str, path: str, params: dict, timeout: float) -> Optional[Any]:
+        from performance import measure
+        with measure('EA request', slow=3):
+            return await self._fetch_impl(key,path,params,timeout)
+
+    async def _fetch_impl(self, key: str, path: str, params: dict, timeout: float) -> Optional[Any]:
         """One relay request. Returns the data, or None (and records why) on failure."""
         session = await self._get_session()
         url = f"{self._base}{path}"

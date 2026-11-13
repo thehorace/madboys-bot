@@ -27,6 +27,8 @@ or MANAGER_CHANNEL_ID). Nobody opted in = no notes.
 from clubs import club_id, club_name, club_scope
 import json
 import logging
+import asyncio
+import delivery
 import os
 import time
 from datetime import datetime, timezone
@@ -34,13 +36,13 @@ from typing import Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import positions as P
 from cogs.rotation import set_match_position
 from db import connect, get_setting, set_setting
 from interaction_tracking import TrackedView
-from utils import resolve_name
+from utils import resolve_name, survive
 
 log = logging.getLogger("madboys-bot.positions")
 
@@ -158,6 +160,19 @@ class PositionPromptView(TrackedView):
 class PositionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.delivery_loop.start()
+
+    def cog_unload(self):
+        self.delivery_loop.cancel()
+
+    @tasks.loop(seconds=30)
+    @survive
+    async def delivery_loop(self):
+        await self.retry_deliveries()
+
+    @delivery_loop.before_loop
+    async def _before_delivery(self):
+        await self.bot.wait_until_ready()
 
     @app_commands.command(name="position", description="Set (or fix) where you played in your last game")
     @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in P.ALL_POSITIONS])
@@ -203,14 +218,15 @@ class PositionsCog(commands.Cog):
             ephemeral=True)
         await self.check_notes(interaction.guild, [uid])
 
-    def _due_link_reminder(self, guild_id: str, names: list[str]) -> list[str]:
+    def _due_link_reminder(self, guild_id: str, names: list[str], *, mark=True) -> list[str]:
         """Unlinked EA names that haven't been reminded in the last 24h (so it doesn't nag every game)."""
         due, now = [], int(time.time())
         for n in names:
             last = get_setting(guild_id, f"linknudge:{n.lower()}")
             if not last or now - int(last) > 24 * 3600:
                 due.append(n)
-                set_setting(guild_id, f"linknudge:{n.lower()}", str(now))
+                if mark:
+                    set_setting(guild_id, f"linknudge:{n.lower()}", str(now))
         return due
 
     async def open_prompt(self, channel: discord.abc.Messageable, guild_id: str, match_id: str, title: str,
@@ -220,28 +236,48 @@ class PositionsCog(commands.Cog):
         unlinked: EA names of players in the game who haven't linked their Discord — the bot
                   can't tag them, so they get a once-a-day reminder line instead.
         """
-        nudge = self._due_link_reminder(guild_id, unlinked or [])
-        nudge_line = (f"\n👤 **Not linked yet:** {', '.join(nudge)} — tap **👤 My stats** on the bot panel "
-                      f"and pick your EA name so your games count.") if nudge else ""
-        if not pending:
-            if nudge_line:
-                try:
-                    await channel.send(nudge_line.strip(), allowed_mentions=discord.AllowedMentions.none())
-                except discord.HTTPException:
-                    pass
-            return
-        try:
-            msg = await channel.send(prompt_text(title, pending) + nudge_line, view=PositionPromptView(),
-                                     allowed_mentions=discord.AllowedMentions(users=True))
-        except discord.HTTPException:
-            log.warning("Couldn't post position prompt")
-            return
-        if msg is None:
-            return
+        self._delivery_channels=getattr(self,'_delivery_channels',{})
+        self._delivery_channels[str(channel.id)]=channel
+        key=f'{guild_id}:{club_id()}:{match_id}'
         with connect() as conn:
-            conn.execute("INSERT OR REPLACE INTO position_prompts (message_id, guild_id, match_id, title, pending, created_at, club_id) "
-                         "VALUES (?,?,?,?,?,?,?)", (str(msg.id), guild_id, match_id, title, json.dumps(pending),
-                                                  int(time.time()), club_id()))
+            if conn.execute('SELECT 1 FROM position_prompts WHERE guild_id=? AND club_id=? AND match_id=?',(guild_id,club_id(),match_id)).fetchone():
+                return
+        delivery.enqueue('position',key,guild_id,club_id(),{'channel_id':str(channel.id),'match_id':match_id,
+                         'title':title,'pending':pending,'unlinked':unlinked or []},lifetime=1800)
+        await self.retry_deliveries()
+
+    async def retry_deliveries(self):
+        if not hasattr(self,'_delivery_lock'):
+            self._delivery_lock=asyncio.Lock()
+        async with self._delivery_lock:
+            await delivery.dispatch(('position',),self._deliver_prompt)
+
+    async def _deliver_prompt(self,job,payload):
+        from clubs import club_scope
+        with club_scope(job['club_id']):
+            gid,mid=job['guild_id'],payload['match_id']
+            with connect() as conn:
+                if conn.execute('SELECT 1 FROM position_prompts WHERE guild_id=? AND club_id=? AND match_id=?',(gid,club_id(),mid)).fetchone():
+                    return
+                confirmed={r['discord_id'] for r in conn.execute("SELECT discord_id,position FROM rotation_log WHERE guild_id=? AND club=? AND match_id=? AND source='player'",(gid,club_name(),mid)) if r['position'] in P.ALL_POSITIONS}
+            pending={k:v for k,v in payload['pending'].items() if k not in confirmed}
+            nudge=self._due_link_reminder(gid,payload['unlinked'],mark=False)
+            line=(f"\n👤 **Not linked yet:** {', '.join(nudge)} — tap **👤 My stats** on the bot panel and pick your EA name.") if nudge else ''
+            if not pending and not line:
+                return
+            cid=payload['channel_id']
+            channel=getattr(self,'_delivery_channels',{}).get(cid)
+            if channel is None:
+                channel=self.bot.get_channel(int(cid)) or await self.bot.fetch_channel(int(cid))
+            if pending:
+                msg=await channel.send(prompt_text(payload['title'],pending)+line,view=PositionPromptView(),allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=int(uid)) for uid in pending],everyone=False,roles=False))
+                with connect() as conn:
+                    conn.execute('INSERT OR REPLACE INTO position_prompts (message_id,guild_id,match_id,title,pending,created_at,club_id) VALUES (?,?,?,?,?,?,?)',
+                                 (str(msg.id),gid,mid,payload['title'],json.dumps(pending),int(time.time()),club_id()))
+            else:
+                await channel.send(line.strip(),allowed_mentions=discord.AllowedMentions.none())
+            for name in nudge:
+                set_setting(gid,f'linknudge:{name.lower()}',str(int(time.time())))
 
     def manager_channel_id(self, guild_id: str) -> Optional[int]:
         cid = get_setting(guild_id, K_MANAGER_CHANNEL)

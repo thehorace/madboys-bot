@@ -4,6 +4,11 @@ Targets and scales below are hand-tuned EA gameplay heuristics. They are NOT
 measurements of the named footballers. Historical style sources are linked in UI.
 """
 import io
+import copy
+import time
+import threading
+from collections import OrderedDict
+from performance import timed
 from collections import Counter
 
 import discord
@@ -167,43 +172,70 @@ def _samples():
     return samples
 
 
+ACTIVE_DAYS = 30
+_cache = OrderedDict()
+_cache_lock = threading.RLock()
+
+def now_ts():
+    return time.time()
+
+@timed('Twin assignments', slow=.5)
+def _assign(samples, now):
+    results = {n:_analyse_sample(rows[0]['name'],rows) for n,rows in samples.items()
+               if rows[0]['ts'] > now-ACTIVE_DAYS*86400}
+    eligible = {n:r for n,r in results.items() if isinstance(r,dict)}
+    used, assignments = set(), {}
+    for n,twin in CLUB_PICKS.items():
+        if n in eligible:
+            assignments[n] = next(p for group in PROFILES.values() for p in group if p[0]==twin)
+            used.add(twin)
+    def priority(item):
+        n,r=item
+        scores=sorted(r['scores'].values())
+        return (-round(scores[1]-scores[0],12),-r['games'],n)
+    for n,r in sorted(eligible.items(),key=priority):
+        if n in assignments:
+            continue
+        selected=next((p for p in r['matches'] if p[0] not in used),None)
+        if selected:
+            assignments[n]=selected
+            used.add(selected[0])
+    for n,r in eligible.items():
+        selected=assignments.get(n)
+        if selected is None:
+            results[n]=(f"All {len(PROFILES[r['role']])} {LABELS[r['role']].lower()} twins are already assigned "
+                        'in the active squad. More profiles are needed to give you a unique twin.')
+            continue
+        r['matches']=[selected]+[p for p in r['matches'] if p[0]!=selected[0]]
+        r['assignment']='Unique squad twin'
+        r['reassigned']=selected[0]!=min(r['scores'],key=r['scores'].get)
+    return results
+
 def analyse(name):
     if not name:
         return 'Link your EA player through Setup first, or choose a player with `/playertwin`.'
-    samples = _samples()
-    key = name.casefold()
-    result = _analyse_sample(name, samples.get(key, []))
-    if isinstance(result, str):
-        return result
-    results = {n: result if n == key else _analyse_sample(rows[0]['name'], rows) for n, rows in samples.items()}
-    results = {n: r for n, r in results.items() if isinstance(r, dict)}
-    used, assignments = set(), {}
-    for n, twin in CLUB_PICKS.items():
-        if n in results:
-            profile = next(p for group in PROFILES.values() for p in group if p[0] == twin)
-            used.add(twin)
-            assignments[n] = profile
-    # Give the strongest statistical claims first choice. Ties use sample size
-    # and EA name, so lookup order, process restarts and SQL order cannot decide.
-    def priority(item):
-        n, r = item
-        scores = sorted(r['scores'].values())
-        return (-round(scores[1]-scores[0], 12), -r['games'], n)
-    for n, r in sorted(results.items(), key=priority):
-        if n in assignments:
-            continue
-        available = next((p for p in r['matches'] if p[0] not in used), None)
-        if available:
-            assignments[n] = available
-            used.add(available[0])
-    selected = assignments.get(key)
-    if selected is None:
-        return (f"All {len(PROFILES[result['role']])} {LABELS[result['role']].lower()} twins are already "
-                'assigned in the shared squad. More profiles are needed to give you a unique twin.')
-    result['matches'] = [selected] + [p for p in result['matches'] if p[0] != selected[0]]
-    result['assignment'] = 'Unique squad twin'
-    result['reassigned'] = selected[0] != min(result['scores'], key=result['scores'].get)
-    return result
+    import db
+    with _cache_lock:
+        with connect() as conn:
+            revision=conn.execute('SELECT revision FROM data_revision WHERE id=1').fetchone()[0]
+        key=(str(db.DB_PATH),revision)
+        now=now_ts()
+        cached=_cache.get(key)
+        if cached is None or now>=cached[0]:
+            samples=_samples()
+            results=_assign(samples,now)
+            expiries=[rows[0]['ts']+ACTIVE_DAYS*86400 for rows in samples.values() if rows[0]['ts']+ACTIVE_DAYS*86400>now]
+            expires=min([now+3600,*expiries])
+            cached=(expires,results,set(samples))
+            _cache[key]=cached
+            _cache.move_to_end(key)
+            while len(_cache)>4:
+                _cache.popitem(last=False)
+        result=cached[1].get(name.casefold())
+        if result is None:
+            result=('No recorded match in the last 30 days. Your saved history is still available in Stats.'
+                    if name.casefold() in cached[2] else f'No saved matches for **{discord.utils.escape_markdown(name[:80])}** yet.')
+        return copy.deepcopy(result)
 
 
 def build_embed(result):
@@ -227,6 +259,7 @@ def build_embed(result):
     return embed
 
 
+@timed('Twin card', slow=.5)
 def render_card(result):
     image=Image.new('RGB',(1200,630),(14,23,43))
     draw=ImageDraw.Draw(image)

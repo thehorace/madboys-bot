@@ -15,12 +15,10 @@ looks up is posted straight away. Each new match is:
 - posted to the matchday channel with a full ratings table
 - used to log each linked player's role for `/rotation`
 - posted with a **result card image** (score, scorers, colour-coded ratings)
-- followed by a **squad MOTM vote**: everyone picks their man of the match from
-  a dropdown, results are revealed when it closes (10 min), and `/motm table`
-  tracks the season's awards
+- includes **EA’s MOTM** on the result card; automatic squad voting and winner announcements are retired to reduce channel spam
 - checked for career milestones ("🎉 @Fauzan just hit 100 career goals!")
 
-Everything the bot posts by itself (results, MOTM votes, milestones, the weekly recap, the final squad list, session summaries, EA news) goes to the channel set with `/announce set`; daily sign-ups (the check-ins) stay in #general; slash commands reply where you use them.
+Everything the bot posts by itself (results, milestones, the weekly recap, the final squad list, session summaries, EA news) goes to the channel set with `/announce set`; daily sign-ups (the check-ins) stay in #general; slash commands reply where you use them.
 
 A combined weekly recap posts on Sunday evening, with a dated seven-day window, combined player totals and separate club results. Form icons explicitly show the latest 15 results per club, rather than implying they cover every match that week. This schedule is independent of the session recap. Set the channel once with
 `/matchday start`; it survives restarts and redeploys.
@@ -406,9 +404,20 @@ positions.py      exact-position logic (posted lineups, carry-over, rotation not
 cogs/positions.py "where did you play?" picker, /position, manager rotation notes
 cogs/sessions.py  session sign-ups + reminders
 cogs/link.py      Discord <-> EA name links
-cogs/motm.py      squad MOTM vote + awards table
+cogs/motm.py      historical squad vote records and quiet legacy-message closure
 cogs/hub.py       /stats button menu + /panel pinned panel
 cogs/misc.py      /help /build /ping
 cogs/announce.py  /announce: the one channel for automatic posts (helper: announce.py)
 cogs/scout.py     /scout + 🔍 Scout opponent button
 ```
+
+
+## Performance and delivery reliability
+
+Player Twin reserves profiles for EA players with a recorded match in the last **30 days**. Inactive players keep their historical stats but release their twin slot. Assignments are cached across player lookups; transactional database revision triggers invalidate that cache when matches, player stats or the club registry change. The cache also expires at the next active-window boundary, returns independent result objects and is bounded in memory. The usual minimum role sample and fauzan0410’s reserved Mbappé still apply.
+
+Delivery retries use persisted exponential delays: **30 seconds, 1, 2, 4, 8, 16 and then 30 minutes** between failed attempts, capped at 30 minutes. Workers attempt jobs when their next check is due. Backoff covers result posts, archived recaps, personal recap DMs, Player of the Day cards, position prompts and legacy vote-result edits. A card is not regenerated during its backoff period. Position prompts expire after 30 minutes to avoid asking about old games; other existing 24-hour delivery limits remain. Successful stages are acknowledged separately, so retrying an edit does not repeat another successful stage. Unlinked-player reminders are only marked delivered after a successful send.
+
+Automatic **Squad MOTM voting is retired**: no new vote messages or winner announcements follow result posts. EA’s MOTM remains on result cards. Existing votes close quietly by updating their original messages, and historical awards remain available in `/motm table`. Queued vote openings and winner announcements are discarded on startup.
+
+The private Bot Status screen shows pending delivery counts, oldest waiting item, next eligible retry, the last fully complete EA check and the current recap waiting reason. Recent timings include database work, EA requests, card rendering, session archiving and Player Twin assignment calculation. Each operation retains at most 120 timing samples in memory; slow operations log their label and duration, without SQL text or player names. Session grouping and archival run in worker threads to avoid blocking button responses while history grows.

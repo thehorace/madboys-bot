@@ -1,6 +1,7 @@
 """Durable session recaps; private player summaries never use RSVP as attendance."""
 import io
 import asyncio
+import delivery
 import json
 import logging
 import time
@@ -18,6 +19,7 @@ from cogs.operations import report_health
 from interaction_tracking import TrackedView
 from clubs import monitored_clubs, match_key, match_club, raw_match_key, club_for
 from match_data import VOID_SCHEMA
+from performance import timed
 
 log = logging.getLogger("madboys-bot.session_reports")
 DEFAULT_GAP = 120      # keep one evening together through queues, club switches and EA delays
@@ -115,6 +117,7 @@ def session_activity(conn, session, club_ids, boundary, gap, start_window, assig
     return matches, last_activity
 
 
+@timed('Session archive', slow=.5)
 def archive_sessions(gid, now, settings=None, in_voice=False):
     """Group timestamped matches by planned session and inactivity; atomic snapshots."""
     settings = settings or report_settings(gid)
@@ -556,13 +559,14 @@ class SessionReportsCog(commands.Cog):
             set_setting(gid, 'reports:evening_gap_v1', '1')
         settings = report_settings(gid)   # read once per check
         if finalize:
-            add_followup_sessions(gid, now)
+            await asyncio.to_thread(add_followup_sessions,gid,now)
             tracker=self.bot.get_cog('MatchdayCog')
             snapshot_settings={**settings,'coverage_incomplete':bool(getattr(tracker,'last_poll_degraded',False))}
-            archive_sessions(gid, now, snapshot_settings, in_voice=squad_in_voice(guild))
+            await asyncio.to_thread(archive_sessions,gid,now,snapshot_settings,in_voice=squad_in_voice(guild))
         if not settings["enabled"]:
             with connect() as conn:
                 conn.execute("UPDATE session_history SET message_id='suppressed' WHERE guild_id=? AND message_id IS NULL", (gid,))
+                conn.execute("DELETE FROM delivery_jobs WHERE guild_id=? AND kind='recap'",(gid,))
         with connect() as conn:
             pending = conn.execute("SELECT session_id FROM session_history WHERE guild_id=? AND message_id IS NULL", (gid,)).fetchall()
         errors = []
@@ -570,8 +574,14 @@ class SessionReportsCog(commands.Cog):
         for r in pending:
             record = history(gid, r[0])[0]
             if record["outcome"] != "completed" or now - record["ended_at"] > 86400:
+                delivery.ack('recap',f"{gid}:{r[0]}")
                 with connect() as conn:
                     conn.execute("UPDATE session_history SET message_id='suppressed' WHERE session_id=?", (r[0],))
+                continue
+            job_key=f"{gid}:{r[0]}"
+            delivery.enqueue('recap',job_key,gid,CLUB_ID,{},lifetime=max(1,86400-(now-record['ended_at'])))
+            job=delivery.get('recap',job_key)
+            if not delivery.due(job):
                 continue
             channel_id = settings["channel"]
             choices = [c for c in guild.text_channels if c.name.lower() == "general"] if not channel_id else []
@@ -589,7 +599,9 @@ class SessionReportsCog(commands.Cog):
                     if settings['potd']:
                         conn.execute("INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)",
                                      (gid, f'potd:pending:{r[0]}', '1'))
+                delivery.ack('recap',job_key)
             except Exception as exc:
+                delivery.fail(job,exc)
                 errors.append(exc)
                 continue
             attempted_potd.add(record['session_id'])
@@ -598,7 +610,11 @@ class SessionReportsCog(commands.Cog):
         errors.extend(await self.send_personal_summaries(guild, now))
         if errors:
             raise errors[0]
-        await report_health(self.bot, gid, "Session summaries")
+        with connect() as conn:
+            waiting=conn.execute("SELECT 1 FROM session_history WHERE guild_id=? AND message_id IS NULL AND outcome='completed' AND ended_at>=? LIMIT 1",(gid,now-86400)).fetchone()
+            waiting=waiting or conn.execute("SELECT 1 FROM session_summary_dms d JOIN session_history h ON h.session_id=d.session_id WHERE h.guild_id=? AND d.status='pending' AND h.ended_at>=? LIMIT 1",(gid,now-86400)).fetchone()
+        if not waiting:
+            await report_health(self.bot, gid, "Session summaries")
 
     async def retry_player_of_the_day(self, guild, now, attempted=(), settings=None):
         """Only retry explicitly queued cards, never backfill historical recaps."""
@@ -612,6 +628,7 @@ class SessionReportsCog(commands.Cog):
         for row in pending:
             if not settings['potd'] or row['session_id'] is None or now-row['ended_at'] > 86400 or row['message_id'] in (None,'suppressed'):
                 set_setting(gid, row['key'], None)
+                delivery.ack('potd',f"{gid}:{row['session_id']}")
                 continue
             if row['session_id'] in attempted:
                 continue
@@ -628,13 +645,21 @@ class SessionReportsCog(commands.Cog):
         import potd
         from cogs.sessions import _tz
         gid, sid = str(guild.id), record["session_id"]
+        key=f'{gid}:{sid}'
+        job=None
         try:
             if not report_settings(gid)["potd"] or potd.already_done(sid):
                 set_setting(gid, f'potd:pending:{sid}', None)
+                delivery.ack('potd',key)
+                return
+            delivery.enqueue('potd',key,gid,CLUB_ID,{},lifetime=max(1,min(86400,86400-(int(time.time())-record.get('ended_at',int(time.time()))))))
+            job=delivery.get('potd',key)
+            if not delivery.due(job):
                 return
             result = await asyncio.to_thread(potd.compute, session_matches(record))
             if result is None:
                 set_setting(gid, f'potd:pending:{sid}', None)
+                delivery.ack('potd',key)
                 return
             winner = result["winner"]
             links = get_all_links(gid)
@@ -650,12 +675,15 @@ class SessionReportsCog(commands.Cog):
             message = await channel.send(embed=embed, file=discord.File(io.BytesIO(png), "player-of-the-day.png"),
                                          allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             potd.save(gid, sid, result, did, str(message.id), int(time.time()))
+            delivery.ack('potd',key)
             set_setting(gid, f'potd:pending:{sid}', None)
             badges = self.bot.get_cog("BadgesCog")
             if badges and did:
                 await badges.refresh_member(guild, did)
             await report_health(self.bot, gid, "Player of the Day")
-        except Exception:
+        except Exception as exc:
+            if job:
+                delivery.fail(job,exc)
             log.exception("Player of the Day failed for session %s", sid)
             await report_health(self.bot, gid, "Player of the Day",
                                 "Couldn't post the Player of the Day card. Check the recap channel's permissions "
@@ -671,14 +699,19 @@ class SessionReportsCog(commands.Cog):
         if not pending:
             return errors
         enabled = report_settings(gid)["dms"]
-        for delivery in pending:
-            sid, did = delivery["session_id"], delivery["discord_id"]
+        for item in pending:
+            sid, did = item["session_id"], item["discord_id"]
+            key=f'{gid}:{sid}:{did}'
             status, message_id = "pending", None
             if not enabled:
                 status = "suppressed"
-            elif now - delivery["ended_at"] > 86400:
+            elif now - item["ended_at"] > 86400:
                 status = "expired"
             else:
+                delivery.enqueue('dm',key,gid,CLUB_ID,{},lifetime=max(1,86400-(now-item['ended_at'])))
+                job=delivery.get('dm',key)
+                if not delivery.due(job):
+                    continue
                 try:
                     member = guild.get_member(int(did)) or await guild.fetch_member(int(did))
                     record = history(gid, sid)[0]
@@ -690,8 +723,11 @@ class SessionReportsCog(commands.Cog):
                 except discord.NotFound:
                     status = "unavailable"
                 except Exception as exc:
+                    delivery.fail(job,exc)
                     errors.append(exc)
                     log.warning("Session %s DM failed for %s; will retry", sid, did)
+            if status!='pending':
+                delivery.ack('dm',key)
             with connect() as conn:
                 conn.execute("UPDATE session_summary_dms SET status=?,message_id=? WHERE session_id=? AND discord_id=?", (status, message_id, sid, did))
         return errors

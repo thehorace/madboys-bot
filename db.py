@@ -10,6 +10,7 @@ back — it does NOT close the connection. connect() below does both.
 
 import logging
 import sqlite3
+from performance import measure
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator, Optional
@@ -21,6 +22,13 @@ log = logging.getLogger("madboys-bot.db")
 
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
+    with measure('Database work', slow=.25):
+        with _connect() as conn:
+            yield conn
+
+
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA synchronous=NORMAL")   # safe with WAL; roughly halves the cost of each write
@@ -44,6 +52,16 @@ CREATE TABLE IF NOT EXISTS monitored_clubs (
     name TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS data_revision (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);
+INSERT OR IGNORE INTO data_revision VALUES (1,0);
+CREATE TABLE IF NOT EXISTS delivery_jobs (
+    kind TEXT NOT NULL, job_key TEXT NOT NULL, guild_id TEXT NOT NULL,
+    club_id INTEGER NOT NULL, payload TEXT NOT NULL, queued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+    PRIMARY KEY(kind,job_key)
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_due ON delivery_jobs(kind,next_attempt);
 -- ---------- existing tables (unchanged, so old databases keep working) ----------
 CREATE TABLE IF NOT EXISTS ea_links (
     guild_id   TEXT NOT NULL,
@@ -299,6 +317,10 @@ def init_all():
             conn.execute("ALTER TABLE rotation_log ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
         _migrate_active_formation_pk(conn)
         conn.executescript(SCHEMA)
+        for table in ('matches','match_players','monitored_clubs'):
+            for event in ('INSERT','UPDATE','DELETE'):
+                conn.execute(f'CREATE TRIGGER IF NOT EXISTS rev_{table}_{event} AFTER {event} ON {table} '
+                             'BEGIN UPDATE data_revision SET revision=revision+1 WHERE id=1; END')
         conn.executemany("INSERT OR IGNORE INTO monitored_clubs (club_id,name) VALUES (?,?)",
                          [(c["club_id"], c["name"]) for c in INITIAL_CLUBS])
         # columns added to match_players after it first shipped

@@ -56,12 +56,14 @@ class OctoberReviewTests(Base):
         sid=self.session(START)
         self.game(START+600,players=[('Ali',{'r':8,'g':2})])
         self.channel.send.side_effect=[SimpleNamespace(id=100),RuntimeError('Temporary Discord failure'),SimpleNamespace(id=101)]
-        with patch.object(potd,'render_card',return_value=b'png'):
+        with patch.object(potd,'render_card',return_value=b'png') as render:
             await self.poll(START+2500)
             self.assertEqual(self.channel.send.await_count,2)
             self.assertEqual(db.get_setting('10',f'potd:pending:{sid}'),'1')
             self.assertEqual(reports.history('10')[0]['message_id'],'100')
             self.cog=reports.SessionReportsCog(self.bot)
+            await self.poll(START+2510)
+            self.assertEqual(render.call_count,1)  # not rebuilt during backoff, even after restart
             await self.poll(START+2600)
             self.assertEqual(self.channel.send.await_count,3)
             self.assertTrue(potd.already_done(sid))

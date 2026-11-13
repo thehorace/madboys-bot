@@ -94,6 +94,30 @@ def status_embed(bot, gid):
             "WHERE h.guild_id=? AND outcome='completed' ORDER BY s.starts_at DESC,s.id DESC LIMIT 1) GROUP BY status", (gid,)).fetchall()
     delivery_text = " · ".join(f"{r['count']} {r['status']}" for r in deliveries) or "None recorded"
     embed.add_field(name="Session summaries", value=f"Club posts: {'On' if reports['enabled'] else 'Off'} · Personal DMs: {'On' if reports['dms'] else 'Off'}\nEnds {reports['gap']} min after the last game · {saved} sessions saved\nLatest session DMs: {delivery_text}\nOnly closes after a successful EA check", inline=False)
+    import delivery
+    from performance import snapshot
+    queued,retry=delivery.status(gid)
+    lines=[f"{r['kind'].replace('_',' ')}: **{r['count']}**"+(f" · {r['last_error'][:80]}" if r.get('last_error') else '') for r in queued]
+    oldest=min((r['oldest'] for r in queued if r['oldest'] is not None),default=None)
+    if oldest:
+        lines.append(f'Oldest waiting item: {stamp(oldest)}')
+    if retry:
+        lines.append(f'Next retry eligible: {stamp(retry)}')
+    embed.add_field(name='Pending deliveries',value='\n'.join(lines)[:1024] or 'No pending deliveries.',inline=False)
+    complete=getattr(tracker,'last_complete_at',None) or get_setting(gid,'matchday:last_complete')
+    embed.add_field(name='Last complete EA check',value=stamp(complete),inline=False)
+    import progress
+    from cogs.session_reports import squad_in_voice
+    guild=getattr(bot,'get_guild',lambda _:None)(int(gid))
+    state=progress.session_embed(gid,in_voice=squad_in_voice(guild) if guild else False,
+        tracker_ok=getattr(tracker,'last_poll_ok',None),tracker_running=bool(tracker and tracker.ticker.is_running()))
+    reason=(state.description or 'No active session.')
+    if any(r['kind']=='recaps' for r in queued):
+        reason='An archived recap is waiting for Discord delivery. See the pending deliveries above.\n'+reason
+    embed.add_field(name='Recap progress',value=reason[:1024],inline=False)
+    timings=snapshot()
+    if timings:
+        embed.add_field(name='Recent performance',value='\n'.join(f"{name}: {data['mean']*1000:.0f} ms average · {data['max']*1000:.0f} ms max ({data['count']} samples)" for name,data in timings.items())[:1024],inline=False)
     embed.add_field(name="Needs attention", value=("\n".join(f"**{r['service']}**: {r['problem']}" for r in problems)[:1024] or "No recorded failures. Check the service states above."), inline=False)
     embed.add_field(name="Version", value=version_line(), inline=False)
     embed.set_footer(text="Private • Refresh to update these values")

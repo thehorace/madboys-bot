@@ -27,6 +27,16 @@ class TrackerSpeedTests(TMC.MultiClubTests):
         self.assertLess(time.perf_counter() - t0, 0.35)   # one wait, not one per club
         self.assertTrue(self.tracker.last_poll_ok)
 
+    async def test_results_do_not_start_squad_motm_votes(self):
+        from types import SimpleNamespace
+        self.seed()
+        voting=SimpleNamespace(open_poll=AsyncMock())
+        self.bot.get_cog=lambda name:voting if name=='MotmCog' else self.reports if name=='SessionReportsCog' else None
+        self.tracker.ea.get_recent_matches_multi.side_effect=lambda cid,**kw:[self.raw(clubs.club_for(cid),'new',200)]
+        await self.tracker.poll_once()
+        voting.open_poll.assert_not_awaited()
+        self.assertEqual(self.channel.send.await_count,2)
+
     async def test_milestones_run_after_every_club_has_posted(self):
         self.seed()
         order = []
@@ -153,6 +163,9 @@ class TrackerSpeedTests(TMC.MultiClubTests):
         self.tracker.ea.get_recent_matches_multi.side_effect=RuntimeError('relay down')
         with patch.object(matchday,'report_health',AsyncMock()):
             await self.tracker.poll_once()
+            self.assertEqual(self.channel.send.await_count,2)  # backoff skips rendering/sending
+        retry_time=time.time()+31
+        with patch.object(matchday,'report_health',AsyncMock()), patch.object(matchday.time,'time',return_value=retry_time):
             await self.tracker.poll_once()
         self.assertEqual(self.channel.send.await_count,3)
         self.assertIn(self.primary['name'],self.channel.send.call_args.kwargs['content'])

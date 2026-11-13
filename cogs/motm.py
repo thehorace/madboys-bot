@@ -1,24 +1,15 @@
-"""
-Squad Man of the Match vote — your MOTM, not EA's.
+"""Historical squad MOTM records and quiet closure of legacy vote messages.
 
-After each full-time post the bot posts a vote: a dropdown of everyone who
-played that game. Anyone in the server can vote (one vote each, changeable),
-but not for themselves if they're linked. Totals stay hidden while voting is
-open so nobody just follows the crowd; when it closes (MOTM_VOTE_MINUTES,
-default 10) the message shows the results and the winner gets a shout-out.
-Ties share the award.
-
-  /motm table   - Season table of squad MOTM awards
-  /motm close   - Manager: close the open vote now
-
-The dropdown is persistent (fixed custom_id; the poll is looked up from the
-message it's on), so votes keep working after a restart, and polls whose time
-ran out while the bot was down get closed as soon as it's back.
+New squad votes and winner announcements are retired. EA MOTM remains on
+result cards. Existing messages can finish through their persistent handlers;
+failed result edits retry without posting a new channel message.
 """
 
 from clubs import club_id, club_name, club_scoped, match_key
 from clubs import club_for
 import json
+import asyncio
+import delivery
 import logging
 import time
 from collections import Counter
@@ -172,88 +163,59 @@ class MotmView(TrackedView):
             pass
 
 
-def _options_for(pm: md.ParsedMatch) -> list[discord.SelectOption]:
-    ea = md.motm_of(pm)
-    opts = []
-    for p in sorted(pm.players, key=lambda p: -(p.rating or 0))[:25]:
-        bits = [f"{p.rating:.1f}" if p.rating is not None else None,
-                md.POS_SHORT.get((p.pos or "").lower()),
-                " ".join(([f"{p.goals}G"] if p.goals else []) + ([f"{p.assists}A"] if p.assists else [])) or None]
-        opts.append(discord.SelectOption(label=p.name[:100], value=p.name[:100],
-                                         description=" • ".join(b for b in bits if b)[:100] or None,
-                                         emoji="⭐" if ea is p else None))
-    return opts
-
-
 class MotmCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Retired automatic voting: never replay a queued vote or winner ping.
+        with connect() as conn:
+            conn.execute("DELETE FROM delivery_jobs WHERE kind IN ('motm_open','motm_announce')")
+            conn.execute('UPDATE motm_polls SET closes_at=MIN(closes_at,?) WHERE closed=0',(int(time.time()),))
         self.closer.start()
 
     def cog_unload(self):
         self.closer.cancel()
 
-    async def open_poll(self, channel: discord.abc.Messageable, guild_id: str, pm: md.ParsedMatch):
-        """Called by the match tracker right after a full-time post."""
-        options = _options_for(pm)
-        if len(options) < 2:
-            return  # nothing to vote on
-        ea = md.motm_of(pm)
-        poll = {
-            "match_id": match_key(pm.match_id, pm.club_id), "club_id": pm.club_id, "guild_id": guild_id, "channel_id": str(getattr(channel, "id", "")),
-            "title": f"{club_for(pm.club_id)['name']} · {pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}",
-            "candidates": json.dumps([o.value for o in options]),
-            "ea_motm": ea.name if ea else None,
-            "closes_at": int(time.time() + MOTM_VOTE_MINUTES * 60),
-        }
-        with connect() as conn:
-            if conn.execute("SELECT 1 FROM motm_polls WHERE match_id=?", (poll['match_id'],)).fetchone():
+    async def _deliver(self,job,payload):
+        poll=payload['poll']
+        channel_id=int(poll['channel_id'])
+        channel=self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        if poll.get('message_id'):
+            try:
+                msg=await channel.fetch_message(int(poll['message_id']))
+                await msg.edit(embed=results_embed(poll,payload['votes'],payload['winners']),view=None)
+            except discord.NotFound:
                 return
-            conn.execute("""INSERT INTO motm_polls (match_id, guild_id, channel_id, title, candidates, ea_motm, closes_at, club_id)
-                            VALUES (:match_id, :guild_id, :channel_id, :title, :candidates, :ea_motm, :closes_at, :club_id)""", poll)
-        try:
-            msg = await channel.send(embed=open_embed(poll, 0), view=MotmView(options))
-        except discord.HTTPException:
-            log.warning("Couldn't post MOTM vote")
-            return
-        if msg is None:
-            return
-        with connect() as conn:
-            conn.execute("UPDATE motm_polls SET message_id=? WHERE match_id=?", (str(msg.id), poll['match_id']))
+
+    async def retry_deliveries(self):
+        if not hasattr(self,'_delivery_lock'):
+            self._delivery_lock=asyncio.Lock()
+        async with self._delivery_lock:
+            await delivery.dispatch(('motm_edit',),self._deliver)
 
     async def close_poll(self, poll: dict):
-        votes = get_votes(poll["match_id"])
-        tally = Counter(votes.values())
-        top = max(tally.values()) if tally else 0
-        winners = sorted(n for n, c in tally.items() if c == top) if top else []
+        votes=get_votes(poll['match_id'])
+        tally=Counter(votes.values())
+        top=max(tally.values()) if tally else 0
+        winners=sorted(n for n,c in tally.items() if c==top) if top else []
         with connect() as conn:
-            conn.execute("UPDATE motm_polls SET closed=1, winners=? WHERE match_id=?",
-                         (json.dumps(winners), poll["match_id"]))
-        try:
-            ch = self.bot.get_channel(int(poll["channel_id"])) or await self.bot.fetch_channel(int(poll["channel_id"]))
-        except (discord.HTTPException, ValueError):
-            return
-        try:
-            if poll.get("message_id"):
-                msg = await ch.fetch_message(int(poll["message_id"]))
-                await msg.edit(embed=results_embed(poll, votes, winners), view=None)
-            if winners:
-                from cogs.link import find_discord_id_by_ea_name
-                who = []
-                for w in winners:
-                    did = find_discord_id_by_ea_name(poll["guild_id"], w)
-                    who.append(f"<@{did}>" if did else f"**{w}**")
-                await ch.send(f"🏆 Squad MOTM for {poll['title']}: {' & '.join(who)} "
-                              f"with {top} vote{'s' if top != 1 else ''}!")
-        except discord.HTTPException:
-            log.warning(f"Couldn't update MOTM poll {poll['match_id']}")
+            current=conn.execute('SELECT closed FROM motm_polls WHERE match_id=?',(poll['match_id'],)).fetchone()
+            if not current or current['closed']:
+                return
+            conn.execute('UPDATE motm_polls SET closed=1,winners=? WHERE match_id=?',(json.dumps(winners),poll['match_id']))
+            payload={'poll':poll,'votes':votes,'winners':winners,'top':top}
+            cid=poll.get('club_id',club_id())
+            delivery.enqueue('motm_edit',poll['match_id'],poll['guild_id'],cid,payload,conn=conn)
+            # Existing votes close by editing their message; no winner post.
+        await self.retry_deliveries()
 
-    @tasks.loop(seconds=20)  # short votes should close on time, not up to a minute late
+    @tasks.loop(seconds=20)
     @survive
     async def closer(self):
+        await self.retry_deliveries()
         with connect() as conn:
-            due = [dict(r) for r in conn.execute(
-                "SELECT * FROM motm_polls WHERE closed=0 AND closes_at<=?", (int(time.time()),))]
+            conn.execute("UPDATE motm_polls SET closed=1,winners='[]' WHERE closed=0 AND message_id IS NULL AND closes_at<=? "
+                         "AND NOT EXISTS (SELECT 1 FROM delivery_jobs j WHERE j.kind='motm_open' AND j.job_key=motm_polls.match_id AND j.expires_at>?)",(int(time.time()),int(time.time())))
+            due=[dict(r) for r in conn.execute('SELECT * FROM motm_polls WHERE closed=0 AND message_id IS NOT NULL AND closes_at<=?',(int(time.time()),))]
         for poll in due:
             await self.close_poll(poll)
 

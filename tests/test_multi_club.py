@@ -136,15 +136,16 @@ class MultiClubTests(unittest.IsolatedAsyncioTestCase):
         for club in (self.primary,self.secondary):
             pm=self.store(club,'same',200)
             with clubs.club_scope(club):
-                await cog.open_poll(self.channel,'10',pm)
                 key=clubs.match_key('same')
+                with db.connect() as conn:
+                    conn.execute("INSERT INTO motm_polls (match_id,guild_id,channel_id,title,candidates,closes_at,club_id) VALUES (?,'10','20',?,'[\"Fauz\",\"Other\"]',9999999999,?)",(key,club['name'],club['club_id']))
                 motm.cast_vote(key,'42','Fauz')
                 with db.connect() as conn:
                     conn.execute("UPDATE motm_polls SET closed=1,winners=? WHERE match_id=?",(json.dumps(['Fauz']),key))
                 self.assertEqual(motm.season_table(),[('Fauz',1,1)])
         with db.connect() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM motm_polls').fetchone()[0],2)
-        self.assertEqual(self.channel.send.await_count,2)
+        self.channel.send.assert_not_awaited()
 
     async def test_session_includes_both_without_merging_player_stats(self):
         start=1800000000

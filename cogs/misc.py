@@ -26,7 +26,7 @@ HELP_SECTIONS = [
         ("/scout", "Any opponent's record, form and our head-to-head"),
         ("/recap", "Summary of the last N days"),
         ("/weeklyprogress", "Compare the last two weeks"),
-        ("/motm table", "Squad MOTM awards (voted after every game)"),
+        ("/motm table", "Past squad MOTM voting awards"),
     ]),
     ("🏅 Squad", [
         ("/badges", "Your badges, and which emoji shows on your nickname"),

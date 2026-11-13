@@ -13,6 +13,12 @@ from tests.test_squad_features import Base, ts
 
 
 class PlayerTwinTests(Base):
+    def setUp(self):
+        super().setUp()
+        clock=patch.object(T,'now_ts',return_value=ts(2026,10,4))
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def appearances(self,role,count=5,goals=0,assists=0,passes=0,attempts=0,tackles=0,saves=0,club=CLUB_ID,name='Ali',offset=0):
         mids=[]
         for i in range(count):
@@ -22,6 +28,31 @@ class PlayerTwinTests(Base):
                              (passes,attempts,tackles,club,mid))
             mids.append(mid)
         return mids
+
+    async def test_cached_assignments_refresh_after_stat_changes_and_are_not_mutable(self):
+        self.appearances('forward',goals=1,name='Ali')
+        self.appearances('defender',passes=10,tackles=1,name='Bob')
+        with patch.object(T,'_samples',wraps=T._samples) as read:
+            result=T.analyse('Ali')
+            result['stats']['goals']=99
+            T.analyse('Bob')
+            self.assertEqual(T.analyse('Ali')['stats']['goals'],1)
+            self.assertEqual(read.call_count,1)
+            with db.connect() as conn:
+                conn.execute("UPDATE match_players SET goals=2 WHERE name='Ali'")
+            self.assertEqual(T.analyse('Ali')['stats']['goals'],2)
+            self.assertEqual(read.call_count,2)
+
+    async def test_inactive_players_release_slots_and_cache_expires_at_boundary(self):
+        for i in range(8):
+            self.appearances('goalkeeper',saves=3,name=f'Old {i}',offset=-40*86400)
+        self.appearances('goalkeeper',saves=3,name='Active')
+        self.assertIsInstance(T.analyse('Active'),dict)
+        self.assertIn('last 30 days',T.analyse('Old 0'))
+        self.assertIn('Old 0',T.roster_names())
+        expiry=ts(2026,10,3)+2400+30*86400
+        with patch.object(T,'now_ts',return_value=expiry):
+            self.assertIn('last 30 days',T.analyse('Active'))
 
     async def test_goal_focused_forward_and_creator_have_different_twins(self):
         self.appearances('forward',goals=2,passes=5,attempts=7,name='Finisher')

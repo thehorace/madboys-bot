@@ -15,6 +15,7 @@ Shareable result card image (PNG), attached to every full-time post and to
 
 from clubs import club_name
 import io
+from performance import timed
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -79,6 +80,7 @@ def _when(ts: int) -> str:
 
 
 @match_scoped
+@timed('Match card', slow=.5)
 def render_match_card(pm: ParsedMatch) -> io.BytesIO:
     img = Image.new("RGB", (W, H), BG_TOP)
     d = ImageDraw.Draw(img)
