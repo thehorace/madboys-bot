@@ -450,9 +450,11 @@ def match_embed(pm: ParsedMatch, footer_extra: str = "", with_table: bool = True
 
 
 @match_scoped
-async def match_post(pm: ParsedMatch, footer_extra: str = "") -> tuple[discord.Embed, Optional[discord.File]]:
+async def match_post(pm: ParsedMatch, footer_extra: str = "", compact: bool = False) -> tuple[discord.Embed, Optional[discord.File]]:
     """Embed + result card image. Falls back to the text table if the image fails for any reason."""
     import asyncio
+    if compact:
+        return match_embed(pm, footer_extra, with_table=False), None
     try:
         from match_card import render_match_card
         png = await asyncio.to_thread(render_match_card, pm)

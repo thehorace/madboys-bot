@@ -232,7 +232,8 @@ def rotation_note(guild_id: str, discord_id: str, builds: list[str]) -> Optional
     when a new streak starts, so each streak is mentioned once, not after every game.
     """
     entries = get_recent_positions(guild_id, club_name(), discord_id, limit=15)
-    positions = [e["position"] for e in entries]
+    from cogs.rotation import evidence_position
+    positions = [evidence_position(e) for e in entries]
     area, run = current_streak(positions)
     if not area or run < ROTATION_THRESHOLD or area == "GK":
         return None   # keepers staying in goal is the plan, not a rotation problem

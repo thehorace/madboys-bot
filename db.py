@@ -282,6 +282,13 @@ CREATE TABLE IF NOT EXISTS session_history (
 );
 CREATE INDEX IF NOT EXISTS idx_session_history_guild ON session_history(guild_id, ended_at);
 
+CREATE TABLE IF NOT EXISTS session_revision_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    changed_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS session_summary_dms (
     session_id INTEGER NOT NULL,
     discord_id TEXT NOT NULL,

@@ -124,7 +124,8 @@ class TonightEndToEndTests(unittest.IsolatedAsyncioTestCase):
                          "VALUES (?,?,'leagueMatch',?,1,2,'L','now')", (R.CLUB_ID, "krix", S + 1700))
             conn.execute("INSERT INTO session_history VALUES (?,?,?,?,?,?,?,?)",
                          (sid, "10", S + 1700, "completed", json.dumps([R.match_key("krix", R.CLUB_ID)]), "[]", "[]", "99"))
-            for i, t in enumerate((4320, 5640, 6900, 8220, 9480, 10080)):
+            # Outside the old session's 30-minute gap + match-duration allowance.
+            for i, t in enumerate((5000, 5640, 6900, 8220, 9480, 10080)):
                 conn.execute("INSERT INTO matches (club_id,match_id,match_type,ts,our_goals,opp_goals,opp_name,result,stored_at) "
                              "VALUES (?,?,'leagueMatch',?,3,1,'Opp','W','now')", (R.CLUB_ID, f"mb{i}", S + t))
                 for name, rating, goals in (("fauzan0410", 8.4, 2), ("thehorace", 7.0, 0)):

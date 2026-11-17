@@ -20,7 +20,8 @@ async def build_session(bot, guild):
     running=bool(tracker and tracker.ticker.is_running())
     return await asyncio.to_thread(P.session_embed,str(guild.id),in_voice=squad_in_voice(guild),
         tracker_ok=getattr(tracker,'last_poll_ok',None),tracker_running=running,
-        next_check=tracker.next_poll_at if running else None)
+        next_check=tracker.next_poll_at if running else None,
+        club_states=tuple(dict(s) for s in getattr(tracker,'club_status',{}).values()))
 
 
 def roster(cid):

@@ -168,7 +168,7 @@ class TrackerSpeedTests(TMC.MultiClubTests):
         with patch.object(matchday,'report_health',AsyncMock()), patch.object(matchday.time,'time',return_value=retry_time):
             await self.tracker.poll_once()
         self.assertEqual(self.channel.send.await_count,3)
-        self.assertIn(self.primary['name'],self.channel.send.call_args.kwargs['content'])
+        self.assertIn(self.primary['name'],self.channel.send.call_args.kwargs['embed'].title)
         self.reports.after_poll.assert_not_awaited()
         with db.connect() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM matchday_outbox').fetchone()[0],0)

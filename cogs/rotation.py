@@ -6,12 +6,9 @@ Commands:
   /rotation history  - Recent position history for a player
   /rotation stats    - Games per position for each player
 
-History comes from every tracked match (cogs/matchday.py + positions.py):
-  - EA only says defender / midfielder / forward / goalkeeper, so the exact
-    spot (LB vs CB...) comes from the lineup a manager posted, or from the
-    player tapping where they played after the game.
-  - Games nobody confirmed are stored as DEF / MID / FWD and only compared
-    at that broad level (see current_streak()).
+History comes from tracked matches. Exact EA/player-confirmed slots are verified;
+saved defaults are labelled inference. Rotation uses an inferred row's EA broad
+role when available, and Unknown otherwise. A saved default alone is not proof.
 """
 
 from clubs import club_name, club_scoped
@@ -139,11 +136,30 @@ def mark_match_processed(guild_id: str, club: str, match_id: str):
 def get_recent_positions(guild_id: str, club: str, discord_id: str, limit: int = 10) -> list[dict]:
     with connect() as conn:
         rows = conn.execute("""
-            SELECT position, logged_at, source FROM rotation_log
+            SELECT position, logged_at, source, ea_role FROM rotation_log
             WHERE guild_id=? AND club=? AND discord_id=?
             ORDER BY logged_at DESC, id DESC LIMIT ?
         """, (guild_id, club, discord_id, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+def evidence_position(entry):
+    if entry.get('source') in ('ea', 'player', 'manual'):
+        return entry['position']
+    if entry.get('ea_role') in AREA_NAMES:
+        return entry['ea_role']
+    # Old broad EA buckets remain valid area evidence; old exact guesses do not.
+    return entry['position'] if entry['position'] in BROAD else 'Unknown'
+
+
+def confidence_counts(guild_id, club):
+    with connect() as conn:
+        rows = conn.execute('SELECT discord_id,source,position,COUNT(*) n FROM rotation_log WHERE guild_id=? AND club=? GROUP BY discord_id,source,position', (guild_id, club)).fetchall()
+    counts = defaultdict(lambda: defaultdict(int))
+    for row in rows:
+        kind = 'unknown' if row['position'].upper() == 'UNKNOWN' else 'confirmed' if row['source'] in ('ea', 'player', 'manual') else 'inferred'
+        counts[row['discord_id']][kind] += row['n']
+    return counts
 
 
 def get_all_recent(guild_id: str, club: str, limit_per_player: int = 5) -> dict[str, list[str]]:
@@ -154,15 +170,15 @@ def get_all_recent(guild_id: str, club: str, limit_per_player: int = 5) -> dict[
     """
     with connect() as conn:
         rows = conn.execute("""
-            SELECT discord_id, position FROM (
-                SELECT discord_id, position,
+            SELECT discord_id, position, source, ea_role FROM (
+                SELECT discord_id, position, source, ea_role,
                        ROW_NUMBER() OVER (PARTITION BY discord_id ORDER BY logged_at DESC, id DESC) AS rn
                 FROM rotation_log WHERE guild_id=? AND club=?
             ) WHERE rn <= ? ORDER BY discord_id, rn
         """, (guild_id, club, limit_per_player)).fetchall()
     result: dict[str, list[str]] = defaultdict(list)
     for r in rows:
-        result[r["discord_id"]].append(r["position"])
+        result[r["discord_id"]].append(evidence_position(dict(r)))
     return dict(result)
 
 
@@ -217,7 +233,7 @@ class RotationCog(commands.Cog):
             embed.add_field(name="Rotating well", value=clip("\n".join(healthy[:15])), inline=False)
         embed.set_footer(text=f"Flags {ROTATION_THRESHOLD}+ games in a row in the same area (Defence / Midfield / "
                               f"Front 3) • keepers aren't flagged • "
-                              f"Includes saved/inferred defaults; /rotation history shows sources")
+                              f"Uses confirmed positions or EA broad roles; saved defaults alone do not count")
         await interaction.followup.send(embed=embed)
 
     @rotation_group.command(name="history", description="Show recent position history for a player")
@@ -249,6 +265,7 @@ class RotationCog(commands.Cog):
     @club_scoped
     async def rotation_stats(self, interaction: discord.Interaction):
         counts = get_position_counts(str(interaction.guild_id), club_name())
+        confidence = confidence_counts(str(interaction.guild_id), club_name())
         if not counts:
             await interaction.response.send_message(f"No rotation data for {club_name()} yet.", ephemeral=True)
             return
@@ -262,7 +279,8 @@ class RotationCog(commands.Cog):
                 merged[base if is_exact(base) or base.upper()=='UNKNOWN' else f"{base}?"] += c
             total = sum(merged.values())
             breakdown = ", ".join(f"{p} ×{c}" for p, c in sorted(merged.items(), key=lambda x: -x[1]))
-            lines.append((name.lower(), f"**{name}** ({total}): {breakdown}"))
+            proof = confidence[discord_id]
+            lines.append((name.lower(), f"**{name}** ({total}): {breakdown}\n{proof['confirmed']} confirmed · {proof['inferred']} inferred · {proof['unknown']} unknown"))
         embed = discord.Embed(title=f"📊 {club_name()} — Games per Position (All Time)",
                               description=clip("\n".join(l for _, l in sorted(lines)), 4096), colour=CLUB_COLOUR)
         embed.set_footer(text='Includes saved/inferred positions and Unknown • Source details are in /rotation history')

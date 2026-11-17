@@ -40,13 +40,31 @@ def report_settings(gid):
             "channel": announce_channel_id(gid, saved.get("reports:channel"))}
 
 
-def history(gid, session_id=None, offset=0):
+def history(gid, session_id=None, offset=0, filters=None):
     with connect() as conn:
         query = "SELECT h.*,s.starts_at,s.note FROM session_history h JOIN sessions s ON s.id=h.session_id WHERE h.guild_id=? AND h.outcome!='merged'"
         args = [gid]
         if session_id is not None:
             query += " AND h.session_id=?"
             args.append(session_id)
+        filters = filters or {}
+        for key, op in [('since', '>='), ('until', '<')]:
+            if filters.get(key) is not None:
+                query += f' AND s.starts_at{op}?'
+                args.append(filters[key])
+        if filters.get('player'):
+            query += " AND EXISTS (SELECT 1 FROM json_each(h.players) p WHERE instr(lower(json_extract(p.value,'$.name')),lower(?))>0)"
+            args.append(filters['player'])
+        if filters.get('club') or filters.get('opponent'):
+            query += " AND EXISTS (SELECT 1 FROM json_each(h.match_ids) j JOIN matches m ON j.value=CASE WHEN m.club_id=? THEN m.match_id ELSE m.club_id||':'||m.match_id END WHERE 1=1"
+            args.append(CLUB_ID)
+            if filters.get('club'):
+                query += ' AND m.club_id=?'
+                args.append(filters['club'])
+            if filters.get('opponent'):
+                query += " AND instr(lower(COALESCE(m.opp_name,'')),lower(?))>0"
+                args.append(filters['opponent'])
+            query += ')'
         return [dict(r) for r in conn.execute(query + " ORDER BY s.starts_at DESC,s.id DESC LIMIT 20 OFFSET ?", [*args, offset])]
 
 
@@ -180,6 +198,8 @@ def archive_sessions(gid, now, settings=None, in_voice=False):
             conn.execute("INSERT INTO session_history VALUES (?,?,?,?,?,?,?,?)", (s["id"], gid,
                 matches[-1]["ts"] if matches else now, "cancelled" if cancelled else "completed" if matches else "no games",
                 json.dumps(ids), json.dumps(rsvps), json.dumps(players), message))
+            conn.execute('INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)',
+                         (gid, f"session:gap:{s['id']}", str(settings['gap'])))
             if matches and settings.get('coverage_incomplete'):
                 conn.execute('INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)',
                              (gid,f"session:partial:{s['id']}",'1'))
@@ -249,6 +269,8 @@ def compact_recap(record, rows):
         lines += [''] + [h for h in highlights if h] if any(highlights) else []
         embed.add_field(name=f"🛡️ {club_for(cid)['name']}", value='\n'.join(lines), inline=False)
     embed.set_footer(text=f"Session #{record['session_id']} • Full results and squad stats below • EA recorded matches")
+    if record.get('guild_id') and get_setting(record['guild_id'], f"session:updated:{record['session_id']}"):
+        embed.set_footer(text=embed.footer.text + ' • Updated with late EA results')
     if record.get('guild_id') and get_setting(record['guild_id'],f"session:partial:{record['session_id']}") == '1':
         embed.set_footer(text=embed.footer.text+' • EA coverage incomplete; some games may be missing')
     return embed
@@ -408,19 +430,72 @@ class SummaryView(TrackedView):
         await send_details(interaction, records[0])
 
 
+class HistoryFilter(discord.ui.Modal, title='Filter session history'):
+    def __init__(self, panel):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.club = discord.ui.TextInput(label='Club name or ID (blank = both)', required=False, max_length=80)
+        self.dates = discord.ui.TextInput(label='Date or range: YYYY-MM-DD..YYYY-MM-DD', required=False, max_length=22)
+        self.opponent = discord.ui.TextInput(label='Opponent contains', required=False, max_length=80)
+        self.player = discord.ui.TextInput(label='EA player name contains', required=False, max_length=80)
+        for item in (self.club, self.dates, self.opponent, self.player):
+            self.add_item(item)
+
+    async def on_submit(self, interaction):
+        if not await self.panel.interaction_check(interaction):
+            return
+        from datetime import timedelta
+        from cogs.sessions import _tz
+        filters = {}
+        if self.club.value.strip():
+            from cogs.clubs import registry
+            value = self.club.value.strip().casefold()
+            club = next((c for c in registry() if value in (str(c['club_id']), c['name'].casefold())), None)
+            if not club:
+                await interaction.response.send_message('Enter a registered club name or ID.', ephemeral=True)
+                return
+            filters['club'] = club['club_id']
+        if self.dates.value.strip():
+            try:
+                parts = self.dates.value.strip().split('..')
+                if len(parts) > 2:
+                    raise ValueError
+                first = datetime.strptime(parts[0], '%Y-%m-%d').replace(tzinfo=_tz(self.panel.guild_id))
+                last = datetime.strptime(parts[-1], '%Y-%m-%d').replace(tzinfo=_tz(self.panel.guild_id))
+                if last < first:
+                    raise ValueError
+                filters.update(since=int(first.timestamp()), until=int((last+timedelta(days=1)).timestamp()))
+            except ValueError:
+                await interaction.response.send_message('Use YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD, with the earlier date first.', ephemeral=True)
+                return
+        filters.update({k: v.value.strip() for k, v in [('opponent', self.opponent), ('player', self.player)] if v.value.strip()})
+        await self.panel.paginate(interaction, 0, filters=filters)
+
+
 class HistoryView(PrivateSessionView):
-    def __init__(self, user_id, guild_id, records, private=False, offset=0):
+    def __init__(self, user_id, guild_id, records, private=False, offset=0, filters=None):
         super().__init__(timeout=600)
         self.user_id, self.guild_id, self.private = user_id, guild_id, private
         self.offset = offset
-        self.selected = records[0]["session_id"]
+        self.filters = filters or {}
+        self.selected = records[0]["session_id"] if records else None
         from cogs.sessions import _tz
         zone = _tz(guild_id)
-        picker = discord.ui.Select(placeholder="Choose a finished session", custom_id="sessions:history-select",
+        picker = discord.ui.Select(placeholder="Choose a finished session", custom_id="sessions:history-select", row=0,
             options=[discord.SelectOption(label=f"Session #{r['session_id']}", value=str(r["session_id"]),
                 description=f"{datetime.fromtimestamp(r['starts_at'], zone):%d %b %Y %H:%M} · {r['outcome'].capitalize()} · {len(json.loads(r['match_ids']))} games") for r in records])
         picker.callback = self.choose
-        self.add_item(picker)
+        if records:
+            self.add_item(picker)
+        else:
+            self.personal.disabled = self.details.disabled = True
+        self.newer.disabled = offset == 0
+        self.older.disabled = len(records) < 20
+        if not private:
+            self.remove_item(self.preview)
+            self.remove_item(self.retry)
+        elif not records:
+            self.preview.disabled = self.retry.disabled = True
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.user_id or str(interaction.guild_id) != self.guild_id:
@@ -436,6 +511,9 @@ class HistoryView(PrivateSessionView):
     async def choose(self, interaction):
         self.anchor = interaction
         self.selected = int(interaction.data["values"][0])
+        if self.selected not in {r['session_id'] for r in history(self.guild_id, offset=self.offset, filters=self.filters)}:
+            await interaction.response.send_message('Choose a session listed on this page.', ephemeral=True)
+            return
         record = history(self.guild_id, self.selected)[0]
         embed = recap_embed(record)
         if self.private:
@@ -456,14 +534,18 @@ class HistoryView(PrivateSessionView):
     async def details(self, interaction, _):
         await send_details(interaction, history(self.guild_id, self.selected)[0])
 
-    async def paginate(self, interaction, offset):
-        records = history(self.guild_id, offset=offset)
-        if not records:
+    async def paginate(self, interaction, offset, filters=None):
+        filters = self.filters if filters is None else filters
+        records = history(self.guild_id, offset=offset, filters=filters)
+        if not records and offset:
             await interaction.response.send_message("No more sessions in that direction.", ephemeral=True)
             return
-        view = HistoryView(self.user_id, self.guild_id, records, self.private, offset)
+        view = HistoryView(self.user_id, self.guild_id, records, self.private, offset, filters)
         view.anchor = interaction
-        await interaction.response.edit_message(embed=recap_embed(records[0]), view=view)
+        embed = recap_embed(records[0]) if records else discord.Embed(title='Session history', description='No sessions match these filters. Change or clear the filters below.', colour=CLUB_COLOUR)
+        if filters:
+            embed.add_field(name='Filtered history', value='Filters are active. Dates use the server session timezone.', inline=False)
+        await interaction.response.edit_message(embed=embed, view=view)
         self.stop()  # An old page's timeout must not overwrite the replacement menu.
 
     @discord.ui.button(label="Older sessions", custom_id="sessions:history-older", row=1)
@@ -473,6 +555,36 @@ class HistoryView(PrivateSessionView):
     @discord.ui.button(label="Newer sessions", custom_id="sessions:history-newer", row=1)
     async def newer(self, interaction, _):
         await self.paginate(interaction, max(0, self.offset - 20))
+
+    @discord.ui.button(label='Filter history', emoji='🔎', row=2)
+    async def filter_history(self, interaction, _):
+        await interaction.response.send_modal(HistoryFilter(self))
+
+    @discord.ui.button(label='Clear filters', row=2)
+    async def clear_filters(self, interaction, _):
+        await self.paginate(interaction, 0, filters={})
+
+    @discord.ui.button(label='Preview recap', row=3)
+    async def preview(self, interaction, _):
+        if not self.private or not await self.interaction_check(interaction):
+            return
+        record = history(self.guild_id, self.selected)[0]
+        await interaction.response.send_message(embed=recap_embed(record), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label='Retry delivery', row=3)
+    async def retry(self, interaction, _):
+        if not self.private or not await self.interaction_check(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        cog = interaction.client.get_cog('SessionReportsCog')
+        try:
+            text = await cog.recover_record(interaction.guild, self.selected) if cog else 'Session reports are unavailable.'
+        except ValueError as exc:
+            text = str(exc)
+        except Exception:
+            log.exception('Manual recap retry failed')
+            text = 'Delivery is still pending. Check Bot status and the recap channel permissions.'
+        await interaction.followup.send(text, ephemeral=True)
 
 
 class SessionReportsCog(commands.Cog):
@@ -550,6 +662,7 @@ class SessionReportsCog(commands.Cog):
         async with self._delivery_lock:
             await self._run_reports(guild, finalize=finalize)
 
+    @timed('Recap delivery check', slow=2)
     async def _run_reports(self, guild, *, finalize):
         gid = str(guild.id)
         now = int(time.time())
@@ -565,6 +678,8 @@ class SessionReportsCog(commands.Cog):
                 conn.execute("INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,'reports:gap90_v1','1')",(gid,))
         settings = report_settings(gid)   # read once per check
         if finalize:
+            from session_updates import reconcile
+            await asyncio.to_thread(reconcile, gid, now, settings)
             await asyncio.to_thread(add_followup_sessions,gid,now)
             tracker=self.bot.get_cog('MatchdayCog')
             snapshot_settings={**settings,'coverage_incomplete':bool(getattr(tracker,'last_poll_degraded',False))}
@@ -602,6 +717,8 @@ class SessionReportsCog(commands.Cog):
                 message = await channel.send(embed=embed, view=SummaryView(), allowed_mentions=discord.AllowedMentions.none())
                 with connect() as conn:
                     conn.execute("UPDATE session_history SET message_id=? WHERE session_id=?", (str(message.id), r[0]))
+                    conn.execute('INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)',
+                                 (gid, f"session:channel:{r[0]}", str(channel.id)))
                     if settings['potd']:
                         conn.execute("INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)",
                                      (gid, f'potd:pending:{r[0]}', '1'))
@@ -612,6 +729,7 @@ class SessionReportsCog(commands.Cog):
                 continue
             attempted_potd.add(record['session_id'])
             await self.post_player_of_the_day(guild, channel, record)
+        await self.deliver_recap_edits(guild)
         await self.retry_player_of_the_day(guild, now, attempted_potd, settings)
         errors.extend(await self.send_personal_summaries(guild, now))
         if errors:
@@ -621,6 +739,98 @@ class SessionReportsCog(commands.Cog):
             waiting=waiting or conn.execute("SELECT 1 FROM session_summary_dms d JOIN session_history h ON h.session_id=d.session_id WHERE h.guild_id=? AND d.status='pending' AND h.ended_at>=? LIMIT 1",(gid,now-86400)).fetchone()
         if not waiting:
             await report_health(self.bot, gid, "Session summaries")
+
+    async def deliver_recap_edits(self, guild):
+        gid = str(guild.id)
+        if not report_settings(gid)['enabled']:
+            return
+        async def edit(job, payload):
+            if job['guild_id'] != gid:
+                return
+            records = history(gid, payload['sid'])
+            if not records or records[0]['outcome'] != 'completed':
+                return
+            record = records[0]
+            if record['message_id'] in (None, 'suppressed'):
+                return
+            cid = get_setting(gid, f"session:channel:{record['session_id']}") or report_settings(gid)['channel']
+            choices = [c for c in guild.text_channels if c.name.lower() == 'general'] if not cid else []
+            channel = guild.get_channel(int(cid)) if cid else choices[0] if len(choices) == 1 else None
+            if channel is None:
+                raise RuntimeError('Original recap channel unavailable')
+            message = await channel.fetch_message(int(record['message_id']))
+            await message.edit(embed=recap_embed(record), view=SummaryView(), allowed_mentions=discord.AllowedMentions.none())
+            import potd
+            with connect() as conn:
+                old = conn.execute('SELECT * FROM session_potd WHERE session_id=?', (record['session_id'],)).fetchone()
+            if old:
+                result = await asyncio.to_thread(potd.compute, session_matches(record))
+                award = await channel.fetch_message(int(old['message_id'])) if old['message_id'] else None
+                if result:
+                    from cogs.sessions import _tz
+                    winner = result['winner']
+                    players = json.loads(record['players'])
+                    did = next((d for p in players if p['name'].casefold() == winner['name'].casefold() for d in p.get('discord_ids', [])), None)
+                    count = potd.count_for(gid, winner['name']) + (old['name'].casefold() != winner['name'].casefold())
+                    png = await asyncio.to_thread(potd.render_card, result, _tz(gid), count)
+                    embed = discord.Embed(description=f"🌟 **{display_name(winner['name'])}** is Player of the Day! {winner['rating']:.1f} average rating · {winner['goals']} goals · {winner['assists']} assists · {winner['games']} games.", colour=CLUB_COLOUR)
+                    embed.set_image(url='attachment://player-of-the-day.png')
+                    if award:
+                        await award.edit(content=None, embed=embed, attachments=[discord.File(io.BytesIO(png), 'player-of-the-day.png')], allowed_mentions=discord.AllowedMentions.none())
+                    potd.save(gid, record['session_id'], result, did, old['message_id'], old['posted_at'])
+                else:
+                    did = None
+                    if award:
+                        await award.edit(content='Session updated with late EA results. No player met the Player of the Day participation requirement.', embed=None, attachments=[], allowed_mentions=discord.AllowedMentions.none())
+                    with connect() as conn:
+                        conn.execute('DELETE FROM session_potd WHERE session_id=?', (record['session_id'],))
+                badges = self.bot.get_cog('BadgesCog')
+                if badges:
+                    for member_id in {old['discord_id'], did} - {None}:
+                        await badges.refresh_member(guild, member_id)
+        # Scope reads here: another guild's queued edit must never be acknowledged.
+        with connect() as conn:
+            jobs = [dict(r) for r in conn.execute("SELECT * FROM delivery_jobs WHERE kind='recap_edit' AND guild_id=? AND next_attempt<=? AND expires_at>? ORDER BY queued_at LIMIT 25", (gid, int(time.time()), int(time.time())))]
+        for job in jobs:
+            try:
+                await edit(job, json.loads(job['payload']))
+            except Exception as exc:
+                delivery.fail(job, exc)
+                log.warning('Recap edit failed; retry scheduled (%s)', type(exc).__name__)
+                await report_health(self.bot, gid, 'Recap corrections', 'A saved recap could not be updated. It will retry automatically. Check the original recap channel and message permissions.')
+            else:
+                delivery.ack('recap_edit', job['job_key'])
+        if jobs:
+            with connect() as conn:
+                pending = conn.execute("SELECT 1 FROM delivery_jobs WHERE kind='recap_edit' AND guild_id=? AND expires_at>? LIMIT 1", (gid, int(time.time()))).fetchone()
+            if not pending:
+                await report_health(self.bot, gid, 'Recap corrections')
+
+    async def recover_record(self, guild, sid):
+        """Retry saved delivery or edit its existing message; never finalize or repost."""
+        if not hasattr(self, '_delivery_lock'):
+            self._delivery_lock = asyncio.Lock()
+        async with self._delivery_lock:
+            return await self._recover_record(guild, sid)
+
+    async def _recover_record(self, guild, sid):
+        gid = str(guild.id)
+        records = history(gid, sid)
+        if not records or records[0]['outcome'] != 'completed':
+            raise ValueError('Choose a completed session in this server.')
+        record = records[0]
+        if int(time.time()) - record['ended_at'] > 86400:
+            raise ValueError('Recovery is limited to sessions from the last 24 hours.')
+        if not report_settings(gid)['enabled'] or record['message_id'] == 'suppressed':
+            raise ValueError('Automatic posting was disabled or suppressed for this session. Preview remains available.')
+        key = f'{gid}:{sid}'
+        kind = 'recap' if record['message_id'] is None else 'recap_edit'
+        delivery.enqueue(kind, key, gid, CLUB_ID, {'sid': sid})
+        with connect() as conn:
+            conn.execute('UPDATE delivery_jobs SET next_attempt=0,expires_at=? WHERE kind=? AND job_key=?', (int(time.time())+86400, kind, key))
+        await self._run_reports(guild, finalize=False)
+        job = delivery.get(kind, key)
+        return 'Delivery is still pending; check the channel permissions and Bot status.' if job else 'Saved recap delivered or refreshed. Existing posts and delivered DMs were not duplicated.'
 
     async def retry_player_of_the_day(self, guild, now, attempted=(), settings=None):
         """Only retry explicitly queued cards, never backfill historical recaps."""

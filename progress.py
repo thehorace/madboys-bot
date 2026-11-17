@@ -67,7 +67,7 @@ def weekly_embed(cid, player=None, now=None):
     return embed
 
 
-def session_embed(gid, now=None, in_voice=False, tracker_ok=None, tracker_running=True, next_check=None):
+def session_embed(gid, now=None, in_voice=False, tracker_ok=None, tracker_running=True, next_check=None, club_states=()):
     from cogs.session_reports import report_settings, session_activity, START_WINDOW, VOICE_HOLD, result_words
     now = int(now if now is not None else time.time())
     gid = str(gid)
@@ -78,10 +78,18 @@ def session_embed(gid, now=None, in_voice=False, tracker_ok=None, tracker_runnin
             'AND NOT EXISTS (SELECT 1 FROM session_history h WHERE h.session_id=s.id) ORDER BY starts_at DESC,id DESC LIMIT 1',(gid,now)).fetchone()
         if session is None:
             upcoming = conn.execute('SELECT starts_at FROM sessions WHERE guild_id=? AND cancelled=0 AND starts_at>? ORDER BY starts_at LIMIT 1',(gid,now)).fetchone()
-            last = conn.execute('SELECT h.session_id,h.outcome,h.message_id FROM session_history h WHERE guild_id=? ORDER BY ended_at DESC,session_id DESC LIMIT 1',(gid,)).fetchone()
+            last = conn.execute("SELECT h.session_id,h.outcome,h.message_id FROM session_history h WHERE guild_id=? AND outcome!='merged' ORDER BY ended_at DESC,session_id DESC LIMIT 1",(gid,)).fetchone()
             desc = f'Next session: <t:{upcoming[0]}:F>.' if upcoming else 'No session is currently open.'
             if last:
                 desc += f"\nLast session: **#{last['session_id']} · {last['outcome']}**. Open Session history for its recap."
+                if last['outcome'] == 'completed' and last['message_id'] is None:
+                    job = conn.execute("SELECT next_attempt FROM delivery_jobs WHERE kind='recap' AND job_key=?", (f"{gid}:{last['session_id']}",)).fetchone()
+                    desc += '\n\n**Recap saved · delivery pending.** The session has finished; Discord delivery is still waiting.'
+                    if job and job['next_attempt'] > now:
+                        desc += f" Next retry <t:{job['next_attempt']}:R>."
+                    desc += ' The owner can retry it from admin Session history.'
+                elif last['message_id'] == 'suppressed':
+                    desc += '\nAutomatic recap posting was disabled or this session was outside the posting window.'
             return discord.Embed(title='⏱️ Session Progress',description=desc,colour=CLUB_COLOUR)
         next_start = conn.execute('SELECT MIN(starts_at) FROM sessions WHERE guild_id=? AND starts_at>? AND cancelled=0',(gid,session['starts_at'])).fetchone()[0]
         assigned = {mid for r in conn.execute('SELECT match_ids FROM session_history WHERE guild_id=? AND ended_at>=?',(gid,session['starts_at']-2*86400)) for mid in json.loads(r[0])}
@@ -91,7 +99,7 @@ def session_embed(gid, now=None, in_voice=False, tracker_ok=None, tracker_runnin
     deadline = last_activity+gap if last_activity is not None else session['starts_at']+start_window
     if not matches:
         deadline=max(deadline,session['starts_at']+start_window)
-    held = in_voice and last_activity is not None and now-last_activity < VOICE_HOLD
+    held = in_voice and gap < VOICE_HOLD and last_activity is not None and now-last_activity < VOICE_HOLD
     if held:
         deadline=max(deadline,last_activity+VOICE_HOLD)
     state = 'Waiting for the first recorded game' if last_activity is None else 'Session activity recorded'
@@ -107,6 +115,10 @@ def session_embed(gid, now=None, in_voice=False, tracker_ok=None, tracker_runnin
     elif deadline<=now:
         state='Waiting for a successful EA check' if tracker_ok is not True else 'Ready for the next recap check'
         reason='The inactivity window has passed. The next eligible tracker check can finish this session.'
+        if tracker_ok is not True:
+            blocked = [s for s in club_states if not s.get('ok') and not s.get('stale')]
+            if blocked:
+                reason += '\nWaiting on: ' + ', '.join(discord.utils.escape_markdown(str(s.get('name', 'Club'))) for s in blocked) + ' (EA results incomplete or unavailable).'
     embed=discord.Embed(title='⏱️ Session Progress',description=f"**{state}**\nSession #{session['id']} · <t:{session['starts_at']}:f>\n\n{reason}",colour=CLUB_COLOUR)
     embed.add_field(name='Recorded results',value=f"{len(matches)} counted matches · {result_words(matches)}",inline=False)
     embed.add_field(name='Latest recorded activity',value=f'<t:{last_activity}:f> (<t:{last_activity}:R>)' if last_activity is not None else 'No completed match or forfeit recorded yet.',inline=False)

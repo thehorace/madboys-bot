@@ -1,5 +1,6 @@
 """Bounded, process-local timings. Labels never contain player names or SQL."""
 import functools
+import inspect
 import logging
 import threading
 import time
@@ -24,6 +25,12 @@ def measure(label, slow=1.0):
 
 def timed(label, slow=1.0):
     def decorate(fn):
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                with measure(label, slow):
+                    return await fn(*args, **kwargs)
+            return async_wrapper
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             with measure(label, slow):

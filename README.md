@@ -12,11 +12,11 @@ otherwise. Opening **Last game** also triggers an instant check, so a result som
 looks up is posted straight away. Each new match is:
 
 - saved permanently (so `/form`, `/h2h`, `/recap` work beyond EA's short history)
-- posted to the matchday channel with a full ratings table
+- posted as one compact match result with score, scorers, assists, EA MOTM and rematch details
 - used to log each linked player's role for `/rotation`
-- posted with a **result card image** (score, scorers, colour-coded ratings)
+- includes a persistent **Full match stats** button for a private result card and ratings, alongside opponent scouting
 - includes **EA’s MOTM** on the result card; automatic squad voting and winner announcements are retired to reduce channel spam
-- checked for career milestones ("🎉 @Fauzan just hit 100 career goals!")
+- checked for career milestones, grouped into a non-pinging card per match with one line per player; toggle goals, assists and appearances under **Admin → Settings → Match tracker**
 
 Everything the bot posts by itself (results, milestones, the weekly recap, the final squad list, session summaries, EA news) goes to the channel set with `/announce set`; daily sign-ups (the check-ins) stay in #general; slash commands reply where you use them.
 
@@ -240,9 +240,15 @@ not sent retroactively when this feature is deployed or DMs are enabled.
 results, cancellations and sessions without games, with dates and local start
 times in the session picker and
 older/newer pages. Each player can open their own past summary. **`/admin` →
-Session history** additionally shows actual EA players and frozen RSVP lists.
+Session history** additionally shows actual EA players, frozen RSVP lists and owner-only **Preview recap** / **Retry delivery** buttons. Recovery retries a pending recap or edits its existing message; it does not duplicate a delivered recap or personal DM. Recovery is available for the last 24 hours and respects disabled/suppressed posting. Everyone can filter history by club name/ID, local date/range, opponent and EA player name; filters stay active across older/newer pages.
 Sign-ups are explicitly separate from actual attendance. History and player
 stats survive restarts and remain tied to the EA links at session completion.
+
+**Session Progress** distinguishes an open session waiting for EA from a finished session whose recap delivery is pending, names clubs with incomplete checks, and shows the next delivery retry. Late games discovered within 24 hours are folded into their original session when their game timestamps fit its inactivity window, before a follow-up session is created. Existing recap and Player of the Day messages are edited without pings; previous snapshots remain in `session_revision_audit`. Games from each club remain separate in the underlying statistics. Delivered personal DMs are not replayed.
+
+Rotation uses confirmed exact positions or EA broad roles. A saved default alone is not evidence for rotation flags or lineup stability bonuses. Position stats distinguish confirmed, inferred and unknown entries.
+
+Reconciliation skips unchanged match data, and match images render only when opened. Bot status includes bounded timings for reconciliation and recap delivery alongside EA/database work. Startup adds the audit table and settings without replacing history or changing the 90-minute default.
 
 Result posts include a short rematch note when the opponent has been played
 before, using its EA club ID and only meetings before that result. The note shows

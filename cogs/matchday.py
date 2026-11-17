@@ -180,10 +180,14 @@ class MatchdayCog(commands.Cog):
         self._linked_in: dict[str, list[str]] = {}   # match_id -> linked players' discord ids
         self._unlinked: dict[str, list[str]] = {}    # match_id -> EA names of players nobody has linked
         self._migrated = False
+        from cogs.result_details import ResultDetails
+        bot.add_dynamic_items(ResultDetails)
         self.ticker.start()
         self.recap_loop.start()
 
     def cog_unload(self):
+        from cogs.result_details import ResultDetails
+        self.bot.remove_dynamic_items(ResultDetails)
         self.ticker.cancel()
         self.recap_loop.cancel()
 
@@ -581,9 +585,10 @@ class MatchdayCog(commands.Cog):
             return {}  # already logged (e.g. by the old rotation poller)
         import positions as POS
         linked,unmatched=[],[]
+        links = {name.casefold(): did for did, name in get_all_links(guild_id).items()}
         when=datetime.fromtimestamp(pm.ts,timezone.utc).isoformat() if pm.ts else datetime.now(timezone.utc).isoformat()
         for player in pm.players:
-            did=find_discord_id_by_ea_name(guild_id,player.name)
+            did=links.get(player.name.casefold())
             if not did:
                 unmatched.append(player.name)
                 continue
@@ -599,6 +604,7 @@ class MatchdayCog(commands.Cog):
 
     async def _deliver_result_queue(self, guild_id, pending_by_match=None):
         """Retry only explicitly queued result posts, never old saved history."""
+        await self._deliver_milestones(guild_id)
         key=f'{guild_id}:{club_id()}'
         with connect() as conn:
             if not self.posting_enabled(guild_id):
@@ -657,15 +663,17 @@ class MatchdayCog(commands.Cog):
                 await channel.send(f"📡 Caught up on {len(skipped)} earlier result(s): {clip(summary, 1800)}")
                 self._ack_results(guild_id,skipped)
             for i, pm in enumerate(to_post):
-                embed, file = await md.match_post(pm, footer_extra=footer if i == len(to_post) - 1 else "")
+                embed, file = await md.match_post(pm, footer_extra=footer if i == len(to_post) - 1 else "", compact=True)
                 rematch = md.rematch_line(club_id(), pm)
                 if rematch:
                     embed.add_field(name="🔁 Rematch", value=rematch, inline=False)
                 extra = {"file": file} if file else {}
                 view = scout_view(pm.opp_id, pm.opp_name, club_id())  # 🔍 Scout opponent
-                if view:
-                    extra["view"] = view
-                await channel.send(content=f"📡 **{club_name()} — Full time!**", embed=embed, **extra)
+                from cogs.result_details import ResultDetails
+                view = view or discord.ui.View(timeout=None)
+                view.add_item(ResultDetails(pm.club_id, pm.match_id))
+                extra['view'] = view
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none(), **extra)
                 self._ack_results(guild_id,[pm])
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
@@ -693,8 +701,7 @@ class MatchdayCog(commands.Cog):
         members = await self.ea.get_member_stats(club_id(), career=True, bypass_cache=True)
         if not members:
             return
-        announcements = []
-        links = {v.lower(): k for k, v in get_all_links(str(guild.id)).items()} if guild else {}
+        announcements = {}
         with connect() as conn:
             for m in members:
                 name = m.get("name")
@@ -718,26 +725,50 @@ class MatchdayCog(commands.Cog):
                                                 (name.casefold(), stat, hit)).rowcount == 0:
                             hit = None
                         if hit:
-                            who = f"<@{links[name.lower()]}>" if name.lower() in links else f"**{name}**"
-                            announcements.append(
-                                f"🎉 **{club_name()}** · {who} reached **{hit} {label}**. "
-                                f"Latest detected game: **{played.our_goals}–{played.opp_goals} vs {clip(played.opp_name, 80)}** "
-                                f"(<t:{played.ts}:R> · Match {clip(played.match_id, 40)}).")
+                            payload = announcements.setdefault(played.match_id, {
+                                'club': club_name(), 'score': f'{played.our_goals}–{played.opp_goals}',
+                                'opponent': played.opp_name, 'items': []})
+                            payload['items'].append({'name': name, 'stat': stat, 'threshold': hit, 'label': label})
                     # Refresh absent players silently so historical increases don't
                     # become announcements when they next appear in a match.
                     conn.execute(
                         "INSERT INTO stat_snapshots (club_id, player_name, stat, value) VALUES (?,?,?,?) "
                         "ON CONFLICT(club_id, player_name, stat) DO UPDATE SET value=excluded.value",
                         (club_id(), name, stat, new_val))
+            if guild and self.posting_enabled(str(guild.id)):
+                for mid, payload in announcements.items():
+                    delivery.enqueue('milestone', f'{guild.id}:{club_id()}:{mid}', str(guild.id), club_id(), payload, conn=conn)
+        if guild:
+            await self._deliver_milestones(str(guild.id))
 
-        if announcements and guild and self.posting_enabled(str(guild.id)):
-            cid = self.channel_id_for(str(guild.id))
-            channel = await self._channel(cid) if cid else None
-            if channel:
-                try:
-                    await channel.send("\n".join(announcements)[:2000])
-                except discord.Forbidden:
-                    pass
+    async def _deliver_milestones(self, gid):
+        import milestones
+        with connect() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM delivery_jobs WHERE kind='milestone' AND guild_id=? AND club_id=?", (gid, club_id()))]
+        if not rows:
+            return
+        enabled = milestones.settings(gid)
+        channel = None
+        for job in rows:
+            if not self.posting_enabled(gid) or job['expires_at'] <= time.time():
+                delivery.ack('milestone', job['job_key'])
+                continue
+            if not delivery.due(job):
+                continue
+            embed = milestones.card(json.loads(job['payload']), enabled)
+            if embed is None:
+                delivery.ack('milestone', job['job_key'])
+                continue
+            try:
+                cid = self.channel_id_for(gid)
+                channel = channel or (await self._channel(cid) if cid else None)
+                if channel is None:
+                    raise RuntimeError('Milestone channel unavailable')
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                delivery.ack('milestone', job['job_key'])
+            except Exception as exc:
+                delivery.fail(job, exc)
+                log.warning('Milestone card delivery failed; retry scheduled (%s)', type(exc).__name__)
 
     # ------------------------------------------------------------------ #
     #  weekly recap

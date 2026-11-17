@@ -97,8 +97,11 @@ class AdminView(TrackedView):
             tracker = self.bot.get_cog("MatchdayCog")
             gid = str(self.guild.id)
             cid = tracker.channel_id_for(gid) if tracker else None
+            import milestones
+            enabled = milestones.settings(gid)
+            categories = ', '.join(label for stat, label in milestones.CATEGORIES.items() if enabled[stat]) or 'Off'
             return discord.Embed(title="Match tracker settings", colour=CLUB_COLOUR,
-                description=f"Result posts: **{'On' if get_setting(gid, 'matchday_enabled') != '0' else 'Off'}**\nChannel: {f'<#{cid}>' if cid else 'Choose a channel'}\n\nMatch data continues to be saved when posting is off. Weekly recaps use this channel too.")
+                description=f"Result posts: **{'On' if get_setting(gid, 'matchday_enabled') != '0' else 'Off'}**\nChannel: {f'<#{cid}>' if cid else 'Choose a channel'}\nMilestones: **{categories}**\n\nMilestones are grouped by match, with one line per player and no pings. Choose the categories below; disabling them does not change stats. Match data continues to be saved when posting is off. Weekly recaps use this channel too.")
         if self.page == "patchnotes":
             settings = patch_settings(str(self.guild.id))
             channel = f"<#{settings['channel_id']}>" if settings["channel_id"] else "#general"
@@ -167,6 +170,13 @@ class AdminView(TrackedView):
                             "toggle_report_potd", row=3)
             else:
                 self.button("Disable result posts" if get_setting(str(self.guild.id), "matchday_enabled") != "0" else "Enable result posts", "toggle_tracker")
+                import milestones
+                enabled = milestones.settings(str(self.guild.id))
+                picker = discord.ui.Select(placeholder='Milestone categories (clear all to turn off)', row=3, min_values=0,
+                    max_values=3, options=[discord.SelectOption(label=label, value=stat, default=enabled[stat])
+                                           for stat, label in milestones.CATEGORIES.items()])
+                picker.callback = self.choose_milestones
+                self.add_item(picker)
             picker = discord.ui.ChannelSelect(placeholder="Summary channel" if self.page == "reports" else "Match result channel",
                 channel_types=[discord.ChannelType.text], row=1, custom_id="admin:servicechannel")
             picker.callback = self.choose_service_channel
@@ -332,6 +342,20 @@ class AdminView(TrackedView):
             return
         key = "reports:channel" if self.page == "reports" else "matchday_channel"
         set_setting(str(self.guild.id), key, str(channel.id))
+        await self.show(interaction)
+
+    async def choose_milestones(self, interaction):
+        if not await self.authorize(interaction):
+            return
+        import milestones
+        from db import connect
+        chosen = set(interaction.data.get('values', []))
+        if not chosen <= milestones.CATEGORIES.keys():
+            await interaction.response.send_message('Choose a listed milestone category.', ephemeral=True)
+            return
+        with connect() as conn:
+            conn.executemany('INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,?,?)',
+                [(str(self.guild.id), f'milestones:{stat}', '1' if stat in chosen else '0') for stat in milestones.CATEGORIES])
         await self.show(interaction)
 
     async def choose_patch_channel(self, interaction):

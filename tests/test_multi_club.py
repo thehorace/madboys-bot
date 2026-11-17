@@ -63,7 +63,7 @@ class MultiClubTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([m.club_id for m in call.kwargs['matches']], [club['club_id']])
         self.assertEqual(self.channel.send.await_count,2)
         for club, call in zip(clubs.monitored_clubs(),self.channel.send.call_args_list):
-            self.assertIn(club['name'],call.kwargs['content'])
+            self.assertNotIn('content',call.kwargs)  # club and score appear once in the embed
             self.assertIn(club['name'],call.kwargs['embed'].title)
             self.assertTrue(md.is_stored(club['club_id'],'same'))
         # State from an earlier process is not needed for deduplication.
@@ -103,7 +103,7 @@ class MultiClubTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.ea.get_recent_matches_multi.side_effect=lambda cid,**kw: [self.raw(clubs.club_for(cid),'new',200)]
         self.assertEqual(await self.tracker.poll_once(),2)
         self.channel.send.assert_awaited_once()
-        self.assertIn(self.primary['name'],self.channel.send.call_args.kwargs['content'])
+        self.assertIn(self.primary['name'],self.channel.send.call_args.kwargs['embed'].title)
 
     async def test_context_isolated_across_concurrent_stats(self):
         self.store(self.primary,'a',100,3)

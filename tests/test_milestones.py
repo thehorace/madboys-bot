@@ -44,6 +44,11 @@ class MilestoneTests(unittest.IsolatedAsyncioTestCase):
         with clubs.club_scope(club):
             await self.cog.check_milestones(self.guild, announce=announce, matches=matches)
 
+    def text(self):
+        embed = self.channel.send.call_args.kwargs['embed']
+        self.assertFalse(self.channel.send.call_args.kwargs['allowed_mentions'].users)
+        return '\n'.join([embed.title, embed.description, embed.footer.text])
+
     async def test_absent_connor_is_silent_and_old_increase_is_not_replayed(self):
         self.baseline(self.primary, 'Connor')
         members=[{'name':'Connor', 'goals':50}]
@@ -58,13 +63,13 @@ class MilestoneTests(unittest.IsolatedAsyncioTestCase):
     async def test_present_player_is_linked_and_message_identifies_game(self):
         self.baseline(self.primary,'Connor')
         await self.check(self.primary,[{'name':'Connor','goals':50}], [self.game(self.primary,'match-123',123,['CONNOR'],'Big Birds FC')])
-        text=self.channel.send.call_args.args[0]
-        self.assertIn('<@42>',text)
+        text=self.text()
+        self.assertIn('Connor',text)
         self.assertIn(self.primary['name'],text)
         self.assertIn('50 career goals',text)
         self.assertIn('2–1 vs Big Birds FC',text)
-        self.assertIn('Match match-123',text)
-        self.assertIn('<t:123:R>',text)
+        self.assertNotIn('match-123',text)
+        self.assertNotIn('<@',text)
 
     async def test_other_club_appearance_does_not_qualify(self):
         self.baseline(self.primary,'Connor')
@@ -74,7 +79,7 @@ class MilestoneTests(unittest.IsolatedAsyncioTestCase):
         self.channel.send.assert_not_awaited()
         await self.check(self.secondary,[{'name':'Connor','goals':50}],[gray_game])
         self.channel.send.assert_awaited_once()
-        text=self.channel.send.call_args.args[0]
+        text=self.text()
         self.assertIn(self.secondary['name'],text)
         self.assertNotIn(self.primary['name'],text)
         self.cog.ea.get_member_stats.assert_awaited_with(self.secondary['club_id'],career=True,bypass_cache=True)
@@ -85,11 +90,48 @@ class MilestoneTests(unittest.IsolatedAsyncioTestCase):
                self.game(self.primary,'old',100,['Connor'],'Old opponent'),
                self.game(self.primary,'latest-connor',200,['Connor'],'Connors opponent')]
         await self.check(self.primary,[{'name':'Connor','goals':50}],games)
-        text=self.channel.send.call_args.args[0]
-        self.assertIn('Match latest-connor',text)
+        text=self.text()
         self.assertIn('Connors opponent',text)
         self.assertNotIn('Other opponent',text)
         self.assertNotIn('Old opponent',text)
+
+    async def test_same_match_groups_players_and_each_players_achievements(self):
+        self.baseline(self.primary,'Connor')
+        self.baseline(self.primary,'Other')
+        with db.connect() as conn:
+            conn.execute("INSERT INTO stat_snapshots VALUES (?,'Connor','assists',24)", (self.primary['club_id'],))
+        await self.check(self.primary,[{'name':'Connor','goals':50,'assists':25},{'name':'Other','goals':50}],
+                         [self.game(self.primary,'a',100,['Connor','Other'])])
+        self.channel.send.assert_awaited_once()
+        description = self.channel.send.call_args.kwargs['embed'].description
+        self.assertEqual(description.count('Connor'),1)
+        self.assertIn('25 career assists',description)
+        self.assertEqual(len(description.splitlines()),2)
+
+    async def test_disabled_category_is_consumed_without_later_backfill(self):
+        self.baseline(self.primary,'Connor')
+        db.set_setting('10','milestones:goals','0')
+        await self.check(self.primary,[{'name':'Connor','goals':50}], [self.game(self.primary,'a',100,['Connor'])])
+        self.channel.send.assert_not_awaited()
+        db.set_setting('10','milestones:goals','1')
+        await self.check(self.primary,[{'name':'Connor','goals':50}], [self.game(self.primary,'b',200,['Connor'])])
+        self.channel.send.assert_not_awaited()
+
+    async def test_failed_card_retries_without_losing_achievement_or_repeating(self):
+        import delivery
+        self.baseline(self.primary,'Connor')
+        self.channel.send.side_effect = RuntimeError('Discord temporarily unavailable')
+        await self.check(self.primary,[{'name':'Connor','goals':50}], [self.game(self.primary,'a',100,['Connor'])])
+        key=f"10:{self.primary['club_id']}:a"
+        self.assertIsNotNone(delivery.get('milestone',key))
+        self.channel.send.side_effect = None
+        with db.connect() as conn:
+            conn.execute("UPDATE delivery_jobs SET next_attempt=0 WHERE kind='milestone'")
+        with clubs.club_scope(self.primary):
+            await self.cog._deliver_milestones('10')
+            await self.cog._deliver_milestones('10')
+        self.assertEqual(self.channel.send.await_count,2)
+        self.assertIsNone(delivery.get('milestone',key))
 
     async def test_no_matches_backfill_and_new_baseline_are_quiet(self):
         self.baseline(self.primary,'Connor')
