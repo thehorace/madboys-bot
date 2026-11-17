@@ -26,6 +26,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         db.init_all()
         db.set_setting('10','reports:gap','30')
         db.set_setting('10','reports:evening_gap_v1','1')
+        db.set_setting('10','reports:gap90_v1','1')  # fixtures below choose their own gaps
         usage.init_usage()
         self.start = 1_800_000_000
         db.set_setting("10", "reports:since", str(self.start - 100))
@@ -149,7 +150,7 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reports.history("10")[0]["outcome"], "cancelled")
         self.channel.send.assert_awaited_once()
 
-    async def test_default_keeps_evening_open_for_two_hours(self):
+    async def test_default_keeps_evening_open_for_ninety_minutes(self):
         db.set_setting("10", "reports:gap", None)            # default
         self.game("a", self.start + 2700)                     # kicked off 45 min late: still this session
         self.game("b", self.start + 4200)
@@ -157,7 +158,9 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         self.channel.send.assert_not_awaited()
         await self.poll(self.start + 4200 + 1810)             # 30 minutes must no longer end the evening
         self.channel.send.assert_not_awaited()
-        await self.poll(self.start + 4200 + 7210)
+        await self.poll(self.start + 4200 + 5399)
+        self.channel.send.assert_not_awaited()
+        await self.poll(self.start + 4200 + 5401)
         self.channel.send.assert_awaited_once()
         self.assertEqual(json.loads(reports.history("10")[0]["match_ids"]), ["a", "b"])
 
@@ -169,14 +172,34 @@ class SessionReportTests(unittest.IsolatedAsyncioTestCase):
         await self.poll(self.start + 5400 + 7210)
         self.assertEqual(reports.history("10")[0]["outcome"], "completed")
 
-    async def test_existing_short_default_switches_to_two_hours_once(self):
+    async def test_existing_short_default_switches_to_ninety_minutes_once(self):
         db.set_setting("10", "reports:evening_gap_v1", None)
         db.set_setting("10", "reports:gap", "30")
         await self.poll(self.start + 10)
-        self.assertEqual(reports.report_settings("10")["gap"], 120)
+        self.assertEqual(reports.report_settings("10")["gap"], 90)
         db.set_setting("10", "reports:gap", "60")           # an admin changes it later: respected
         await self.poll(self.start + 20)
         self.assertEqual(reports.report_settings("10")["gap"], 60)
+
+    async def test_old_two_hour_default_migrates_once_even_without_a_good_ea_check(self):
+        db.set_setting('10','reports:gap90_v1',None)
+        db.set_setting('10','reports:gap','120')
+        with patch.object(reports.time,'time',return_value=self.start+10):
+            await self.cog.retry_pending(self.guild)
+        self.assertEqual(reports.report_settings('10')['gap'],90)
+        self.assertEqual(reports.history('10'),[])
+        db.set_setting('10','reports:gap','120')  # a subsequent explicit admin choice sticks
+        await self.poll(self.start+20)
+        self.assertEqual(reports.report_settings('10')['gap'],120)
+
+    async def test_voice_does_not_extend_ninety_minute_default_to_two_hours(self):
+        db.set_setting('10','reports:gap',None)
+        self.game('a',self.start+600)
+        with patch.object(reports,'squad_in_voice',return_value=True):
+            await self.poll(self.start+600+5399)
+            self.channel.send.assert_not_awaited()
+            await self.poll(self.start+600+5401)
+        self.channel.send.assert_awaited_once()
 
     async def test_later_game_after_inactivity_not_included_and_not_double_counted(self):
         self.game("a", self.start + 600)

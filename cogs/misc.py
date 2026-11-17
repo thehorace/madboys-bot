@@ -62,7 +62,7 @@ HELP_SECTIONS = [
         ("/rotation check", "Who's been stuck in one position"),
         ("/rotation history", "Where someone has played lately"),
         ("/rotation stats", "Games per role for each player"),
-        ("/position", "Fix where you played in your last game"),
+        ("/position", "Save a position per club, or correct one game with match_id"),
     ]),
     ("📡 Match tracking", [
         ("/matchday start", "Manager: choose where results auto-post (one time)"),

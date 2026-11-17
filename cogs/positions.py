@@ -1,30 +1,10 @@
-"""
-After-match position check + private rotation notes for managers.
+"""Private position management and opt-in manager rotation notes.
 
-After each result post, players whose exact position the bot can't be sure of
-(no lineup was posted, they weren't in it, or EA's role disagrees with their
-slot) get one small message:
-
-    📍 Where did you play? — 3–1 vs Rival FC
-    @Ali (defender) @Zak (midfielder)
-    [↩️ Same as last game]  [▾ Pick your position…]
-
-One tap each. Whoever doesn't answer keeps the broad role (DEF/MID/FWD) for
-that game. The buttons are persistent, so they work after restarts.
-Without a lineup, players are assumed to stay in the spot they played the
-previous game this session (if EA's role still matches), so normally only
-the first game of a session asks. /position fixes your last game any time.
-
-Rotation notes: when someone has played ROTATION_THRESHOLD games in a row in
-the same AREA (Defence / Midfield / Front 3), the managers get a short private
-note (once per streak), e.g. "Ali — Defence 3 games in a row (LB, LB, CB) —
-has builds for CM → could try Midfield next". Nothing is posted to players.
-Delivery: by DM to managers who tapped "📩 DM me rotation notes" in the
-🧑‍💼 Manager menu, and/or to a managers' channel ("📝 Send rotation notes here",
-or MANAGER_CHANNEL_ID). Nobody opted in = no notes.
+New matches resolve automatically. Legacy prompt handlers remain available
+for deliberate corrections, but no post-match prompts are created or retried.
 """
 
-from clubs import club_id, club_name, club_scope
+from clubs import club_id, club_name, club_scope, club_scoped
 import json
 import logging
 import asyncio
@@ -42,7 +22,8 @@ import positions as P
 from cogs.rotation import set_match_position
 from db import connect, get_setting, set_setting
 from interaction_tracking import TrackedView
-from utils import resolve_name, survive
+from utils import resolve_name
+from cogs.position_menu import club_autocomplete
 
 log = logging.getLogger("madboys-bot.positions")
 
@@ -159,125 +140,45 @@ class PositionPromptView(TrackedView):
 
 class PositionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        self.delivery_loop.start()
-
-    def cog_unload(self):
-        self.delivery_loop.cancel()
-
-    @tasks.loop(seconds=30)
-    @survive
-    async def delivery_loop(self):
-        await self.retry_deliveries()
-
-    @delivery_loop.before_loop
-    async def _before_delivery(self):
-        await self.bot.wait_until_ready()
-
-    @app_commands.command(name="position", description="Set (or fix) where you played in your last game")
-    @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in P.ALL_POSITIONS])
-    async def position(self, interaction: discord.Interaction, position: app_commands.Choice[str]):
-        # Deliberately NOT club-scoped: "your last game" means the last game you played for any
-        # club, not the club your stats menu follows (which may be the other squad's).
-        gid, uid = str(interaction.guild_id), str(interaction.user.id)
+        self.bot=bot
+        # No queued post-match prompts should replay after this update.
         with connect() as conn:
-            last = conn.execute("""
-                SELECT c.club_id FROM rotation_log r
-                JOIN monitored_clubs c ON c.name = r.club AND c.enabled = 1
-                JOIN matches m ON m.match_id = r.match_id AND m.club_id = c.club_id
-                WHERE r.guild_id=? AND r.discord_id=? ORDER BY m.ts DESC LIMIT 1""", (gid, uid)).fetchone()
-        if not last:
-            await interaction.response.send_message(
-                "I haven't tracked a game for you yet (are you linked? tap 👤 My stats on the panel).", ephemeral=True)
-            return
-        with club_scope(last["club_id"]):
-            await self._set_last_position(interaction, gid, uid, position)
+            conn.execute("DELETE FROM delivery_jobs WHERE kind='position'")
 
-    async def _set_last_position(self, interaction, gid, uid, position):
-        with connect() as conn:
-            row = conn.execute("""
-                SELECT r.match_id, m.our_goals, m.opp_goals, m.opp_name FROM rotation_log r
-                JOIN matches m ON m.match_id = r.match_id
-                WHERE m.club_id=? AND r.guild_id=? AND r.club=? AND r.discord_id=? ORDER BY m.ts DESC LIMIT 1""",
-                (club_id(), gid, club_name(), uid)).fetchone()
-            prompts = conn.execute("SELECT message_id, pending FROM position_prompts WHERE guild_id=? AND club_id=? AND match_id=?",
-                                   (gid, club_id(), row["match_id"] if row else "")).fetchall()
-        if not row:
-            await interaction.response.send_message(
-                "I haven't tracked a game for you yet (are you linked? tap 👤 My stats on the panel).", ephemeral=True)
-            return
-        set_match_position(gid, club_name(), row["match_id"], uid, position.value,
-                           logged_at=_match_time_iso(row["match_id"]))
-        for pr in prompts:   # take them off that game's "where did you play?" list too
-            pending = json.loads(pr["pending"])
-            if pending.pop(uid, None) is not None:
-                _save_pending(pr["message_id"], pending)
-        await interaction.response.send_message(
-            f"Logged **{position.value}** for your last game ({club_name()} {row['our_goals']}–{row['opp_goals']} "
-            f"vs {row['opp_name']}) ✅",
-            ephemeral=True)
-        await self.check_notes(interaction.guild, [uid])
-
-    def _due_link_reminder(self, guild_id: str, names: list[str], *, mark=True) -> list[str]:
-        """Unlinked EA names that haven't been reminded in the last 24h (so it doesn't nag every game)."""
-        due, now = [], int(time.time())
-        for n in names:
-            last = get_setting(guild_id, f"linknudge:{n.lower()}")
-            if not last or now - int(last) > 24 * 3600:
-                due.append(n)
-                if mark:
-                    set_setting(guild_id, f"linknudge:{n.lower()}", str(now))
-        return due
-
-    async def open_prompt(self, channel: discord.abc.Messageable, guild_id: str, match_id: str, title: str,
-                          pending: dict[str, str], unlinked: Optional[list[str]] = None):
-        """
-        pending:  {discord_id: EA bucket} for players whose exact spot is unknown (they get tagged)
-        unlinked: EA names of players in the game who haven't linked their Discord — the bot
-                  can't tag them, so they get a once-a-day reminder line instead.
-        """
-        self._delivery_channels=getattr(self,'_delivery_channels',{})
-        self._delivery_channels[str(channel.id)]=channel
-        key=f'{guild_id}:{club_id()}:{match_id}'
-        with connect() as conn:
-            if conn.execute('SELECT 1 FROM position_prompts WHERE guild_id=? AND club_id=? AND match_id=?',(guild_id,club_id(),match_id)).fetchone():
+    @app_commands.command(name='position',description='Your saved position, or correct one recorded game')
+    @app_commands.describe(position='Save a default for future games; omit to open your private controls',
+                           match_id='Optional correction only: last, or an EA match ID',club='Club for this default or correction')
+    @app_commands.choices(position=[app_commands.Choice(name=p,value=p) for p in P.ALL_POSITIONS]+[app_commands.Choice(name='Clear saved position',value='_clear')])
+    @app_commands.autocomplete(club=club_autocomplete)
+    @app_commands.guild_only()
+    @club_scoped
+    async def position(self,interaction:discord.Interaction,position:Optional[app_commands.Choice[str]]=None,
+                       match_id:Optional[str]=None,club:Optional[str]=None):
+        from cogs.position_menu import open_menu,selected_club
+        gid,uid=str(interaction.guild_id),str(interaction.user.id)
+        try:
+            if match_id is not None:
+                match_id=match_id.strip()
+                if not match_id or position is None:
+                    raise ValueError('Choose a position and a match ID (or last) for a correction.')
+                if match_id.casefold()=='last':
+                    match_id='last'
+            cid=selected_club(club) if club else club_id()
+            if match_id=='last' and not club:
+                cid=P.last_played_club(gid,uid) or cid
+            if position is None:
+                await open_menu(self.bot,interaction,cid)
                 return
-        delivery.enqueue('position',key,guild_id,club_id(),{'channel_id':str(channel.id),'match_id':match_id,
-                         'title':title,'pending':pending,'unlinked':unlinked or []},lifetime=1800)
-        await self.retry_deliveries()
-
-    async def retry_deliveries(self):
-        if not hasattr(self,'_delivery_lock'):
-            self._delivery_lock=asyncio.Lock()
-        async with self._delivery_lock:
-            await delivery.dispatch(('position',),self._deliver_prompt)
-
-    async def _deliver_prompt(self,job,payload):
-        from clubs import club_scope
-        with club_scope(job['club_id']):
-            gid,mid=job['guild_id'],payload['match_id']
-            with connect() as conn:
-                if conn.execute('SELECT 1 FROM position_prompts WHERE guild_id=? AND club_id=? AND match_id=?',(gid,club_id(),mid)).fetchone():
-                    return
-                confirmed={r['discord_id'] for r in conn.execute("SELECT discord_id,position FROM rotation_log WHERE guild_id=? AND club=? AND match_id=? AND source='player'",(gid,club_name(),mid)) if r['position'] in P.ALL_POSITIONS}
-            pending={k:v for k,v in payload['pending'].items() if k not in confirmed}
-            nudge=self._due_link_reminder(gid,payload['unlinked'],mark=False)
-            line=(f"\n👤 **Not linked yet:** {', '.join(nudge)} — tap **👤 My stats** on the bot panel and pick your EA name.") if nudge else ''
-            if not pending and not line:
-                return
-            cid=payload['channel_id']
-            channel=getattr(self,'_delivery_channels',{}).get(cid)
-            if channel is None:
-                channel=self.bot.get_channel(int(cid)) or await self.bot.fetch_channel(int(cid))
-            if pending:
-                msg=await channel.send(prompt_text(payload['title'],pending)+line,view=PositionPromptView(),allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=int(uid)) for uid in pending],everyone=False,roles=False))
-                with connect() as conn:
-                    conn.execute('INSERT OR REPLACE INTO position_prompts (message_id,guild_id,match_id,title,pending,created_at,club_id) VALUES (?,?,?,?,?,?,?)',
-                                 (str(msg.id),gid,mid,payload['title'],json.dumps(pending),int(time.time()),club_id()))
-            else:
-                await channel.send(line.strip(),allowed_mentions=discord.AllowedMentions.none())
-            for name in nudge:
-                set_setting(gid,f'linknudge:{name.lower()}',str(int(time.time())))
+            with club_scope(cid):
+                if match_id:
+                    text=P.correct_position(gid,uid,position.value,match_id.strip())
+                else:
+                    P.save_default(gid,uid,None if position.value=='_clear' else position.value)
+                    text=('Saved position cleared' if position.value=='_clear' else f'{position.value} saved for future games')+f' — {club_name()}. Past games stay as recorded.'
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc),ephemeral=True)
+            return
+        await interaction.response.send_message(text,ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
     def manager_channel_id(self, guild_id: str) -> Optional[int]:
         cid = get_setting(guild_id, K_MANAGER_CHANNEL)

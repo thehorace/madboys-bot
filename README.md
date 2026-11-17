@@ -41,13 +41,15 @@ bot works out exact spots (LB vs CB vs RB...) itself:
    (uses everyone who's actually around — ✅ signed up, 🎧 in voice, 🎮 played in
    the last 2 hours — plus everyone's builds and the rotation policy below),
    swap anyone with two taps, then 📢 Post lineup. That
-   lineup is what tells the bot who's LB and who's CB.
+   lineup is a plan; it does not certify where someone actually played.
    **Late arrivals are automatic:** a squad member who joins voice around session
    time is marked ✅ on the sign-up (shown with 🎧), even if they'd said ❌.
-3. **After each game** the bot logs each player's exact spot from the lineup
-   when EA's role agrees. Without a lineup, it assumes you stayed in the spot
-   you played the previous game this session. Anyone it can't be sure about gets
-   a one-tap "📍 Where did you play?" message. `/position` fixes your last game any time.
+3. **After each game** positions are recorded quietly. An explicit EA match slot
+   takes priority. Otherwise the player's club-specific saved default or last
+   player-confirmed position is used as an inferred value when compatible with
+   EA's broad role. Without a usable value, the exact position is **Unknown**.
+   No post-match position prompt is sent. Open `/position` or **My stats → Change
+   position** to save a default, or correct one recorded game.
 4. **Rotation policy (set by the manager):** the pitch is split into 3 areas —
    **Defence, Midfield, Front 3**. ST → RW is still the front 3, so it's not a
    rotation; front 3 → mids is. Someone is "due a rotation" after **3 games in a
@@ -77,7 +79,7 @@ Not everyone likes typing slash commands, so there's a menu too:
 | | |
 |---|---|
 | **Stats** | `/lastgame` `/clubstats` `/me` `/playerstats` `/leaderboard` `/compare` `/form` `/h2h` `/recap` |
-| **Setup** | `/link me` (connect your EA name — do this first) `/builds` (positions you have builds for) `/position` (fix your last game's spot) |
+| **Setup** | `/link me` (connect your EA name — do this first) `/builds` (positions you have builds for) `/position` (saved position per club, or one-match correction) |
 | **Sessions** | `/session create` (who's on tonight? ✅/🤔/❌ buttons + 30-min reminder) `/session list` `/session cancel` |
 | **Lineups** | `/lineup builder` (button builder) `/lineup suggest` `/lineup assign` `/lineup clear` `/lineup post` `/formation set` `/formation show` |
 | **Rotation** | `/rotation check` `/rotation history` `/rotation stats` |
@@ -204,12 +206,12 @@ EA News in one place. The existing allowlist and panel-owner checks apply to
 each change. Schedule, timezone, sticky cooldown, waitlist, channels, posting
 toggles and summary finish gap are saved in SQLite.
 
-After a planned session has no recorded game for **two hours** (default), the
+After a planned session has no recorded game for **90 minutes** (default), the
 next successful EA poll saves its history and posts one club recap in the
 #general (or the configured recap channel), with no pings. The club recap includes
 the club record, scores and squad performance. A personal summary is also sent by
 DM to each linked player recorded by EA as actually playing, regardless of RSVP.
-**Settings → Session summaries** lets you choose a one-hour or two-hour gap, a
+**Settings → Session summaries** lets you choose a 30, 60, 90 or 120-minute gap, a
 recap channel, and independently enable/disable club posts and personal DMs
 while still saving history. A new game resets the timer; failed EA checks do
 not finish sessions. Available match results are stored and posted immediately
@@ -275,7 +277,7 @@ The congratulations message and award card go to both **#general** and the confi
 
 Authorized usage viewers can run **`/resendawards month:2026-10`** to resend the corrected combined award. If a prior delivery is incomplete, it retries only the missing channel; after both deliveries have completed, an explicit resend starts a fresh broadcast with new pings. It is limited to completed months and has a one-minute cooldown. `/awards` remains a normal lookup and never broadcasts or pings everyone.
 
-Session recaps default to **two hours after the last recorded activity**, keeping club switches and delayed EA results in one evening. Existing 30-minute defaults migrate once; later changes in the private settings panel are respected. For an already split night, authorized usage viewers can run **`/sessionmerge keep:34 source:35`**. It combines history and recalculates Player of the Day, updates existing recap/award messages where possible, and retains the original snapshots in an audit table. It sends no replacement personal DMs. Both completed sessions must belong to the same server and be within 12 hours; rerunning the command retries message edits without merging twice.
+Session recaps default to **90 minutes after the last recorded activity**, keeping club switches and delayed EA results in one evening. Existing 120-minute settings migrate to 90 once; other saved gaps and later changes in the private settings panel are respected. Lingering voice activity cannot extend the default to two hours. For an already split night, authorized usage viewers can run **`/sessionmerge keep:34 source:35`**. It combines history and recalculates Player of the Day, updates existing recap/award messages where possible, and retains the original snapshots in an audit table. It sends no replacement personal DMs. Both completed sessions must belong to the same server and be within 12 hours; rerunning the command retries message edits without merging twice.
 
 Brief incomplete EA checks still hold session recaps open. After a club has failed or returned incomplete history continuously for two hours, it stops blocking recaps provided at least one club still returns fresh complete or partial data. The failure timer survives restarts; an outage of every club with no usable responses never counts as an eligible check. Recaps finished with degraded coverage state that some games may be missing, and Bot status distinguishes this from a short partial check that is still waiting. A complete recovery clears the failure timer. Updating to the combined weekly format does not automatically resend a week already posted by the old format.
 
@@ -401,7 +403,7 @@ cogs/stats.py     stats commands
 cogs/lineup.py    formations, prefs, lineup suggest (Hungarian assignment)
 cogs/rotation.py  rotation history + checks
 positions.py      exact-position logic (posted lineups, carry-over, rotation notes)
-cogs/positions.py "where did you play?" picker, /position, manager rotation notes
+cogs/positions.py private position controls, legacy corrections, manager rotation notes
 cogs/sessions.py  session sign-ups + reminders
 cogs/link.py      Discord <-> EA name links
 cogs/motm.py      historical squad vote records and quiet legacy-message closure
@@ -416,8 +418,28 @@ cogs/scout.py     /scout + 🔍 Scout opponent button
 
 Player Twin reserves profiles for EA players with a recorded match in the last **30 days**. Inactive players keep their historical stats but release their twin slot. Assignments are cached across player lookups; transactional database revision triggers invalidate that cache when matches, player stats or the club registry change. The cache also expires at the next active-window boundary, returns independent result objects and is bounded in memory. The usual minimum role sample and fauzan0410’s reserved Mbappé still apply.
 
-Delivery retries use persisted exponential delays: **30 seconds, 1, 2, 4, 8, 16 and then 30 minutes** between failed attempts, capped at 30 minutes. Workers attempt jobs when their next check is due. Backoff covers result posts, archived recaps, personal recap DMs, Player of the Day cards, position prompts and legacy vote-result edits. A card is not regenerated during its backoff period. Position prompts expire after 30 minutes to avoid asking about old games; other existing 24-hour delivery limits remain. Successful stages are acknowledged separately, so retrying an edit does not repeat another successful stage. Unlinked-player reminders are only marked delivered after a successful send.
+Delivery retries use persisted exponential delays: **30 seconds, 1, 2, 4, 8, 16 and then 30 minutes** between failed attempts, capped at 30 minutes. Workers attempt jobs when their next check is due. Backoff covers result posts, archived recaps, personal recap DMs, Player of the Day cards and legacy vote-result edits. A card is not regenerated during its backoff period. Automatic position prompts are retired and their old queued jobs are discarded; existing 24-hour delivery limits remain. Successful stages are acknowledged separately, so retrying an edit does not repeat another successful stage. No position prompts or position-related unlinked-player nudges follow result posts.
 
 Automatic **Squad MOTM voting is retired**: no new vote messages or winner announcements follow result posts. EA’s MOTM remains on result cards. Existing votes close quietly by updating their original messages, and historical awards remain available in `/motm table`. Queued vote openings and winner announcements are discarded on startup.
 
 The private Bot Status screen shows pending delivery counts, oldest waiting item, next eligible retry, the last fully complete EA check and the current recap waiting reason. Recent timings include database work, EA requests, card rendering, session archiving and Player Twin assignment calculation. Each operation retains at most 120 timing samples in memory; slow operations log their label and duration, without SQL text or player names. Session grouping and archival run in worker threads to avoid blocking button responses while history grows.
+
+
+## Effortless position tracking
+
+**EA evidence and limits.** The match parser consumes the per-player `pos` value in EA's club match history. Available code/payload fixtures establish the broad categories goalkeeper/defender/midfielder/forward. The local database contained no captured matches and the relay was not configured during this investigation, so a live FC 27 response could not be verified. [An EA-hosted forum feedback report also describes broad categories](https://forums.ea.com/discussions/fc-26-feedback-en/clubs-match-history---detailed-positions/12895890); this is supporting user feedback, not an EA API contract. The parser accepts literal recognised exact position strings if `pos` supplies them, with GK also unambiguous. It never decodes numeric guesses, `favoritePosition`, archetypes, ratings or a manager's planned lineup as a verified match slot.
+
+For each completed game, the priority is explicit EA match position → compatible saved club default → compatible last confirmed exact position → Unknown. A saved default is applied as **inferred**, never as an EA-verified position. A conflict with EA's broad role becomes Unknown. Missing/malformed match position data does not stop results or erase goals, ratings or other stats. EA's broad roles remain available for existing statistics; the exact slot and its source live separately.
+
+- `/position` opens private controls for the selected club.
+- `/position position:ST club:MADBOYS FC` saves a future default; use the club autocomplete suggestions or club ID.
+- `/position position:CB club:GRAYSBOYS` saves an independent GRAYSBOYS default (ID 754785).
+- `/position position:CAM match_id:last` confirms your last played game's position; without an explicit club, `last` follows the latest game you actually played across the tracked clubs.
+- `/position position:CB match_id:123456 club:GRAYSBOYS` corrects only that player's specified game and club. The linked EA player must have participated.
+- **My stats → Change position** provides position/club pickers and **Correct last game**. Clearing the saved position allows future exact slots to remain Unknown unless EA supplies one.
+
+Defaults are timestamped events, scoped by server + club ID + Discord user ID. Late-arriving games use the default effective at the game's timestamp, rather than today's preference. Changing a default never rewrites old games. Match corrections update the targeted rotation entry and dependent rotation counts/history, not other matches or saved defaults. Raw EA statistics and archived session totals are not reclassified by an inferred preference. Passing displays its existing breakdown as **EA match role**; EA leaderboard role filters remain based on EA favourite role. Profile/history views show EA, player-confirmed, saved/inferred, legacy, or Unknown provenance.
+
+Startup migrations add `position_defaults`, `rotation_log.ea_role` and `match_players.ea_exact_position`. They preserve old position records and the separate multi-build `position_prefs` table; a list of available builds is not silently converted into a claimed match position. Existing player confirmations can serve as inferred future defaults. Old lineup/automatic assumptions remain labelled legacy. New post-match prompts and related reminder retries are removed; existing prompt handlers remain usable only for deliberate legacy corrections. Polling intervals, club IDs, match deduplication, session recaps, EA MOTM and the retired squad-vote policy stay in place.
+
+Deploy the code normally and let `db.init_all()` apply the additive migrations at startup. No history reset or manual database edits are needed. Exact outfield detection remains limited by what EA actually supplies; otherwise a player updates their saved default when they switch positions, or corrects a game afterwards.

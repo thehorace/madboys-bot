@@ -29,6 +29,7 @@ import discord
 from config import CLUB_COLOUR
 from db import connect, now_iso
 from utils import RESULT_COLOUR, RESULT_EMOJI, RESULT_LABEL, clip, pct, result_letter, to_float, to_int
+from position_types import ea_position, ROLE_NAMES
 
 log = logging.getLogger("madboys-bot.matches")
 
@@ -56,6 +57,7 @@ class PlayerLine:
     seconds_played: int = 0
     clean_sheet: int = 0                 # 1 if no goals conceded while they were on
     goals_conceded: int = 0
+    exact_position: Optional[str] = None  # only an explicit EA match position (GK is unambiguous)
 
 
 @dataclass
@@ -108,12 +110,14 @@ def parse_match(match: dict, club_id: int) -> Optional[ParsedMatch]:
                  or to_int(ours.get("result")) & 8 or to_int(opp.get("result")) & 8),
     )
     for pid, p in ((match.get("players") or {}).get(str(club_id)) or {}).items():
+        role,exact=ea_position(p.get('pos'))
         if "secondsPlayed" in p or "gameTime" in p:
             pm.has_time = True
         pm.players.append(PlayerLine(
             persona_id=str(pid),
             name=p.get("playername") or f"<{pid}>",
-            pos=(p.get("pos") or None),
+            pos=ROLE_NAMES.get(role),
+            exact_position=exact,
             goals=to_int(p.get("goals")),
             assists=to_int(p.get("assists")),
             rating=to_float(p.get("rating")),
@@ -249,11 +253,11 @@ def store_match(club_id: int, pm: ParsedMatch, raw: dict) -> bool:
             """INSERT OR IGNORE INTO match_players
                (club_id, match_id, persona_id, name, pos, goals, assists, rating, shots, passes_made,
                 pass_attempts, tackles_made, tackle_attempts, saves, red_cards, motm,
-                archetype_id, seconds_played, clean_sheet, goals_conceded)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                archetype_id, seconds_played, clean_sheet, goals_conceded, ea_exact_position)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [(club_id, pm.match_id, p.persona_id, p.name, p.pos, p.goals, p.assists, p.rating, p.shots,
               p.passes_made, p.pass_attempts, p.tackles_made, p.tackle_attempts, p.saves, p.red_cards, p.motm,
-              p.archetype_id, p.seconds_played, p.clean_sheet, p.goals_conceded)
+              p.archetype_id, p.seconds_played, p.clean_sheet, p.goals_conceded, p.exact_position)
              for p in pm.players],
         )
         return True

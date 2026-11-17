@@ -574,34 +574,28 @@ class MatchdayCog(commands.Cog):
 
     def _log_rotation(self, guild_id: str, pm: md.ParsedMatch) -> dict[str, str]:
         """
-        Log each linked player's position for this match. The exact spot comes from the
-        lineup a manager posted (if EA's role agrees); otherwise EA's broad role is logged
-        and the player is returned in `pending` ({discord_id: EA bucket}) to be asked.
+        Log a separately sourced exact position or Unknown; never ask after a match.
+        EA match roles stay in match_players and are not replaced by preferences.
         """
         if is_match_processed(guild_id, club_name(), pm.match_id):
             return {}  # already logged (e.g. by the old rotation poller)
         import positions as POS
-        plan = POS.plan_for_match(guild_id, pm.ts)
-        entries, unmatched, pending = [], [], {}
-        for p in pm.players:
-            did = find_discord_id_by_ea_name(guild_id, p.name)
+        linked,unmatched=[],[]
+        when=datetime.fromtimestamp(pm.ts,timezone.utc).isoformat() if pm.ts else datetime.now(timezone.utc).isoformat()
+        for player in pm.players:
+            did=find_discord_id_by_ea_name(guild_id,player.name)
             if not did:
-                unmatched.append(p.name)
+                unmatched.append(player.name)
                 continue
-            pos, confirmed = POS.resolve_position(plan, did, p.pos, guild_id, pm.ts)
-            if pos:
-                entries.append((did, pos))
-                if not confirmed:
-                    pending[did] = (p.pos or "").lower()
-        when = datetime.fromtimestamp(pm.ts, timezone.utc).isoformat() if pm.ts else None
-        log_positions(guild_id, club_name(), entries, source="lineup" if plan else "auto", logged_at=when,
-                      match_id=pm.match_id)
+            result=POS.detect_position(guild_id,did,player.pos,pm.ts,player.exact_position)
+            POS.record_position(guild_id,did,pm.match_id,result,when)
+            linked.append(did)
         mark_match_processed(guild_id, club_name(), pm.match_id)
         if unmatched:
             log.info(f"Match {pm.match_id}: not linked — {', '.join(unmatched)}")
-        self._linked_in[pm.match_id] = [did for did, _ in entries]
+        self._linked_in[pm.match_id] = linked
         self._unlinked[pm.match_id] = unmatched
-        return pending
+        return {}
 
     async def _deliver_result_queue(self, guild_id, pending_by_match=None):
         """Retry only explicitly queued result posts, never old saved history."""
@@ -673,14 +667,6 @@ class MatchdayCog(commands.Cog):
                     extra["view"] = view
                 await channel.send(content=f"📡 **{club_name()} — Full time!**", embed=embed, **extra)
                 self._ack_results(guild_id,[pm])
-                # "where did you play?" for anyone whose exact position isn't known
-                pos_cog = self.bot.get_cog("PositionsCog")
-                pending = (pending_by_match or {}).get(pm.match_id)
-                # only ask about the newest game if the bot is catching up on several
-                if pos_cog and guild_id and pm.match_id in (pending_by_match or {}) and i == len(to_post) - 1:
-                    await pos_cog.open_prompt(channel, guild_id, pm.match_id,
-                                              f"{club_name()} · {pm.our_goals}–{pm.opp_goals} vs {pm.opp_name}", pending or {},
-                                              unlinked=self._unlinked.get(pm.match_id, []))
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")
             await report_health(self.bot, guild_id, "Match result posting", "The bot can't post results. Check its matchday channel permissions.")

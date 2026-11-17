@@ -1,16 +1,8 @@
-"""
-Exact positions (LB vs CB vs RB...), which EA's data doesn't have.
+"""Automatic exact-position tracking with separately labelled saved defaults.
 
-EA's match data only says goalkeeper / defender / midfielder / forward. To
-know who played LB and who played CB, the bot combines:
-
-  1. The lineup a manager posted before the session (lineup_plans). If a player
-     is in it and EA's bucket agrees with their slot (lineup says LB, EA says
-     "defender"), that slot is logged automatically.
-  2. Otherwise, the player is asked after the match with a one-tap picker
-     (cogs/positions.py). Until they answer, the game is stored as DEF/MID/FWD.
-
-This file holds the logic; cogs/positions.py holds the Discord parts.
+Manager lineups/build preferences remain useful planning data, not proof of a
+match slot. Exact match values, player confirmations and inferred defaults
+retain distinct sources, with no post-match selection workflow.
 """
 
 from clubs import club_id, club_name
@@ -74,53 +66,160 @@ def slot_of(plan: Optional[dict], discord_id: str) -> Optional[str]:
     return None
 
 
-# Without a lineup, a player is assumed to have stayed in the exact spot they played in the
-# previous game if it was this recent and EA still puts them in the same role.
-CARRY_OVER_HOURS = 2
+# Match slots and preferences are deliberately separate from manager lineups.
+from dataclasses import dataclass
+from position_types import ea_position, EXACT_ROLES
 
+SOURCE_LABELS={'ea':'EA match','player':'Player confirmed','manual':'Manual',
+               'saved':'Saved · inferred','confirmed_default':'Last confirmed · inferred',
+               'unknown':'Unknown','lineup':'Legacy lineup','auto':'Legacy inferred'}
 
-def previous_game_position(guild_id: str, discord_id: str, before_ts: int) -> Optional[str]:
-    """Exact position from this player's previous game, if it was within CARRY_OVER_HOURS."""
+def source_label(source):
+    return SOURCE_LABELS.get(source,'Legacy record')
+
+@dataclass(frozen=True)
+class MatchPosition:
+    position: str
+    source: str
+    ea_role: Optional[str]
+
+def default_event(gid,uid,when=None,cid=None):
+    when=int(time.time()) if when is None else when
     with connect() as conn:
-        row = conn.execute("""
-            SELECT r.position FROM rotation_log r JOIN matches m ON m.match_id = r.match_id
-            WHERE m.club_id=? AND r.guild_id=? AND r.club=? AND r.discord_id=? AND m.ts < ? AND m.ts >= ?
-            ORDER BY m.ts DESC LIMIT 1""",
-            (club_id(), guild_id, club_name(), discord_id, before_ts, before_ts - CARRY_OVER_HOURS * 3600)).fetchone()
-    return row["position"] if row and is_exact(row["position"]) else None
+        row=conn.execute('SELECT * FROM position_defaults WHERE guild_id=? AND club_id=? AND discord_id=? AND effective_at<=? ORDER BY effective_at DESC,id DESC LIMIT 1',
+                         (str(gid),cid if cid is not None else club_id(),str(uid),when)).fetchone()
+    return dict(row) if row else None
 
+def save_default(gid,uid,position,cid=None,when=None):
+    if position is not None:
+        position=position.strip().upper()
+        if position not in EXACT_ROLES:
+            raise ValueError('Choose a recognised exact position.')
+    with connect() as conn:
+        conn.execute('INSERT INTO position_defaults (guild_id,club_id,discord_id,position,effective_at) VALUES (?,?,?,?,?)',
+                     (str(gid),cid if cid is not None else club_id(),str(uid),position,int(time.time()) if when is None else when))
 
-def resolve_position(plan: Optional[dict], discord_id: str, ea_pos: Optional[str],
-                     guild_id: Optional[str] = None, match_ts: Optional[int] = None) -> tuple[Optional[str], bool]:
-    """
-    -> (position to log, confirmed?)
-    confirmed=True: exact spot — from the posted lineup, or the same spot as their previous
-                    game this session — and EA agrees on the role.
-    confirmed=False: we only know EA's bucket (DEF/MID/FWD); ask the player.
-    GK is always exact (there's only one keeper slot).
-    """
-    role = EA_BUCKET.get((ea_pos or "").strip().lower())
-    if role is None:
-        return None, True  # EA gave nothing usable; nothing to log or ask
-    if role == "GK":
-        return "GK", True
-    slot = slot_of(plan, discord_id)
-    if slot and broad_role(slot) == role:
-        return strip_number(slot), True
-    if not slot and guild_id and match_ts:
-        prev = previous_game_position(guild_id, discord_id, match_ts)
-        if prev and broad_role(prev) == role:
-            return prev, True
-    return role, False
-
-
-def last_exact_position(guild_id: str, discord_id: str, role: Optional[str] = None) -> Optional[str]:
-    """The player's most recent confirmed exact position (optionally within a role), for 'same as last time'."""
-    for e in get_recent_positions(guild_id, club_name(), discord_id, limit=20):
-        p = strip_number(e["position"])
-        if is_exact(p) and (role is None or broad_role(p) == role):
-            return p
+def confirmed_before(gid,uid,when,role=None):
+    with connect() as conn:
+        marks=','.join('?' for _ in EXACT_ROLES)
+        rows=conn.execute("SELECT r.position,COALESCE(m.ts,CAST(strftime('%s',r.logged_at) AS INTEGER)) stamp FROM rotation_log r "
+            "LEFT JOIN matches m ON m.club_id=? AND m.match_id=r.match_id "
+            "WHERE r.guild_id=? AND r.club=? AND r.discord_id=? AND r.source IN ('player','manual','ea') "
+            f"AND RTRIM(UPPER(r.position),'0123456789') IN ({marks}) "
+            "AND COALESCE(m.ts,CAST(strftime('%s',r.logged_at) AS INTEGER))<? ORDER BY stamp DESC,r.id DESC LIMIT 1",
+            (club_id(),str(gid),club_name(),str(uid),*EXACT_ROLES,when)).fetchall()
+    # Only the last confirmation is a default. Never reach past a newer role
+    # change to find an older convenient position in the requested role.
+    for row in rows:
+        pos=strip_number(row['position'].upper())
+        if pos in EXACT_ROLES:
+            return pos if role is None or broad_role(pos)==role else None
     return None
+
+def detect_position(gid,uid,ea_pos,match_ts=None,exact_position=None):
+    role,exact=ea_position(ea_pos)
+    if exact_position in EXACT_ROLES:
+        exact=exact_position
+        role=EXACT_ROLES[exact]
+    if exact:
+        return MatchPosition(exact,'ea',role)
+    when=int(time.time()) if match_ts is None else match_ts
+    if when<=0:
+        return MatchPosition('Unknown','unknown',role)
+    saved=default_event(gid,uid,when)
+    if saved is not None:
+        pos=saved['position']
+        if pos and (role is None or broad_role(pos)==role):
+            return MatchPosition(pos,'saved',role)
+        return MatchPosition('Unknown','unknown',role)
+    confirmed=confirmed_before(gid,uid,when,role)
+    if confirmed:
+        return MatchPosition(confirmed,'confirmed_default',role)
+    return MatchPosition('Unknown','unknown',role)
+
+def record_position(gid,uid,match_id,result,when):
+    with connect() as conn:
+        conn.execute('INSERT INTO rotation_log (guild_id,club,discord_id,position,logged_at,source,match_id,ea_role) '
+            'SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM rotation_log WHERE guild_id=? AND club=? AND discord_id=? AND match_id=?)',
+            (str(gid),club_name(),str(uid),result.position,when,result.source,match_id,result.ea_role,
+             str(gid),club_name(),str(uid),match_id))
+
+def resolve_position(plan,discord_id,ea_pos,guild_id=None,match_ts=None):
+    # Compatibility wrapper: a posted lineup is an intention, not match proof.
+    result=detect_position(guild_id,discord_id,ea_pos,match_ts)
+    return result.position,result.source=='ea'
+
+def previous_game_position(guild_id,discord_id,before_ts):
+    return confirmed_before(guild_id,discord_id,before_ts)
+
+def last_exact_position(guild_id,discord_id,role=None):
+    return confirmed_before(guild_id,discord_id,int(time.time())+1,role)
+
+def profile_text(gid,uid,cid=None):
+    cid=club_id() if cid is None else cid
+    from clubs import club_scope
+    with club_scope(cid):
+        saved=default_event(gid,uid)
+        lines=[f"Saved: **{saved['position'] if saved and saved['position'] else 'Not set'}**"]
+        with connect() as conn:
+            row=conn.execute('SELECT position,source,ea_role FROM rotation_log WHERE guild_id=? AND club=? AND discord_id=? ORDER BY logged_at DESC,id DESC LIMIT 1',
+                             (str(gid),club_name(),str(uid))).fetchone()
+        if row:
+            label='' if row['source']=='unknown' else f" · {source_label(row['source'])}"
+            lines.append(f"Latest: **{row['position']}**{label}")
+            if row['position']=='Unknown' and row['ea_role']:
+                lines.append(f"EA match role: {row['ea_role']}")
+        return '\n'.join(lines)
+
+def last_played_club(gid,uid):
+    from cogs.link import get_link
+    name=get_link(str(gid),str(uid))
+    if not name:
+        return None
+    with connect() as conn:
+        row=conn.execute('SELECT m.club_id FROM matches m JOIN match_players p ON p.club_id=m.club_id AND p.match_id=m.match_id '
+            'JOIN monitored_clubs c ON c.club_id=m.club_id WHERE p.name=? COLLATE NOCASE ORDER BY m.ts DESC,m.club_id LIMIT 1',(name,)).fetchone()
+    return row['club_id'] if row else None
+
+def correct_position(gid,uid,position,match_id='last'):
+    """A user correction changes only their chosen club+game, never a default."""
+    from cogs.link import get_link
+    from cogs.rotation import set_match_position
+    from datetime import datetime,timezone
+    position=position.upper()
+    if position not in EXACT_ROLES:
+        raise ValueError('Choose an exact position for a match correction.')
+    name=get_link(str(gid),str(uid))
+    if not name:
+        raise ValueError('Link your EA name through Setup before correcting a match.')
+    prefix=f'{club_id()}:'
+    if match_id.startswith(prefix):
+        match_id=match_id[len(prefix):]
+    with connect() as conn:
+        args=[club_id(),name]
+        extra=''
+        if match_id!='last':
+            extra=' AND m.match_id=?'
+            args.append(match_id)
+        row=conn.execute('SELECT m.*,p.pos FROM matches m JOIN match_players p ON p.club_id=m.club_id AND p.match_id=m.match_id '
+            'WHERE m.club_id=? AND p.name=? COLLATE NOCASE'+extra+' ORDER BY m.ts DESC,m.match_id DESC LIMIT 1',args).fetchone()
+        if not row:
+            raise ValueError(f'No matching game for your linked EA player in {club_name()}.')
+        prompts=conn.execute('SELECT message_id,pending FROM position_prompts WHERE guild_id=? AND club_id=? AND match_id=?',
+                             (str(gid),club_id(),row['match_id'])).fetchall()
+        when=datetime.fromtimestamp(row['ts'],timezone.utc).isoformat()
+        # Keep the correction, provenance and legacy prompt cleanup atomic.
+        cur=conn.execute("UPDATE rotation_log SET position=?,source='player' WHERE guild_id=? AND club=? AND discord_id=? AND match_id=?",
+                         (position,str(gid),club_name(),str(uid),row['match_id']))
+        role,_=ea_position(row['pos'])
+        if cur.rowcount==0:
+            conn.execute('INSERT INTO rotation_log (guild_id,club,discord_id,position,logged_at,source,match_id,ea_role) VALUES (?,?,?,?,?,?,?,?)',
+                         (str(gid),club_name(),str(uid),position,when,'player',row['match_id'],role))
+        for prompt in prompts:
+            pending=json.loads(prompt['pending'])
+            if pending.pop(str(uid),None) is not None:
+                conn.execute('UPDATE position_prompts SET pending=? WHERE message_id=?',(json.dumps(pending),prompt['message_id']))
+    return f"Confirmed {position} for {club_name()} · {row['our_goals']}–{row['opp_goals']} vs {row['opp_name']} (match {row['match_id']})."
 
 
 # --------------------------------------------------------------------------- #

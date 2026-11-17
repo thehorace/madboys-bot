@@ -91,7 +91,7 @@ class AdminView(TrackedView):
             return discord.Embed(title="Session summary settings", colour=CLUB_COLOUR,
                 description=f"Club recaps: **{'On' if settings['enabled'] else 'Off'}**\nPersonal DMs: **{'On' if settings['dms'] else 'Off'}**\nPlayer of the Day card: **{'On' if settings['potd'] else 'Off'}**\nEnds **{settings['gap']} minutes** after the last game\nChannel: {channel}\n\n"
                     "One club recap and a personal DM for each linked player who played. No pings. Blocked DMs stay available in the panel. History saves even when posts are off. "
-                    "Finishing waits for an eligible EA check. Two or more linked players together in voice can keep the session open for up to 2 hours after the last game. "
+                    "Finishing waits for an eligible EA check. Two or more linked players together in voice can keep the session open for up to 90 minutes after the last game. "
                     "The first game can be up to 2 hours after kick-off.")
         if self.page == "tracker_settings":
             tracker = self.bot.get_cog("MatchdayCog")
@@ -160,6 +160,7 @@ class AdminView(TrackedView):
                 self.button("Disable personal DMs" if settings["dms"] else "Enable personal DMs", "toggle_report_dms")
                 self.button("End after: 30 min", "gap30", row=3)
                 self.button("End after: 1 hour", "gap60", row=3)
+                self.button("End after: 90 min", "gap90", row=3)
                 self.button("End after: 2 hours", "gap120", row=3)
                 self.button("Use #general", "reset_report_channel")
                 self.button("Disable Player of the Day" if settings["potd"] else "Enable Player of the Day",
@@ -269,7 +270,7 @@ class AdminView(TrackedView):
                 await reports.show_history(interaction, private=True)
             else:
                 await interaction.response.send_message("Session history is unavailable.", ephemeral=True)
-        elif action in ("toggle_reports", "toggle_report_dms", "toggle_report_potd", "gap30", "gap60", "gap120", "reset_report_channel", "toggle_tracker"):
+        elif action in ("toggle_reports", "toggle_report_dms", "toggle_report_potd", "gap30", "gap60", "gap90", "gap120", "reset_report_channel", "toggle_tracker"):
             gid = str(self.guild.id)
             if action == "toggle_reports":
                 enabled = not report_settings(gid)["enabled"]

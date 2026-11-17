@@ -124,6 +124,15 @@ CREATE TABLE IF NOT EXISTS position_prefs (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (guild_id, discord_id)
 );
+CREATE TABLE IF NOT EXISTS position_defaults (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    club_id INTEGER NOT NULL,
+    discord_id TEXT NOT NULL,
+    position TEXT,
+    effective_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_position_defaults ON position_defaults(guild_id,club_id,discord_id,effective_at,id);
 
 -- ---------- new: permanent match history ----------
 CREATE TABLE IF NOT EXISTS matches (
@@ -328,6 +337,10 @@ def init_all():
         for col in ("archetype_id", "seconds_played", "clean_sheet", "goals_conceded"):
             if col not in have:
                 conn.execute(f"ALTER TABLE match_players ADD COLUMN {col} INTEGER")
+        if 'ea_exact_position' not in {r['name'] for r in conn.execute('PRAGMA table_info(match_players)')}:
+            conn.execute('ALTER TABLE match_players ADD COLUMN ea_exact_position TEXT')
+        if 'ea_role' not in {r['name'] for r in conn.execute('PRAGMA table_info(rotation_log)')}:
+            conn.execute('ALTER TABLE rotation_log ADD COLUMN ea_role TEXT')
         # rotation entries remember which match they came from, so a player can correct their position
         if "match_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(rotation_log)")}:
             conn.execute("ALTER TABLE rotation_log ADD COLUMN match_id TEXT")

@@ -22,10 +22,10 @@ from match_data import VOID_SCHEMA
 from performance import timed
 
 log = logging.getLogger("madboys-bot.session_reports")
-DEFAULT_GAP = 120      # keep one evening together through queues, club switches and EA delays
+DEFAULT_GAP = 90       # recap after 90 minutes without a recorded game/forfeit
 START_WINDOW = 120     # ...but the first game may come up to this long after kick-off
 MATCH_SECONDS = 15 * 60   # EA times a game by when it ENDS: allow for the next game being played
-VOICE_HOLD = 2 * 3600     # squad still together in voice: keep the session open (up to this long)
+VOICE_HOLD = 90 * 60     # lingering voice activity must not extend the 90-minute default
 FOLLOWUP_WINDOW = 12 * 3600   # games left over after a session closed get their own recap
 
 
@@ -557,6 +557,12 @@ class SessionReportsCog(commands.Cog):
             if get_setting(gid, 'reports:gap') in (None, '30'):
                 set_setting(gid, 'reports:gap', str(DEFAULT_GAP))
             set_setting(gid, 'reports:evening_gap_v1', '1')
+        # Apply the requested shorter default once, including during EA outages.
+        # Later explicit admin choices (including 120) remain authoritative.
+        if get_setting(gid,'reports:gap90_v1') is None:
+            with connect() as conn:
+                conn.execute("UPDATE settings SET value='90' WHERE guild_id=? AND key='reports:gap' AND value='120'",(gid,))
+                conn.execute("INSERT OR REPLACE INTO settings (guild_id,key,value) VALUES (?,'reports:gap90_v1','1')",(gid,))
         settings = report_settings(gid)   # read once per check
         if finalize:
             await asyncio.to_thread(add_followup_sessions,gid,now)

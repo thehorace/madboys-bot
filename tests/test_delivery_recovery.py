@@ -67,30 +67,12 @@ class DeliveryRecoveryTests(Base):
         self.assertEqual(message.edit.await_count,2)
         self.assertIsNone(D.get('motm_edit','m'))
 
-    async def test_position_retry_preserves_club_and_does_not_consume_failed_nudge(self):
-        secondary=monitored_clubs()[1]
-        channel=SimpleNamespace(id=20,send=AsyncMock(side_effect=unavailable()))
-        cog=object.__new__(positions.PositionsCog)
-        cog.bot=SimpleNamespace(get_channel=lambda _:channel)
-        with db.connect() as conn:
-            conn.executemany('INSERT INTO rotation_log (guild_id,club,discord_id,position,logged_at,source,match_id) VALUES (?,?,?,?,?,?,?)',
-                [('10',secondary['name'],'42','CB','now','auto','m'),('10',secondary['name'],'99','CB','now','player','m')])
-        with patch.object(D.time,'time',return_value=1000),club_scope(secondary):
-            await cog.open_prompt(channel,'10','m','Secondary game',{'42':'defender','99':'defender'},['Unlinked'])
-        self.assertIsNone(db.get_setting('10','linknudge:unlinked'))
-        restarted=object.__new__(positions.PositionsCog)
-        restarted.bot=cog.bot
-        channel.send.side_effect=None
-        channel.send.return_value=SimpleNamespace(id=77)
-        with patch.object(D.time,'time',return_value=1031):
-            await restarted.retry_deliveries()
-            await restarted.retry_deliveries()
-        self.assertEqual(channel.send.await_count,2)
-        self.assertIn('<@42>',channel.send.call_args.args[0])
-        self.assertNotIn('<@99>',channel.send.call_args.args[0])
-        with db.connect() as conn:
-            self.assertEqual(conn.execute('SELECT club_id FROM position_prompts').fetchone()[0],secondary['club_id'])
-        self.assertEqual(db.get_setting('10','linknudge:unlinked'),'1031')
+    async def test_retired_position_jobs_do_not_replay_on_startup(self):
+        D.enqueue('position','m','10',club_id(),{})
+        channel=SimpleNamespace(send=AsyncMock())
+        positions.PositionsCog(SimpleNamespace(get_channel=lambda _:channel))
+        self.assertIsNone(D.get('position','m'))
+        channel.send.assert_not_awaited()
 
     async def test_status_shows_queued_items_complete_check_and_measured_timings(self):
         now=int(time.time())

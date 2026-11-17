@@ -70,6 +70,10 @@ class MultiClubFixTests(TMC.MultiClubTests):
         old = self.store(self.primary, "m_old", 100)
         new = self.store(self.secondary, "g_new", 500)
         self.store(self.primary, "m_other", 600)            # other squad played MADBOYS later
+        from cogs.link import set_link
+        set_link('10','42','Fauz','self')
+        with db.connect() as conn:
+            conn.execute("UPDATE match_players SET name='OtherPlayer' WHERE match_id='m_other'")
         log_positions("10", self.primary["name"], [("42", "DEF")], match_id=old.match_id)
         log_positions("10", self.secondary["name"], [("42", "DEF")], match_id=new.match_id)
         db.set_setting("10", "club:42", str(self.primary["club_id"]))
@@ -77,7 +81,7 @@ class MultiClubFixTests(TMC.MultiClubTests):
         cog.check_notes = AsyncMock()
         interaction = SimpleNamespace(guild_id=10, user=SimpleNamespace(id=42), guild=self.guild,
                                       response=SimpleNamespace(send_message=AsyncMock()))
-        await PositionsCog.position.callback(cog, interaction, SimpleNamespace(value="CB"))
+        await PositionsCog.position.callback(cog, interaction, SimpleNamespace(value="CB"),match_id='last')
         with db.connect() as conn:
             rows = dict(conn.execute("SELECT club, position FROM rotation_log WHERE discord_id='42'").fetchall())
         self.assertEqual(rows, {self.primary["name"]: "DEF", self.secondary["name"]: "CB"})

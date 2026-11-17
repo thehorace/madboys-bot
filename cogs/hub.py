@@ -193,6 +193,10 @@ class StatsMenu(TrackedView):
             else:
                 self.player = name
                 screen = await S.build_player(self.ea, name, self.career, with_recent=True)
+                if isinstance(screen,discord.Embed):
+                    import positions as P
+                    info=await asyncio.to_thread(P.profile_text,self.guild_id,str(self.user.id),self.club_id or club_id())
+                    screen.add_field(name='📍 Position',value=info,inline=False)
         elif page == "player":
             screen = await S.build_player(self.ea, self.player, self.career, with_recent=True)
         elif page == "compare":
@@ -243,6 +247,10 @@ class StatsMenu(TrackedView):
             btn = discord.ui.Button(label=label, emoji=emoji, row=0,
                                     style=discord.ButtonStyle.primary if active else discord.ButtonStyle.secondary)
             btn.callback = self._nav(key)
+            if key=='me' and self.page=='me':
+                btn.label='Change position'
+                btn.emoji='📍'
+                btn.callback=self._position_menu
             self.add_item(btn)
 
         if self.page == 'leaderboard' and self.stat == 'player_twin':
@@ -431,6 +439,10 @@ class StatsMenu(TrackedView):
             return
         self.twin_of = name
         await self._update(interaction, 'leaderboard')
+
+    async def _position_menu(self,interaction):
+        from cogs.position_menu import open_menu
+        await open_menu(self.bot,interaction,self.club_id or club_id())
 
     async def _my_badges(self, interaction: discord.Interaction):
         badges = self.bot.get_cog("BadgesCog")

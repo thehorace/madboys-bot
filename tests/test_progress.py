@@ -101,7 +101,7 @@ class SessionProgressTests(Base):
         self.game(NOW+600,players=[('Ali',{})])
         held=P.session_embed('10',NOW+2500,in_voice=True,tracker_ok=True)
         self.assertIn('Held open by voice',held.description)
-        self.assertIn(str(NOW+600+7200),held.description)
+        self.assertIn(str(NOW+600+5400),held.description)
         failed=P.session_embed('10',NOW+2500,tracker_ok=False)
         self.assertIn('Waiting for a successful EA check',failed.description)
         stopped=P.session_embed('10',NOW+2500,tracker_running=False)

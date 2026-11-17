@@ -27,6 +27,7 @@ from discord.ext import commands
 from config import CLUB_COLOUR, ROTATION_THRESHOLD
 from db import connect, now_iso
 from utils import clip, resolve_name
+from position_types import EXACT_ROLES
 
 log = logging.getLogger("madboys-bot.rotation")
 
@@ -56,7 +57,7 @@ BROAD = {"DEF", "MID", "FWD"}   # GK is both broad and exact
 
 def is_exact(pos: str) -> bool:
     """'LB', 'CB2', 'GK' are exact; 'DEF' / 'MID' / 'FWD' (EA's buckets) are not."""
-    return strip_number(pos.upper()) not in BROAD
+    return strip_number(pos.upper()) in EXACT_ROLES
 
 
 def log_positions(guild_id: str, club: str, entries: list[tuple[str, str]], source: str = "manual",
@@ -106,6 +107,8 @@ def current_streak(positions: list[str]) -> tuple[Optional[str], int]:
     if not positions:
         return None, 0
     area = area_of(positions[0])
+    if area not in AREA_NAMES:
+        return None,0
     n = 0
     for p in positions:
         if area_of(p) != area:
@@ -214,7 +217,7 @@ class RotationCog(commands.Cog):
             embed.add_field(name="Rotating well", value=clip("\n".join(healthy[:15])), inline=False)
         embed.set_footer(text=f"Flags {ROTATION_THRESHOLD}+ games in a row in the same area (Defence / Midfield / "
                               f"Front 3) • keepers aren't flagged • "
-                              f"/lineup suggest takes this into account")
+                              f"Includes saved/inferred defaults; /rotation history shows sources")
         await interaction.followup.send(embed=embed)
 
     @rotation_group.command(name="history", description="Show recent position history for a player")
@@ -234,7 +237,8 @@ class RotationCog(commands.Cog):
                 when = f"<t:{int(dt.timestamp())}:d>"
             except ValueError:
                 when = e["logged_at"][:10]
-            tag = "" if e.get("source") == "auto" else " *(lineup)*"
+            from positions import source_label
+            tag = '' if e.get('source')=='unknown' else f" *({source_label(e.get('source'))})*"
             lines.append(f"`{i + 1}.` **{e['position']}** — {when}{tag}")
         embed = discord.Embed(title=f"📋 {player.display_name} — Position History",
                               description="\n".join(lines), colour=CLUB_COLOUR)
@@ -255,12 +259,13 @@ class RotationCog(commands.Cog):
             merged: dict[str, int] = defaultdict(int)
             for p, c in pos_counts.items():
                 base = strip_number(p)
-                merged[base if is_exact(base) else f"{base}?"] += c   # "DEF?" = defender, exact spot not confirmed
+                merged[base if is_exact(base) or base.upper()=='UNKNOWN' else f"{base}?"] += c
             total = sum(merged.values())
             breakdown = ", ".join(f"{p} ×{c}" for p, c in sorted(merged.items(), key=lambda x: -x[1]))
             lines.append((name.lower(), f"**{name}** ({total}): {breakdown}"))
         embed = discord.Embed(title=f"📊 {club_name()} — Games per Position (All Time)",
                               description=clip("\n".join(l for _, l in sorted(lines)), 4096), colour=CLUB_COLOUR)
+        embed.set_footer(text='Includes saved/inferred positions and Unknown • Source details are in /rotation history')
         await interaction.followup.send(embed=embed)
 
 

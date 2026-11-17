@@ -312,7 +312,10 @@ async def build_leaderboard(ea, stat: str, career: bool = False, position: str =
              for i, (n, v, g) in enumerate(ranked[:15])]
     title = f"🏆 {club_name()} — {label}" + (f" ({pos_label})" if position != "all" else "")
     embed = discord.Embed(title=title, description="\n".join(lines), colour=CLUB_COLOUR)
-    return footer(embed, ea, ("Career" if career else "This season") + (f" • min {min_games} games" if min_games > 1 else ""))
+    note=("Career" if career else "This season") + (f" • min {min_games} games" if min_games > 1 else "")
+    if position!='all':
+        note+=' • Filtered by EA favourite role'
+    return footer(embed, ea, note)
 
 
 def _passing_rows(cid: int):
@@ -372,7 +375,7 @@ async def build_passing(ea, position: str = "all") -> Screen:
                 lines.append(f"**{md.POS_SHORT.get(r['pos'], r['pos'])}** — {100 * r['made'] / r['att']:.0f}% "
                              f"• {r['att'] / r['apps']:.1f} att/g ({r['apps']} game{'s' if r['apps'] != 1 else ''})")
         if lines:
-            embed.add_field(name="By position played (tracked games)", value="\n".join(lines), inline=True)
+            embed.add_field(name="By EA match role (tracked games)", value="\n".join(lines), inline=True)
     if per_match:
         tot_m = sum(r["made"] or 0 for r in per_match)
         tot_a = sum(r["att"] or 0 for r in per_match)
