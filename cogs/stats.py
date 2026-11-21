@@ -523,7 +523,7 @@ class StatsCog(commands.Cog):
         if info and not isinstance(screen, str):
             from cogs.result_details import ResultDetails
             view = discord.ui.View(timeout=None)
-            view.add_item(ResultDetails(info["club_id"], info["match_id"]))   # same private stats as result posts
+            view.add_item(ResultDetails(info["club_id"], info["match_id"]))   # same stats button as result posts
         await send_screen(interaction, screen, view)
 
     @app_commands.command(name="clubstats", description="Season record, division and recent form")

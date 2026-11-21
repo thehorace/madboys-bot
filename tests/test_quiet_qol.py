@@ -231,7 +231,7 @@ class QuietQolTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(md,'match_post',AsyncMock(return_value=(discord.Embed(),None))) as post:
             await restored.callback(interaction)
         self.assertEqual(post.call_args.args[0].club_id,R.CLUB_ID)
-        self.assertTrue(interaction.followup.send.call_args.kwargs['ephemeral'])
+        self.assertFalse(interaction.followup.send.call_args.kwargs.get('ephemeral'))
 
 
 class MatchStatFieldTests(unittest.IsolatedAsyncioTestCase):
@@ -270,7 +270,7 @@ class MatchStatFieldTests(unittest.IsolatedAsyncioTestCase):
                     p[k] = '0'
         self.assertEqual(md.match_stat_fields(raw, R.CLUB_ID), [])
 
-    async def test_details_button_shows_stats_privately(self):
+    async def test_details_button_posts_stats_in_channel(self):
         from cogs.result_details import ResultDetails
         raw = self.raw()
         md.store_match(R.CLUB_ID, md.parse_match(raw, R.CLUB_ID), raw)
@@ -278,13 +278,26 @@ class MatchStatFieldTests(unittest.IsolatedAsyncioTestCase):
         interaction = self.interaction()
         interaction.response.defer = AsyncMock()
         interaction.followup = SimpleNamespace(send=AsyncMock())
-        with patch.object(md, 'match_post', AsyncMock(return_value=(discord.Embed(), None))):
+        interaction.user.display_name = 'Tester'
+        posted = discord.Embed().set_footer(text='MADBOYS FC • EA FC Pro Clubs')
+        with patch.object(md, 'match_post', AsyncMock(return_value=(posted, None))):
             await button.callback(interaction)
+        self.assertFalse(interaction.response.defer.call_args.kwargs.get('ephemeral'))   # public in the channel
         kwargs = interaction.followup.send.call_args.kwargs
-        self.assertTrue(kwargs['ephemeral'])
+        self.assertFalse(kwargs.get('ephemeral'))
         self.assertEqual([f.name for f in kwargs['embed'].fields], ['📊 Team stats', '🎯 Our players'])
+        self.assertTrue(kwargs['embed'].footer.text.endswith('Shared by Tester'))
 
-    async def test_lastgame_command_has_private_details_button(self):
+    async def test_details_for_unsaved_match_reply_privately(self):
+        from cogs.result_details import ResultDetails
+        interaction = self.interaction()
+        interaction.response.defer = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        await ResultDetails(R.CLUB_ID, 'missing').callback(interaction)
+        interaction.response.defer.assert_not_called()
+        self.assertTrue(interaction.response.send_message.call_args.kwargs['ephemeral'])
+
+    async def test_lastgame_command_has_details_button(self):
         from cogs.stats import StatsCog
         from cogs.result_details import ResultDetails
         raw = self.raw()

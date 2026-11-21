@@ -16,7 +16,8 @@ class ResultDetails(discord.ui.DynamicItem[discord.ui.Button], template=r'result
         return cls(int(match['club']), match['mid'])
 
     async def callback(self, interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        # Posted publicly in the channel. The saved-game lookup is one quick row read, so do it
+        # before replying: a "not saved yet" note can then stay private to whoever pressed.
         def read():
             with connect() as conn:
                 row = conn.execute('SELECT raw_json FROM matches WHERE club_id=? AND match_id=?', (self.cid, self.mid)).fetchone()
@@ -26,8 +27,11 @@ class ResultDetails(discord.ui.DynamicItem[discord.ui.Button], template=r'result
             return md.parse_match(raw, self.cid), raw
         match, raw = await asyncio.to_thread(read)
         if match is None:
-            await interaction.followup.send("This match isn't in the bot's saved history yet. If it just finished, try again in a minute.", ephemeral=True)
+            await interaction.response.send_message(
+                "This match isn't in the bot's saved history yet. If it just finished, try again in a minute.",
+                ephemeral=True)
             return
+        await interaction.response.defer(thinking=True)
         embed, file = await md.match_post(match)
         try:
             extras = md.match_stat_fields(raw, self.cid)
@@ -35,5 +39,7 @@ class ResultDetails(discord.ui.DynamicItem[discord.ui.Button], template=r'result
             extras = []   # an extra; never block the stats view
         for name, value in extras:
             embed.add_field(name=name, value=value, inline=False)
-        await interaction.followup.send(embed=embed, **({'file': file} if file else {}), ephemeral=True,
+        if embed.footer and embed.footer.text:
+            embed.set_footer(text=f"{embed.footer.text} • Shared by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed, **({'file': file} if file else {}),
                                        allowed_mentions=discord.AllowedMentions.none())
