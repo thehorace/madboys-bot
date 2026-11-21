@@ -173,7 +173,8 @@ class StatsMenu(TrackedView):
         if page == "home":
             screen = self.home_embed()
         elif page == "lastgame":
-            screen = await S.build_lastgame(self.ea, self.bot)
+            self.lastgame_info = {}
+            screen = await S.build_lastgame(self.ea, self.bot, self.lastgame_info)
         elif page == "club":
             screen = await S.build_clubstats(self.ea)
         elif page == "form":
@@ -333,6 +334,12 @@ class StatsMenu(TrackedView):
             switch = discord.ui.Button(label=f"Switch to {nxt}"[:80], emoji="🔁", row=4)
             switch.callback = self._switch_club
             self.add_item(switch)
+        info = getattr(self, "lastgame_info", None)
+        if self.page == "lastgame" and info and not getattr(self, "screen_failed", False):
+            from cogs.result_details import ResultDetails   # posts the full stats in the channel
+            details = ResultDetails(info["club_id"], info["match_id"])
+            details.item.row = 4
+            self.add_item(details)
         if self.page == "me":
             badges = discord.ui.Button(label="My badges", emoji="🏅", row=4, style=discord.ButtonStyle.secondary)
             badges.callback = self._my_badges

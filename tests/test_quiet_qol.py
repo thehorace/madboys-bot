@@ -313,3 +313,19 @@ class MatchStatFieldTests(unittest.IsolatedAsyncioTestCase):
         button = next(i.item for i in view.children if isinstance(i, ResultDetails))
         self.assertEqual(button.label, 'Full match stats')
         self.assertEqual(button.custom_id, f'result:details:{R.CLUB_ID}:sc')
+
+    async def test_stats_menu_last_game_has_details_button(self):
+        from cogs.hub import StatsMenu
+        from cogs.result_details import ResultDetails
+        raw = self.raw()
+        md.store_match(R.CLUB_ID, md.parse_match(raw, R.CLUB_ID), raw)
+        ea = SimpleNamespace(get_recent_matches_multi=AsyncMock(return_value=[raw]), stale_note=lambda: None)
+        bot = SimpleNamespace(ea=ea, get_cog=lambda name: None, get_guild=lambda _: None)
+        with club_scope(R.CLUB_ID):
+            menu = StatsMenu(bot, SimpleNamespace(id=42), '10', [], [])
+            await menu.go('lastgame')
+            details = [i for i in menu.children if isinstance(i, ResultDetails)]
+            self.assertEqual(len(details), 1)
+            self.assertEqual(details[0].item.custom_id, f'result:details:{R.CLUB_ID}:sc')
+            await menu.go('form')
+            self.assertFalse(any(isinstance(i, ResultDetails) for i in menu.children))
