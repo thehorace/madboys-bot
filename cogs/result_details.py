@@ -26,7 +26,7 @@ class ResultDetails(discord.ui.DynamicItem[discord.ui.Button], template=r'result
             return md.parse_match(raw, self.cid), raw
         match, raw = await asyncio.to_thread(read)
         if match is None:
-            await interaction.followup.send('This match is no longer available in saved history.', ephemeral=True)
+            await interaction.followup.send("This match isn't in the bot's saved history yet. If it just finished, try again in a minute.", ephemeral=True)
             return
         embed, file = await md.match_post(match)
         try:

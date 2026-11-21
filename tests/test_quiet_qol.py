@@ -283,3 +283,20 @@ class MatchStatFieldTests(unittest.IsolatedAsyncioTestCase):
         kwargs = interaction.followup.send.call_args.kwargs
         self.assertTrue(kwargs['ephemeral'])
         self.assertEqual([f.name for f in kwargs['embed'].fields], ['📊 Team stats', '🎯 Our players'])
+
+    async def test_lastgame_command_has_private_details_button(self):
+        from cogs.stats import StatsCog
+        from cogs.result_details import ResultDetails
+        raw = self.raw()
+        md.store_match(R.CLUB_ID, md.parse_match(raw, R.CLUB_ID), raw)
+        ea = SimpleNamespace(get_recent_matches_multi=AsyncMock(return_value=[raw]), stale_note=lambda: None)
+        cog = StatsCog(SimpleNamespace(ea=ea, get_cog=lambda name: None))
+        interaction = self.interaction()
+        interaction.response.defer = AsyncMock()
+        interaction.followup = SimpleNamespace(send=AsyncMock())
+        with club_scope(R.CLUB_ID):
+            await cog.lastgame.callback(cog, interaction)
+        view = interaction.followup.send.call_args.kwargs['view']
+        button = next(i.item for i in view.children if isinstance(i, ResultDetails))
+        self.assertEqual(button.label, 'Full match stats')
+        self.assertEqual(button.custom_id, f'result:details:{R.CLUB_ID}:sc')

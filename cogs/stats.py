@@ -162,7 +162,8 @@ def recent_player_games(name: str, limit: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 #  screen builders (shared by slash commands and the menu)
 # --------------------------------------------------------------------------- #
-async def build_lastgame(ea, bot=None) -> Screen:
+async def build_lastgame(ea, bot=None, info: Optional[dict] = None) -> Screen:
+    """info, if given, receives the shown game's club_id and match_id (for the details button)."""
     raw_list = await ea.get_recent_matches_multi(club_id(), count=5)
     # newest game that really happened (skips 0–3 forfeits / kick-off disconnects)
     real = [r for r in (raw_list or []) if (lambda p: p and not md.void_reason(p))(md.parse_match(r, club_id()))]
@@ -172,6 +173,8 @@ async def build_lastgame(ea, bot=None) -> Screen:
     # Safety net: if someone looks up a game the tracker hasn't posted yet, post it now
     # instead of waiting for the next scheduled check.
     mid = str(raw.get("matchId") or raw.get("timestamp") or "")
+    if info is not None and mid:
+        info.update(club_id=club_id(), match_id=mid)
     if bot is not None and real and mid and not md.stored_ids(club_id(), [mid]):
         tracker = bot.get_cog("MatchdayCog")
         if tracker:
@@ -488,16 +491,17 @@ def card_file(png: bytes) -> discord.File:
     return discord.File(io.BytesIO(png), "result.png")
 
 
-async def send_screen(interaction: discord.Interaction, screen: Screen):
+async def send_screen(interaction: discord.Interaction, screen: Screen, view: Optional[discord.ui.View] = None):
     """Send a builder's result as a reply to a (deferred) slash command."""
+    extra = {"view": view} if view is not None else {}
     if isinstance(screen, str):
         from interaction_tracking import failed
         failed(interaction)
         await interaction.followup.send(screen, ephemeral=True)
     elif isinstance(screen, tuple):
-        await interaction.followup.send(embed=screen[0], file=card_file(screen[1]))
+        await interaction.followup.send(embed=screen[0], file=card_file(screen[1]), **extra)
     else:
-        await interaction.followup.send(embed=screen)
+        await interaction.followup.send(embed=screen, **extra)
 
 
 # --------------------------------------------------------------------------- #
@@ -513,7 +517,14 @@ class StatsCog(commands.Cog):
     @club_scoped
     async def lastgame(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        await send_screen(interaction, await build_lastgame(self.ea, self.bot))
+        info: dict = {}
+        screen = await build_lastgame(self.ea, self.bot, info)
+        view = None
+        if info and not isinstance(screen, str):
+            from cogs.result_details import ResultDetails
+            view = discord.ui.View(timeout=None)
+            view.add_item(ResultDetails(info["club_id"], info["match_id"]))   # same private stats as result posts
+        await send_screen(interaction, screen, view)
 
     @app_commands.command(name="clubstats", description="Season record, division and recent form")
     @club_scoped
