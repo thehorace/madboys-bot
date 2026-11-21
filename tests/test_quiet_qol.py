@@ -232,3 +232,54 @@ class QuietQolTests(unittest.IsolatedAsyncioTestCase):
             await restored.callback(interaction)
         self.assertEqual(post.call_args.args[0].club_id,R.CLUB_ID)
         self.assertTrue(interaction.followup.send.call_args.kwargs['ephemeral'])
+
+
+class MatchStatFieldTests(unittest.IsolatedAsyncioTestCase):
+    setUp = fixtures.SessionReportTests.setUp
+    interaction = fixtures.SessionReportTests.interaction
+
+    def raw(self):
+        def p(name, **kw):
+            return {'playername': name, **{k: str(v) for k, v in kw.items()}}   # EA sends numbers as strings
+        return {'matchId': 'sc', 'timestamp': self.start,
+                'clubs': {str(R.CLUB_ID): {'goals': 3}, '999': {'goals': 1, 'details': {'name': 'Rivals FC'}}},
+                'players': {str(R.CLUB_ID): {
+                    '1': p('Ace', goals=2, shots=4, passesmade=20, passattempts=25, tacklesmade=1, tackleattempts=4, rating=8.5),
+                    '2': p('Bee', goals=1, shots=1, passesmade=30, passattempts=40, tacklesmade=5, tackleattempts=6, rating=7.0),
+                    '3': p('Keeper', saves=4, rating=6.5)},
+                    '999': {'9': p('Opp', goals=1, shots=8, passesmade=50, passattempts=80, tacklesmade=6,
+                                   tackleattempts=20, saves=2, redcards=1)}}}
+
+    def test_team_and_player_stats(self):
+        fields = dict(md.match_stat_fields(self.raw(), R.CLUB_ID))
+        team, players = fields['📊 Team stats'], fields['🎯 Our players']
+        self.assertIn('3/5 (60%) · Rivals FC 1/8 (12%)', team)
+        self.assertIn('50/65 (77%) · Rivals FC 50/80 (62%)', team)
+        self.assertIn('6/10 (60%) · Rivals FC 6/20 (30%)', team)
+        self.assertIn('4 · 0 · Rivals FC 2 · 1', team)
+        self.assertIn('**Ace** — 2/4 shots · 80% passes (20/25) · 1/4 tackles', players)
+        self.assertIn('**Keeper** — 4 saves', players)
+        self.assertLess(players.index('Ace'), players.index('Bee'))   # highest rating first
+        self.assertTrue(all(len(v) <= 1024 for v in fields.values()))
+
+    def test_no_data_adds_nothing(self):
+        raw = self.raw()
+        for team in raw['players'].values():
+            for p in team.values():
+                for k in ('shots', 'passattempts', 'tackleattempts', 'saves'):
+                    p[k] = '0'
+        self.assertEqual(md.match_stat_fields(raw, R.CLUB_ID), [])
+
+    async def test_details_button_shows_stats_privately(self):
+        from cogs.result_details import ResultDetails
+        raw = self.raw()
+        md.store_match(R.CLUB_ID, md.parse_match(raw, R.CLUB_ID), raw)
+        button = ResultDetails(R.CLUB_ID, 'sc')
+        interaction = self.interaction()
+        interaction.response.defer = AsyncMock()
+        interaction.followup = SimpleNamespace(send=AsyncMock())
+        with patch.object(md, 'match_post', AsyncMock(return_value=(discord.Embed(), None))):
+            await button.callback(interaction)
+        kwargs = interaction.followup.send.call_args.kwargs
+        self.assertTrue(kwargs['ephemeral'])
+        self.assertEqual([f.name for f in kwargs['embed'].fields], ['📊 Team stats', '🎯 Our players'])

@@ -449,6 +449,69 @@ def match_embed(pm: ParsedMatch, footer_extra: str = "", with_table: bool = True
     return embed
 
 
+def _ratio(made: int, attempts: int) -> str:
+    return f"{made}/{attempts} ({100 * made / attempts:.0f}%)" if attempts else f"{made}/0 (–)"
+
+
+def match_stat_fields(raw: dict, club_id: int) -> list[tuple[str, str]]:
+    """
+    Team and player comparisons built from EA's per-player match lines: shot
+    conversion (goals ÷ shots), pass and tackle success, saves and red cards.
+    EA's public match data has no shots on target, xG or possession, so these
+    are the closest measures available. Returns [] when EA sent no such data.
+    """
+    players = raw.get("players") or {}
+    clubs = raw.get("clubs") or {}
+    opp_id = next((k for k in clubs if k != str(club_id)), None)
+
+    def lines(cid):
+        return list(((players.get(cid) or {}) if cid else {}).values())
+
+    def total(team, key):
+        return sum(to_int(p.get(key)) for p in team)
+
+    ours, theirs = lines(str(club_id)), lines(opp_id)
+    keys = ("goals", "shots", "passesmade", "passattempts", "tacklesmade", "tackleattempts", "saves", "redcards")
+    a = {k: total(ours, k) for k in keys}
+    b = {k: total(theirs, k) for k in keys}
+    if not any(a[k] or b[k] for k in ("shots", "passattempts", "tackleattempts", "saves")):
+        return []
+
+    opp_name = (((clubs.get(opp_id) or {}).get("details") or {}).get("name") if opp_id else None) or "Opponent"
+    us = club_name()
+
+    def row(label, fmt):
+        return f"**{label}**\n{us} {fmt(a)} · {opp_name} {fmt(b)}"
+
+    team = [
+        row("Shot conversion (goals ÷ shots)", lambda t: _ratio(t["goals"], t["shots"])),
+        row("Passing (completed ÷ attempted)", lambda t: _ratio(t["passesmade"], t["passattempts"])),
+        row("Tackling (won ÷ attempted)", lambda t: _ratio(t["tacklesmade"], t["tackleattempts"])),
+        row("Saves · Red cards", lambda t: f"{t['saves']} · {t['redcards']}"),
+    ]
+    fields = [("📊 Team stats", clip("\n".join(team)))]
+
+    per_player = []
+    for p in sorted(ours, key=lambda p: -(to_float(p.get("rating")) or 0)):
+        bits = []
+        g, sh = to_int(p.get("goals")), to_int(p.get("shots"))
+        if sh:
+            bits.append(f"{g}/{sh} shots")
+        pm_, pa = to_int(p.get("passesmade")), to_int(p.get("passattempts"))
+        if pa:
+            bits.append(f"{100 * pm_ / pa:.0f}% passes ({pm_}/{pa})")
+        tm, ta = to_int(p.get("tacklesmade")), to_int(p.get("tackleattempts"))
+        if ta:
+            bits.append(f"{tm}/{ta} tackles")
+        if to_int(p.get("saves")):
+            bits.append(f"{to_int(p.get('saves'))} saves")
+        if bits:
+            per_player.append(f"**{(p.get('playername') or '?')[:20]}** — " + " · ".join(bits))
+    if per_player:
+        fields.append(("🎯 Our players", clip("\n".join(per_player))))
+    return fields
+
+
 @match_scoped
 async def match_post(pm: ParsedMatch, footer_extra: str = "", compact: bool = False) -> tuple[discord.Embed, Optional[discord.File]]:
     """Embed + result card image. Falls back to the text table if the image fails for any reason."""

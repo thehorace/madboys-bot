@@ -20,11 +20,20 @@ class ResultDetails(discord.ui.DynamicItem[discord.ui.Button], template=r'result
         def read():
             with connect() as conn:
                 row = conn.execute('SELECT raw_json FROM matches WHERE club_id=? AND match_id=?', (self.cid, self.mid)).fetchone()
-            return md.parse_match(json.loads(row[0]), self.cid) if row and row[0] else None
-        match = await asyncio.to_thread(read)
+            if not row or not row[0]:
+                return None, None
+            raw = json.loads(row[0])
+            return md.parse_match(raw, self.cid), raw
+        match, raw = await asyncio.to_thread(read)
         if match is None:
             await interaction.followup.send('This match is no longer available in saved history.', ephemeral=True)
             return
         embed, file = await md.match_post(match)
+        try:
+            extras = md.match_stat_fields(raw, self.cid)
+        except Exception:
+            extras = []   # an extra; never block the stats view
+        for name, value in extras:
+            embed.add_field(name=name, value=value, inline=False)
         await interaction.followup.send(embed=embed, **({'file': file} if file else {}), ephemeral=True,
                                        allowed_mentions=discord.AllowedMentions.none())
