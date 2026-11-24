@@ -46,6 +46,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+VOID_SCHEMA = """
+CREATE TABLE IF NOT EXISTS void_matches (
+    club_id   INTEGER NOT NULL,
+    match_id  TEXT NOT NULL,
+    ts        INTEGER NOT NULL,
+    our_goals INTEGER, opp_goals INTEGER, opp_name TEXT,
+    reason    TEXT,
+    raw_json  TEXT,
+    PRIMARY KEY (club_id, match_id)
+);
+"""
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS monitored_clubs (
     club_id INTEGER PRIMARY KEY,
@@ -332,7 +345,7 @@ def init_all():
         if cols and "source" not in cols:
             conn.execute("ALTER TABLE rotation_log ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
         _migrate_active_formation_pk(conn)
-        conn.executescript(SCHEMA)
+        conn.executescript(SCHEMA + VOID_SCHEMA)
         for table in ('matches','match_players','monitored_clubs'):
             for event in ('INSERT','UPDATE','DELETE'):
                 conn.execute(f'CREATE TRIGGER IF NOT EXISTS rev_{table}_{event} AFTER {event} ON {table} '

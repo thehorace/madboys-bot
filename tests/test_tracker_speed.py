@@ -1,5 +1,6 @@
 """Tracker speed/reliability with several clubs: parallel fetch, milestones last, failing-club cut-off."""
 import asyncio
+import sqlite3
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -172,6 +173,35 @@ class TrackerSpeedTests(TMC.MultiClubTests):
         self.reports.after_poll.assert_not_awaited()
         with db.connect() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM matchday_outbox').fetchone()[0],0)
+
+    def test_match_batch_and_result_queue_roll_back_together(self):
+        self.seed()
+        games = [self.raw(self.primary, "second", 300), self.raw(self.primary, "first", 200)]
+        with db.connect() as conn:
+            conn.execute("""
+                CREATE TRIGGER fail_second_result BEFORE INSERT ON matchday_outbox
+                WHEN NEW.match_id='second' BEGIN SELECT RAISE(ABORT, 'queue unavailable'); END
+            """)
+
+        with clubs.club_scope(self.primary):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "queue unavailable"):
+                self.tracker._save_polled_matches(games, "10", complete=True)
+            self.assertEqual(md.stored_ids(CLUB_ID, ["first", "second"]), set())
+            with db.connect() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM matchday_outbox").fetchone()[0], 0)
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM match_players WHERE match_id IN ('first','second')"
+                ).fetchone()[0], 0)
+                conn.execute("DROP TRIGGER fail_second_result")
+
+            quiet, new, voided = self.tracker._save_polled_matches(games, "10", complete=True)
+            self.assertFalse(quiet)
+            self.assertEqual([match.match_id for match in new], ["first", "second"])
+            self.assertEqual(voided, [])
+            self.assertEqual(self.tracker._save_polled_matches(games, "10", complete=True), (False, [], []))
+            with db.connect() as conn:
+                queued = conn.execute("SELECT match_id FROM matchday_outbox ORDER BY match_id").fetchall()
+                self.assertEqual([row["match_id"] for row in queued], ["first", "second"])
 
     async def test_expired_and_disabled_result_queues_do_not_replay_history(self):
         self.seed()

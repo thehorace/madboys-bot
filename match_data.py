@@ -27,7 +27,7 @@ from typing import Optional
 import discord
 
 from config import CLUB_COLOUR
-from db import connect, now_iso
+from db import VOID_SCHEMA, connect, now_iso
 from utils import RESULT_COLOUR, RESULT_EMOJI, RESULT_LABEL, clip, pct, result_letter, to_float, to_int
 from position_types import ea_position, ROLE_NAMES
 
@@ -152,26 +152,11 @@ def void_reason(pm: ParsedMatch) -> Optional[str]:
     return None
 
 
-VOID_SCHEMA = """
-CREATE TABLE IF NOT EXISTS void_matches (
-    club_id   INTEGER NOT NULL,
-    match_id  TEXT NOT NULL,
-    ts        INTEGER NOT NULL,
-    our_goals INTEGER, opp_goals INTEGER, opp_name TEXT,
-    reason    TEXT,
-    raw_json  TEXT,
-    PRIMARY KEY (club_id, match_id)
-);
-"""
-
-
-def store_void(club_id: int, pm: ParsedMatch, raw: dict, reason: str) -> bool:
+def _insert_void(conn, club_id: int, pm: ParsedMatch, raw: dict, reason: str) -> bool:
     """Remember a void game (so it isn't re-checked) without counting it anywhere. False if already known."""
-    with connect() as conn:
-        conn.executescript(VOID_SCHEMA)
-        return conn.execute("INSERT OR IGNORE INTO void_matches VALUES (?,?,?,?,?,?,?,?)",
-                            (club_id, pm.match_id, pm.ts, pm.our_goals, pm.opp_goals, pm.opp_name, reason,
-                             json.dumps(raw))).rowcount > 0
+    return conn.execute("INSERT OR IGNORE INTO void_matches VALUES (?,?,?,?,?,?,?,?)",
+                        (club_id, pm.match_id, pm.ts, pm.our_goals, pm.opp_goals, pm.opp_name, reason,
+                         json.dumps(raw))).rowcount > 0
 
 
 def purge_void_matches():
@@ -184,7 +169,6 @@ def purge_void_matches():
         return
     moved = []
     with connect() as conn:
-        conn.executescript(VOID_SCHEMA)
         for r in conn.execute("SELECT club_id, match_id, raw_json FROM matches WHERE raw_json IS NOT NULL"):
             raw = json.loads(r["raw_json"])
             pm = parse_match(raw, r["club_id"])
@@ -227,40 +211,69 @@ def raw_match_id(match: dict) -> str:
 
 def stored_ids(club_id: int, match_ids: list[str]) -> set[str]:
     """Which of these matches are already saved (one query, so a quiet check doesn't re-save 10 games)."""
+    with connect() as conn:
+        return _stored_ids(conn, club_id, match_ids)
+
+
+def _stored_ids(conn, club_id: int, match_ids: list[str]) -> set[str]:
     if not match_ids:
         return set()
-    with connect() as conn:
-        conn.executescript(VOID_SCHEMA)
-        return {r[0] for r in conn.execute(
-            "SELECT match_id FROM matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?)) "
-            "UNION SELECT match_id FROM void_matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?))",
-            (club_id, json.dumps(match_ids), club_id, json.dumps(match_ids)))}
+    ids = json.dumps(match_ids)
+    return {r[0] for r in conn.execute(
+        "SELECT match_id FROM matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?)) "
+        "UNION ALL SELECT match_id FROM void_matches WHERE club_id=? AND match_id IN (SELECT value FROM json_each(?))",
+        (club_id, ids, club_id, ids))}
 
 
 def store_match(club_id: int, pm: ParsedMatch, raw: dict) -> bool:
     """Insert a match + its player lines. Returns False if it was already stored."""
     with connect() as conn:
-        cur = conn.execute(
-            """INSERT OR IGNORE INTO matches
-               (club_id, match_id, match_type, ts, our_goals, opp_goals, opp_id, opp_name, result, raw_json, stored_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (club_id, pm.match_id, pm.match_type, pm.ts, pm.our_goals, pm.opp_goals, pm.opp_id,
-             pm.opp_name, pm.result, json.dumps(raw), now_iso()),
-        )
-        if cur.rowcount == 0:
-            return False
-        conn.executemany(
-            """INSERT OR IGNORE INTO match_players
-               (club_id, match_id, persona_id, name, pos, goals, assists, rating, shots, passes_made,
-                pass_attempts, tackles_made, tackle_attempts, saves, red_cards, motm,
-                archetype_id, seconds_played, clean_sheet, goals_conceded, ea_exact_position)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            [(club_id, pm.match_id, p.persona_id, p.name, p.pos, p.goals, p.assists, p.rating, p.shots,
-              p.passes_made, p.pass_attempts, p.tackles_made, p.tackle_attempts, p.saves, p.red_cards, p.motm,
-              p.archetype_id, p.seconds_played, p.clean_sheet, p.goals_conceded, p.exact_position)
-             for p in pm.players],
-        )
-        return True
+        return _insert_match(conn, club_id, pm, raw)
+
+
+def _insert_match(conn, club_id: int, pm: ParsedMatch, raw: dict) -> bool:
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO matches
+           (club_id, match_id, match_type, ts, our_goals, opp_goals, opp_id, opp_name, result, raw_json, stored_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (club_id, pm.match_id, pm.match_type, pm.ts, pm.our_goals, pm.opp_goals, pm.opp_id,
+         pm.opp_name, pm.result, json.dumps(raw), now_iso()),
+    )
+    if cur.rowcount == 0:
+        return False
+    conn.executemany(
+        """INSERT OR IGNORE INTO match_players
+           (club_id, match_id, persona_id, name, pos, goals, assists, rating, shots, passes_made,
+            pass_attempts, tackles_made, tackle_attempts, saves, red_cards, motm,
+            archetype_id, seconds_played, clean_sheet, goals_conceded, ea_exact_position)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [(club_id, pm.match_id, p.persona_id, p.name, p.pos, p.goals, p.assists, p.rating, p.shots,
+          p.passes_made, p.pass_attempts, p.tackles_made, p.tackle_attempts, p.saves, p.red_cards, p.motm,
+          p.archetype_id, p.seconds_played, p.clean_sheet, p.goals_conceded, p.exact_position)
+         for p in pm.players],
+    )
+    return True
+
+
+def save_polled_matches(
+    conn, club_id: int, raw_matches: list[dict]
+) -> tuple[list[ParsedMatch], list[tuple[ParsedMatch, str]]]:
+    """Save unfamiliar matches oldest first using the caller's transaction."""
+    known = _stored_ids(conn, club_id, [raw_match_id(raw) for raw in raw_matches])
+    new, voided = [], []
+    for raw in sorted(raw_matches, key=lambda match: to_int(match.get("timestamp"))):
+        if raw_match_id(raw) in known:
+            continue
+        pm = parse_match(raw, club_id)
+        if pm is None:
+            continue
+        reason = void_reason(pm)
+        if reason:
+            if _insert_void(conn, club_id, pm, raw, reason):
+                voided.append((pm, reason))
+        elif _insert_match(conn, club_id, pm, raw):
+            new.append(pm)
+    return new, voided
 
 
 def backfill_player_fields():

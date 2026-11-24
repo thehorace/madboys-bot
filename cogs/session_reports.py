@@ -18,7 +18,6 @@ from cogs.link import get_all_links
 from cogs.operations import report_health
 from interaction_tracking import TrackedView
 from clubs import monitored_clubs, match_key, match_club, raw_match_key, club_for
-from match_data import VOID_SCHEMA
 from performance import timed
 
 log = logging.getLogger("madboys-bot.session_reports")
@@ -154,9 +153,6 @@ def archive_sessions(gid, now, settings=None, in_voice=False):
                                 (gid, now)).fetchall()
         if not sessions:
             return
-        # This is one CREATE statement. executescript() would commit earlier
-        # snapshots midway through the batch and defeat rollback on failure.
-        conn.execute(VOID_SCHEMA)
         links = get_all_links(gid)
         # Matches already given to a session: only recent history can overlap these sessions.
         oldest = min(s["starts_at"] for s in sessions)

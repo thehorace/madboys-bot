@@ -13,7 +13,7 @@ Env vars (set in Railway):
   GEMINI_MODEL    - optional, defaults to gemini-3.8-flash
 """
 
-import json
+import asyncio
 import logging
 import os
 import re
@@ -327,12 +327,15 @@ class ChatCog(commands.Cog):
                 name, args = call.get("name"), call.get("args") or {}
                 fn = TOOLS.get(name)
                 try:
-                    result = fn(club_id, **args) if fn and club_id else {"error": "Lookup not available here."}
+                    if fn and club_id:
+                        result = await asyncio.to_thread(fn, club_id, **args)
+                    else:
+                        result = {"error": "Lookup not available here."}
                 except Exception as e:
                     log.exception("Chat tool %s failed", name)
                     result = {"error": f"Lookup failed: {e}"}
-                log.info("Chat tool %s(%s) -> %d chars", name, args, len(json.dumps(result, default=str)))
-                responses.append({"functionResponse": {"name": name, "response": json.loads(json.dumps(result, default=str))}})
+                log.info("Chat tool %s completed", name)
+                responses.append({"functionResponse": {"name": name, "response": result}})
             contents.append({"role": "user", "parts": responses})
 
         return "🌀 That needed too many lookups - try asking something more specific."
@@ -352,10 +355,12 @@ class ChatCog(commands.Cog):
 
         prompt = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
         # Turn other @mentions into names (plus their linked EA name) so "@Dave's stats" works.
-        links = get_all_links(str(message.guild.id)) if message.guild else {}
-        for user in message.mentions:
-            if user.id == self.bot.user.id:
-                continue
+        other_mentions = [user for user in message.mentions if user.id != self.bot.user.id]
+        links = (
+            await asyncio.to_thread(get_all_links, str(message.guild.id))
+            if message.guild and other_mentions else {}
+        )
+        for user in other_mentions:
             label = user.display_name + (f" (EA name: {links[str(user.id)]})" if str(user.id) in links else "")
             prompt = re.sub(rf"<@!?{user.id}>", label, prompt)
 

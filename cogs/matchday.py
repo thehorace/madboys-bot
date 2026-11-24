@@ -444,6 +444,35 @@ class MatchdayCog(commands.Cog):
                                     f"{s['name']}'s EA checks have failed for over 2 hours. Session summaries "
                                     "no longer wait for it. Check its club ID in /admin → Settings → Clubs.")
 
+    def _save_polled_matches(self, raw_matches: list[dict], guild_id: Optional[str], complete: bool):
+        """Commit new match history and its queued Discord posts together."""
+        cid = club_id()
+        quiet_key = f"club:quiet:{cid}"
+        with connect() as conn:
+            state = conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM matches WHERE club_id=?) AS has_matches, "
+                "(SELECT value FROM settings WHERE guild_id='global' AND key=?) AS quiet, "
+                "(SELECT value FROM settings WHERE guild_id=? AND key=?) AS posting",
+                (cid, quiet_key, guild_id, K_ENABLED),
+            ).fetchone()
+            quiet = not state["has_matches"] or bool(state["quiet"])
+            new, voided = md.save_polled_matches(conn, cid, raw_matches)
+            if quiet and complete and state["quiet"] is not None:
+                conn.execute("DELETE FROM settings WHERE guild_id='global' AND key=?", (quiet_key,))
+            elif quiet and not complete and state["quiet"] != "1":
+                conn.execute(
+                    "INSERT INTO settings (guild_id,key,value) VALUES ('global',?,'1') "
+                    "ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value",
+                    (quiet_key,),
+                )
+            if new and not quiet and guild_id and state["posting"] != "0":
+                queued_at = int(time.time())
+                conn.executemany(
+                    "INSERT OR IGNORE INTO matchday_outbox VALUES (?,?,?,?)",
+                    [(guild_id, cid, match.match_id, queued_at) for match in new],
+                )
+        return quiet, new, voided
+
     async def _poll_club(self, raw_matches=_FETCH_FAILED) -> int:
         if raw_matches is _FETCH_FAILED:   # called on its own (not from _poll_once)
             self.last_poll_at = time.time()
@@ -454,44 +483,17 @@ class MatchdayCog(commands.Cog):
         # Quiet sync: a brand-new club, or one re-enabled in /admin, saves its existing games without
         # announcing them, until one COMPLETE check has happened (a half-failed first check used to
         # leave older playoff games to be "announced" as new on the next poll).
-        quiet_key = f"club:quiet:{club_id()}"
-        quiet = md.match_count(club_id()) == 0 or bool(get_setting("global", quiet_key))
-        if quiet:
-            set_setting("global", quiet_key, None if self.last_poll_ok else "1")
-        if not raw_matches:
-            guild = self.home_guild()
-            if guild:
-                await self._deliver_result_queue(str(guild.id))
-            return 0
-
         guild = self.home_guild()
         guild_id = str(guild.id) if guild else None
-        if guild_id:
+        if raw_matches and guild_id:
             self._migrate_old_poll_channel(guild_id)
 
-        first_run = quiet
-        self._linked_in.clear()
-        self._unlinked.clear()
-
-        new: list[md.ParsedMatch] = []
-        voided: list[tuple[md.ParsedMatch, str]] = []
-        known = md.stored_ids(club_id(), [md.raw_match_id(m) for m in raw_matches])
-        for raw in sorted(raw_matches, key=lambda m: to_int(m.get("timestamp"))):  # oldest first
-            if md.raw_match_id(raw) in known:
-                continue   # already saved: skip parsing + re-saving it
-            pm = md.parse_match(raw, club_id())
-            reason = md.void_reason(pm) if pm else None
-            if reason:   # forfeit / kick-off disconnect: EA's 0–3 doesn't count for anything here
-                if md.store_void(club_id(), pm, raw, reason):
-                    voided.append((pm, reason))
-                continue
-            if pm and md.store_match(club_id(), pm, raw):
-                new.append(pm)
-
-        if new and not first_run and guild_id and self.posting_enabled(guild_id):
-            with connect() as conn:
-                conn.executemany('INSERT OR IGNORE INTO matchday_outbox VALUES (?,?,?,?)',
-                    [(guild_id,club_id(),p.match_id,int(time.time())) for p in new])
+        quiet, new, voided = await asyncio.to_thread(
+            self._save_polled_matches, raw_matches or [], guild_id, self.last_poll_ok
+        )
+        if raw_matches:
+            self._linked_in.clear()
+            self._unlinked.clear()
 
         if voided and not quiet and guild_id and self.posting_enabled(guild_id):
             cid = self.channel_id_for(guild_id)
@@ -508,14 +510,14 @@ class MatchdayCog(commands.Cog):
                 await self._deliver_result_queue(guild_id)
             return 0
         self.last_new_at = time.time()
-        log.info(f"[{club_name()}] {len(new)} new match(es){' (initial backfill, not posting)' if first_run else ''}")
+        log.info(f"[{club_name()}] {len(new)} new match(es){' (initial backfill, not posting)' if quiet else ''}")
 
         pending_by_match: dict[str, dict[str, str]] = {}
         if guild_id:
             for pm in new:
                 pending_by_match[pm.match_id] = self._log_rotation(guild_id, pm)
 
-        if first_run:
+        if quiet:
             await self.check_milestones(guild, announce=False)  # seed the baseline
             return len(new)
 
