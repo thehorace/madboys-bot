@@ -94,3 +94,52 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error", result)
         self.assertEqual(lookup.call_count, 2)
         self.assertEqual(lookup.call_args_list[0].kwargs["since"], lookup.call_args_list[1].kwargs["since"])
+
+
+    async def test_player_twin_question_uses_existing_feature_without_gemini(self):
+        self.message.guild = SimpleNamespace(id=10)
+        self.message.author.id = 50
+        club = {"club_id": 2, "name": "GRAYSBOYS"}
+        self.cog._call_gemini = AsyncMock()
+        with patch.object(chat, "selected_club", return_value=club), \
+             patch.object(chat, "get_link", return_value=None), \
+             patch.object(chat, "command_catalog", return_value={"/playertwin": "Real football style twin"}), \
+             patch.object(chat, "show_feature", AsyncMock(return_value="Player Twin result")) as view:
+            reply = await self.cog._answer(self.message, "okay not bad, what about who graman plays the most like?")
+            self.assertEqual(reply.command, "/playertwin")
+            self.assertEqual(reply.screen, "Player Twin result")
+            view.assert_awaited_once_with(self.cog.bot, "10", club, "player_twin", player="graman", asker_ea=None)
+            installed = await self.cog._answer(self.message, "i would like to know if you have the playertwin installed?")
+            self.assertIn("Yes.", installed)
+        self.cog._call_gemini.assert_not_awaited()
+
+    async def test_gemini_gets_registered_commands_but_cannot_invoke_admin_views(self):
+        self.message.guild = SimpleNamespace(id=10)
+        self.message.author.id = 50
+        self.cog._call_gemini = AsyncMock(side_effect=[
+            (200, response({"functionCall": {"name": "show_bot_feature", "args": {"feature": "admin"}}})),
+            (200, response({"text": "Open /admin for the private panel."})),
+        ])
+        with patch.object(chat, "selected_club", return_value={"club_id": 2, "name": "GRAYSBOYS"}), \
+             patch.object(chat, "get_link", return_value=None), \
+             patch.object(chat, "command_catalog", return_value={"/admin": "Private admin panel"}), \
+             patch.object(chat, "show_feature", AsyncMock()) as view:
+            reply = await self.cog._answer(self.message, "Open admin")
+        self.assertIn("/admin", reply)
+        view.assert_not_awaited()
+        first, second = self.cog._call_gemini.await_args_list
+        self.assertIn("/admin", first.args[0]["systemInstruction"]["parts"][0]["text"])
+        self.assertIn("error", second.args[0]["contents"][-1]["parts"][0]["functionResponse"]["response"])
+
+    async def test_twin_uses_cross_club_name_resolution_and_existing_card(self):
+        from cogs import chat_features, insights
+        import player_twin
+
+        club = {"club_id": 2, "name": "GRAYSBOYS"}
+        card = ("twin embed", b"existing card")
+        with patch.object(player_twin, "resolve_name", return_value=("Graman1302", [])) as resolve, \
+             patch.object(insights, "build_player_twin", AsyncMock(return_value=card)) as build:
+            reply = await chat_features.show_feature(self.cog.bot, "10", club, "player_twin", player="graman")
+        self.assertEqual(reply, card)
+        resolve.assert_called_once_with("graman")
+        build.assert_awaited_once_with("Graman1302")

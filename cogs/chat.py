@@ -28,6 +28,7 @@ import discord
 from discord.ext import commands
 
 from clubs import selected_club
+from cogs.chat_features import FEATURE_COMMANDS, FeatureReply, command_catalog, show_feature
 from cogs.link import get_all_links, get_link
 from db import connect
 from player_comparison import PlayerComparison, render_comparison
@@ -244,6 +245,14 @@ TOOL_DECLARATIONS = [{"functionDeclarations": [
      "parameters": {"type": "OBJECT", "properties": {
          "left": {"type": "STRING"}, "right": {"type": "STRING"}, "days": _days},
          "required": ["left", "right"]}},
+    {"name": "show_bot_feature",
+     "description": "Open an existing bot report in Discord. Use player_twin when asked which real-life footballer an EA player plays most like, including across clubs. Use this only when asked to see the report.",
+     "parameters": {"type": "OBJECT", "properties": {
+         "feature": {"type": "STRING", "enum": list(FEATURE_COMMANDS)},
+         "player": {"type": "STRING", "description": "EA name or partial name. Use me for the asker."},
+         "month": {"type": "STRING", "description": "Optional awards month, YYYY-MM."},
+         "days": {"type": "INTEGER", "description": "Optional recap window, 1 to 90 days."}},
+         "required": ["feature"]}},
     {"name": "get_leaderboard", "description": "Rank the squad by a stat.",
      "parameters": {"type": "OBJECT", "properties": {
          "stat": {"type": "STRING", "enum": ["goals", "assists", "goal_contributions", "rating", "motm", "games",
@@ -272,7 +281,7 @@ def _chunks(text: str, size: int = DISCORD_LIMIT):
         yield text
 
 
-def _system_prompt(club_name, asker, asker_ea):
+def _system_prompt(club_name, asker, asker_ea, catalogue):
     me = f"The person asking is {asker}" + (f", whose EA name is '{asker_ea}'." if asker_ea else
                                              " (they haven't linked an EA name with /link me).")
     return (
@@ -283,9 +292,16 @@ def _system_prompt(club_name, asker, asker_ea):
         "they return - never invent or guess numbers. If a name doesn't match, use the suggestions or list_players. "
         "For a general comparison of two players, call compare_players to show one graphic instead of text. "
         "For a question about a specific stat, use the lookup that provides the requested detail. "
+        "Use the registered slash command catalogue below as the source of truth for installed features. "
+        "Player Twin is /playertwin, which compares a player's EA play style to a real footballer. "
+        "Use show_bot_feature for reports it supports. For other installed features, give the exact slash command. "
+        "Private screens, admin tools, settings and actions must be opened or used with their original commands. "
+        "Never claim to have run a slash command or changed anything. "
         "Stats only cover matches the bot has recorded. "
         f"{me} If they say 'me' or 'I', use their EA name. "
-        f"Today is {datetime.now(timezone.utc):%Y-%m-%d}."
+        f"Today is {datetime.now(timezone.utc):%Y-%m-%d}.\n\n"
+        "Registered slash commands for this context:\n"
+        + ("\n".join(f"{name} — {description}" for name, description in sorted(catalogue.items())) or "None available.")
     )
 
 
@@ -333,33 +349,59 @@ class ChatCog(commands.Cog):
         self.api_status = f"Responding via {model}"
         return status, data
 
-    async def _answer(self, message: discord.Message, prompt: str) -> str | PlayerComparison:
+    async def _answer(self, message: discord.Message, prompt: str) -> str | PlayerComparison | FeatureReply:
         guild_id = str(message.guild.id) if message.guild else ""
         club = selected_club(guild_id, message.author.id) if guild_id else {"club_id": None, "name": "the club"}
-        club_id = club["club_id"]
         asker_ea = get_link(guild_id, str(message.author.id)) if guild_id else None
+
+        catalogue = command_catalog(self.bot, message.guild)
+        twin_command = FEATURE_COMMANDS["player_twin"]
+        availability = (
+            r"(?:i (?:would like|want) to know if )?"
+            r"(?:(?:do|does) (?:you|the bot) have |you have |is )"
+            r"(?:the )?/?player[ -]?twin(?: installed| available)?[?.! ]*"
+        )
+        if re.fullmatch(availability, prompt, re.I):
+            if twin_command in catalogue:
+                return "Yes. Use `/playertwin` or ask me who an EA player plays like."
+            return "`/playertwin` isn't registered in this context."
+
+        twin_request = re.search(r"\bwho ([^?!.]{1,80}?) plays? (?:the )?most like[?.! ]*$", prompt, re.I)
+        if twin_request and guild_id and twin_command in catalogue:
+            player = twin_request.group(1).strip()
+            linked = re.search(r"\(EA name: ([^)]+)\)$", player)
+            screen = await show_feature(
+                self.bot, guild_id, club, "player_twin",
+                player=linked.group(1) if linked else player, asker_ea=asker_ea,
+            )
+            reply = FeatureReply(twin_command, screen)
+            self.history[message.channel.id].extend((
+                {"role": "user", "parts": [{"text": prompt}]},
+                {"role": "model", "parts": [{"text": reply.summary()}]},
+            ))
+            return reply
 
         history = self.history[message.channel.id]
         user_turn = {"role": "user", "parts": [{"text": prompt}]}
         body = {
-            "systemInstruction": {"parts": [{"text": _system_prompt(club["name"], message.author.display_name, asker_ea)}]},
+            "systemInstruction": {"parts": [{"text": _system_prompt(club["name"], message.author.display_name, asker_ea, catalogue)}]},
             "contents": [*history, user_turn],
             "tools": TOOL_DECLARATIONS,
         }
 
         try:
             async with asyncio.timeout(25):
-                status, reply = await self._generate_reply(body, club_id, club["name"], GEMINI_MODEL)
+                status, reply = await self._generate_reply(body, club, GEMINI_MODEL, guild_id, asker_ea, catalogue)
                 if (status == 404 or status == 429 or 500 <= status < 600) and (
                     GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL
                 ):
-                    status, reply = await self._generate_reply(body, club_id, club["name"], GEMINI_FALLBACK_MODEL)
+                    status, reply = await self._generate_reply(body, club, GEMINI_FALLBACK_MODEL, guild_id, asker_ea, catalogue)
         except TimeoutError:
             self.api_status = "Chat request timed out"
             status, reply = 503, None
         if reply is not None:
             if status == 200:
-                history_text = reply.summary() if isinstance(reply, PlayerComparison) else reply
+                history_text = reply.summary() if isinstance(reply, (PlayerComparison, FeatureReply)) else reply
                 history.extend((user_turn, {"role": "model", "parts": [{"text": history_text}]}))
             return reply
         if status == 429:
@@ -368,7 +410,8 @@ class ChatCog(commands.Cog):
             return "Gemini rejected the request. An admin can check Bot Status. Saved stats are available in `/stats`."
         return "Gemini is temporarily unavailable. Saved stats are still available in `/stats`."
 
-    async def _generate_reply(self, body: dict, club_id: int | None, club_name: str, model: str):
+    async def _generate_reply(self, body, club, model, guild_id, asker_ea, catalogue):
+        club_id = club["club_id"]
         # Start the fallback from plain chat history so it never receives another model's signatures.
         contents = list(body["contents"])
         for _ in range(MAX_TOOL_ROUNDS + 1):
@@ -396,7 +439,15 @@ class ChatCog(commands.Cog):
                 name, args = call.get("name"), call.get("args") or {}
                 fn = TOOLS.get(name)
                 try:
-                    if fn and club_id:
+                    if name == "show_bot_feature":
+                        feature = args.get("feature")
+                        command = FEATURE_COMMANDS.get(feature)
+                        if guild_id and command and command in catalogue:
+                            params = {key: args[key] for key in ("player", "month", "days") if key in args}
+                            screen = await show_feature(self.bot, guild_id, club, feature, asker_ea=asker_ea, **params)
+                            return 200, FeatureReply(command, screen)
+                        result = {"error": "That report is unavailable in this context. Use the registered slash commands."}
+                    elif fn and club_id:
                         result = await asyncio.to_thread(fn, club_id, **args)
                     else:
                         result = {"error": "Lookup not available here."}
@@ -404,7 +455,7 @@ class ChatCog(commands.Cog):
                     log.exception("Chat tool %s failed", name)
                     result = {"error": "The stats lookup failed."}
                 if name == "compare_players" and "left" in result:
-                    return 200, PlayerComparison(club_name, result["days"], result["left"], result["right"])
+                    return 200, PlayerComparison(club["name"], result["days"], result["left"], result["right"])
                 response = {"name": name, "response": result}
                 if call.get("id"):
                     response["id"] = call["id"]
@@ -447,6 +498,34 @@ class ChatCog(commands.Cog):
                 log.info("Comparison embed unavailable in channel %s", message.channel.id)
         await message.reply(escape_markdown(card.summary()), **options)
 
+    async def _send_feature(self, message, feature: FeatureReply):
+        screen = feature.screen
+        options = {"mention_author": False, "allowed_mentions": discord.AllowedMentions.none()}
+        if isinstance(screen, str):
+            await message.reply(screen, **options)
+            return
+        guild = message.guild
+        permissions = message.channel.permissions_for(guild.me) if guild and guild.me else None
+        if permissions is None or permissions.embed_links:
+            try:
+                if isinstance(screen, tuple):
+                    embed, png = screen
+                    if permissions is None or permissions.attach_files:
+                        from cogs.stats import card_file
+                        file = card_file(png)
+                        try:
+                            await message.reply(embed=embed, file=file, **options)
+                        finally:
+                            file.close()
+                        return
+                    screen = embed.copy()
+                    screen.remove_image()
+                await message.reply(embed=screen, **options)
+                return
+            except discord.Forbidden:
+                log.info("Feature preview unavailable in channel %s", message.channel.id)
+        await message.reply(f"Open `{feature.command}` to see this report.", **options)
+
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
         # "@bot What..." looks like a text command to discord.py (prefix = mention). The bot only
@@ -486,13 +565,17 @@ class ChatCog(commands.Cog):
             await self._send_comparison(message, reply)
             return
 
+        if isinstance(reply, FeatureReply):
+            await self._send_feature(message, reply)
+            return
+
         first = True
         for part in _chunks(reply):
             if first:
-                await message.reply(part, mention_author=False)
+                await message.reply(part, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                 first = False
             else:
-                await message.channel.send(part)
+                await message.channel.send(part, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot: commands.Bot):

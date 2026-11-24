@@ -435,6 +435,8 @@ Each tracked club can publish its results as soon as its EA history is available
 
 Gemini mention chat uses `GEMINI_API_KEY` and `GEMINI_MODEL`. If the model is unavailable, rate-limited, or fails with a server error, the bot tries `GEMINI_FALLBACK_MODEL` once for the question. Leave it empty to disable fallback. Private Bot Status shows the latest model response or API error code. Discord's regular `/stats` commands remain available during a Gemini outage.
 
+Mention chat knows the bot's registered slash commands. It can return the existing Player Twin, Season Wrapped, awards, records, partnerships, passing, club stats and recap views. Player Twin resolves saved names across the clubs, even when chat is currently scoped to the other club. Use the original slash commands and buttons for private views, settings, sign-ups and manager actions.
+
 ## Effortless position tracking
 
 **EA evidence and limits.** The match parser consumes the per-player `pos` value in EA's club match history. Available code/payload fixtures establish the broad categories goalkeeper/defender/midfielder/forward. The local database contained no captured matches and the relay was not configured during this investigation, so a live FC 27 response could not be verified. [An EA-hosted forum feedback report also describes broad categories](https://forums.ea.com/discussions/fc-26-feedback-en/clubs-match-history---detailed-positions/12895890); this is supporting user feedback, not an EA API contract. The parser accepts literal recognised exact position strings if `pos` supplies them, with GK also unambiguous. It never decodes numeric guesses, `favoritePosition`, archetypes, ratings or a manager's planned lineup as a verified match slot.
