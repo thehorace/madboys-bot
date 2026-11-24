@@ -40,6 +40,10 @@ GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.8-flash").strip()
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
+# How the bot talks. Override in Railway with a BOT_PERSONALITY variable (plain English).
+BOT_PERSONALITY = (os.getenv("BOT_PERSONALITY") or
+                   "Be friendly, a bit cheeky, and keep replies short.").strip()
+
 HISTORY_PAIRS = 6          # remember the last 6 question/answer pairs per channel
 MAX_TOOL_ROUNDS = 5        # how many lookups Gemini may chain for one question
 DISCORD_LIMIT = 2000
@@ -221,7 +225,38 @@ def tool_head_to_head(club_id, opponent):
                         "opponent": r["opp_name"], "result": r["result"]} for r in rows[:10]]}
 
 
+def tool_opponent_records(club_id, sort_by="toughest", days=0, min_games=1, limit=10):
+    """Every opponent we've played, aggregated and ranked."""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT opp_name AS opponent, COUNT(*) AS played,
+                      SUM(result='W') AS wins, SUM(result='D') AS draws, SUM(result='L') AS losses,
+                      SUM(our_goals) AS goals_for, SUM(opp_goals) AS goals_against, MAX(ts) AS last_ts
+               FROM matches WHERE club_id=? AND ts>=? AND opp_name IS NOT NULL
+               GROUP BY opp_name COLLATE NOCASE HAVING COUNT(*)>=?""",
+            (club_id, _since(days), max(1, int(min_games or 1))),
+        ).fetchall()
+    recs = []
+    for r in rows:
+        d = dict(r)
+        d["goal_diff"] = d["goals_for"] - d["goals_against"]
+        d["points_per_game"] = round((3 * d["wins"] + d["draws"]) / d["played"], 2)
+        d["last_played"] = _date(d.pop("last_ts"))
+        recs.append(d)
+    keys = {
+        "toughest": lambda d: (d["points_per_game"], d["goal_diff"], -d["played"]),
+        "easiest": lambda d: (-d["points_per_game"], -d["goal_diff"], -d["played"]),
+        "most_played": lambda d: (-d["played"],),
+        "most_goals_conceded": lambda d: (-d["goals_against"],),
+        "most_goals_scored": lambda d: (-d["goals_for"],),
+    }
+    recs.sort(key=keys.get(sort_by, keys["toughest"]))
+    return {"sort_by": sort_by if sort_by in keys else "toughest", "period_days": days or "all time",
+            "opponents_total": len(recs), "opponents": recs[:max(1, min(int(limit or 10), 25))]}
+
+
 TOOLS = {
+    "get_opponent_records": tool_opponent_records,
     "list_players": tool_list_players,
     "get_player_stats": tool_player_stats,
     "compare_players": tool_compare_players,
@@ -262,6 +297,13 @@ TOOL_DECLARATIONS = [{"functionDeclarations": [
      "parameters": {"type": "OBJECT", "properties": {"limit": {"type": "INTEGER"}, "days": _days}}},
     {"name": "get_match_details", "description": "Full player ratings and stats for one match. Omit match_id for the most recent game.",
      "parameters": {"type": "OBJECT", "properties": {"match_id": {"type": "STRING"}}}},
+    {"name": "get_opponent_records",
+     "description": "Rank every club we've played: W/D/L, goals for/against, goal difference, points per game. Use for toughest/easiest opponents, bogey teams, who we play most, etc.",
+     "parameters": {"type": "OBJECT", "properties": {
+         "sort_by": {"type": "STRING", "enum": ["toughest", "easiest", "most_played", "most_goals_conceded", "most_goals_scored"]},
+         "days": _days,
+         "min_games": {"type": "INTEGER", "description": "Ignore opponents played fewer times than this (e.g. 2 for repeat opponents)."},
+         "limit": {"type": "INTEGER"}}}},
     {"name": "get_head_to_head", "description": "The club's record against a specific opponent club.",
      "parameters": {"type": "OBJECT", "properties": {"opponent": {"type": "STRING"}}, "required": ["opponent"]}},
 ]}]
@@ -286,12 +328,16 @@ def _system_prompt(club_name, asker, asker_ea, catalogue):
                                              " (they haven't linked an EA name with /link me).")
     return (
         f"You are the Discord bot for {club_name}, an EA FC Pro Clubs team. "
-        "Be friendly, a bit cheeky, and keep replies short and Discord-friendly (bullets are fine, no tables). "
+        f"{BOT_PERSONALITY} "
+        "Keep replies Discord-friendly (bullets are fine, no tables). "
         "You can chat about football, EA FC tactics, formations and player builds. "
         "For ANY question about our players, results or stats, call the lookup tools and answer only from what "
         "they return - never invent or guess numbers. If a name doesn't match, use the suggestions or list_players. "
         "For a general comparison of two players, call compare_players to show one graphic instead of text. "
         "For a question about a specific stat, use the lookup that provides the requested detail. "
+        "Work out what the person means from their wording and answer it yourself with the lookups - even loose "
+        "questions like 'who are our toughest opponents' or 'who's been carrying us'. Only point to a slash "
+        "command when no lookup can answer it, and never as a replacement for an answer you could give. "
         "Use the registered slash command catalogue below as the source of truth for installed features. "
         "Player Twin is /playertwin, which compares a player's EA play style to a real footballer. "
         "Use show_bot_feature for reports it supports. For other installed features, give the exact slash command. "
