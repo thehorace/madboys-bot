@@ -44,6 +44,7 @@ COGS = [
     "cogs.awards",
     "cogs.nudges",
     "cogs.progress",
+    "cogs.chat",
 ]
 
 
