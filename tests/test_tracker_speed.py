@@ -28,6 +28,39 @@ class TrackerSpeedTests(TMC.MultiClubTests):
         self.assertLess(time.perf_counter() - t0, 0.35)   # one wait, not one per club
         self.assertTrue(self.tracker.last_poll_ok)
 
+    async def test_ready_club_posts_while_other_club_is_waiting(self):
+        self.seed()
+        release_slow_club = asyncio.Event()
+        fast_result_posted = asyncio.Event()
+        now = int(time.time())
+
+        async def fetch(cid, **kwargs):
+            if cid == self.secondary["club_id"]:
+                await release_slow_club.wait()
+                return []
+            return [self.raw(self.primary, "fast", now - 15)]
+
+        async def send(**kwargs):
+            fast_result_posted.set()
+
+        self.tracker.ea.get_recent_matches_multi.side_effect = fetch
+        self.channel.send.side_effect = send
+        poll = asyncio.create_task(self.tracker.poll_once())
+        try:
+            await asyncio.wait_for(fast_result_posted.wait(), timeout=2)
+            self.assertFalse(poll.done())
+            self.reports.after_poll.assert_not_awaited()
+            self.tracker.check_milestones.assert_not_awaited()
+        finally:
+            release_slow_club.set()
+            self.assertEqual(await poll, 1)
+
+        timing = self.tracker.club_status[self.primary["club_id"]]["last_result_timing"]
+        self.assertGreaterEqual(timing["ea_wait"], 15)
+        self.assertGreaterEqual(timing["processing"], 0)
+        self.assertGreaterEqual(timing["discord"], 0)
+        self.reports.after_poll.assert_awaited_once()
+
     async def test_results_do_not_start_squad_motm_votes(self):
         from types import SimpleNamespace
         self.seed()

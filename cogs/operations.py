@@ -67,13 +67,32 @@ def status_embed(bot, gid):
         embed.add_field(name="Match tracker", value=f"**{state}**\nLast attempt: {stamp(tracker.last_poll_at)}\nLast successful check: {stamp(successful)}\nNext check: {stamp(tracker.next_poll_at)}\nResults: {'On' if tracker.posting_enabled(gid) else 'Off'} · {f'<#{cid}>' if cid else 'No channel'}\nLatest game: {stamp(match_data.latest_match_ts(CLUB_ID))}", inline=False)
         from clubs import monitored_clubs
         lines = []
-        for club in monitored_clubs():
+        clubs = monitored_clubs()
+        for club in clubs:
             check = getattr(tracker, 'club_status', {}).get(club['club_id'], {})
             health = 'OK' if check.get('ok') else 'Partial' if check.get('partial') else 'Failed' if check.get('ok') is False else 'Waiting'
             lines.append(f"**{club['name']}** · {health} · Last check: {stamp(check.get('checked_at'))}\nLatest game: {stamp(match_data.latest_match_ts(club['club_id']))}")
         embed.add_field(name="Monitored clubs", value='\n'.join(lines)[:1024] or 'None enabled', inline=False)
     else:
         embed.add_field(name="Match tracker", value="Unavailable", inline=False)
+    if tracker:
+        timings = []
+        for club in clubs:
+            check = getattr(tracker, "club_status", {}).get(club["club_id"], {})
+            latest = check.get("last_result_timing")
+            if latest:
+                ea_wait = latest["ea_wait"]
+                total = f"{ea_wait + latest['processing'] + latest['discord']:.1f}s total · " if ea_wait is not None else ""
+                ea = f"{ea_wait:.1f}s before EA result received" if ea_wait is not None else "EA timestamp unavailable"
+                timings.append(
+                    f"**{club['name']}** · {total}{ea} | "
+                    f"{latest['processing']:.2f}s processing | {latest['discord']:.2f}s Discord"
+                )
+        embed.add_field(name="Latest match post timings", value="\n".join(timings)[:1024] or
+                        "Waiting for a newly detected match to post.", inline=False)
+    chat = bot.get_cog("ChatCog")
+    if chat:
+        embed.add_field(name="Gemini chat", value=chat.api_status[:1024], inline=False)
     sessions = bot.get_cog("SessionsCog")
     settings = session_settings(gid)
     running = sessions and all(getattr(sessions, name).is_running() for name in ("daily_sessions", "reminders", "session_updates"))

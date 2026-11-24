@@ -347,63 +347,77 @@ class MatchdayCog(commands.Cog):
             self._polling = False
 
     async def _poll_once(self) -> int:
-        """
-        1. Fetch every club's results at the same time (a slow relay costs one timeout, not one per club).
-        2. Store and post each club's new games.
-        3. Milestones last: they need an extra relay call per club and shouldn't delay any result.
-        A failed club never prevents checking the remaining clubs.
-        """
+        """Post ready clubs immediately, then process milestones and session eligibility."""
         self.last_poll_at = time.time()
         self.club_status = getattr(self, "club_status", {})
         clubs = monitored_clubs()
+        guild = self.home_guild()
+        guild_id = str(guild.id) if guild else None
 
         async def fetch(club):
+            try:
+                raw = await self.ea.get_recent_matches_multi(
+                    club["club_id"], count=10, bypass_cache=True, allow_stale=False
+                )
+            except Exception:
+                log.exception("Club fetch failed: %s", club["name"])
+                raw = _FETCH_FAILED
+            observed = (time.time(), time.perf_counter())
+            return club, raw, observed
+
+        fetches = [asyncio.create_task(fetch(club)) for club in clubs]
+        total, states, jobs = 0, [], {}
+        try:
+            for finished in asyncio.as_completed(fetches):
+                club, raw, observed = await finished
+                cid = club["club_id"]
+                usable = raw is not None and raw is not _FETCH_FAILED
+                partial = usable and not getattr(raw, "complete", True)
+                ok = usable and not partial
+                state = self.club_status.setdefault(cid, {})
+                state.update(club_id=cid, name=club["name"], checked_at=observed[0],
+                             ok=ok, partial=partial,
+                             error=None if ok else "EA/relay match check incomplete")
+                states.append(state)
+                try:
+                    with club_scope(club):
+                        if raw is _FETCH_FAILED:
+                            # Even when EA is unavailable, retry existing queued posts.
+                            if guild_id:
+                                await self._deliver_result_queue(guild_id)
+                        else:
+                            quiet, new = await self._poll_club(raw, guild, guild_id, ok, observed)
+                            total += len(new)
+                            if new:
+                                jobs[cid] = (quiet, new)
+                    if ok:
+                        state["success_at"] = time.time()
+                except Exception as exc:
+                    log.exception("Club check failed: %s", club["name"])
+                    state.update(ok=False, partial=False, error=type(exc).__name__)
+        finally:
+            for task in fetches:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*fetches, return_exceptions=True)
+
+        announcements = []
+        for club in clubs:
             with club_scope(club):
                 try:
-                    return await self.ea.get_recent_matches_multi(club['club_id'], count=10,
-                                                                  bypass_cache=True, allow_stale=False)
+                    if club["club_id"] in jobs:
+                        quiet, new = jobs[club["club_id"]]
+                        if quiet:
+                            await self.check_milestones(guild, announce=False)
+                        else:
+                            announcements.append((club, guild, new))
+                            await self.check_milestones(guild, announce=True, matches=new)
+                    if guild_id:
+                        await self._deliver_milestones(guild_id)
                 except Exception:
-                    log.exception("Club fetch failed: %s", club['name'])
-                    return _FETCH_FAILED
-        fetched = await asyncio.gather(*(fetch(c) for c in clubs))
-
-        total, states = 0, []
-        self._milestone_jobs = []
-        for club, raw in zip(clubs, fetched):
-            state = self.club_status.setdefault(club['club_id'], {})
-            state.update(club_id=club['club_id'], name=club['name'], checked_at=time.time())
-            if raw is _FETCH_FAILED:   # already logged by fetch()
-                state.update(ok=False, partial=False, error="EA/relay match check failed")
-                states.append(state)
-                guild = self.home_guild()
-                if guild:
-                    try:
-                        with club_scope(club):
-                            await self._deliver_result_queue(str(guild.id))
-                    except Exception:
-                        log.exception('Queued result delivery failed: %s',club['name'])
-                continue
-            try:
-                with club_scope(club):
-                    total += await self._poll_club(raw)
-                    ok, partial = self.last_poll_ok, self.last_poll_partial
-                state.update(ok=ok, partial=partial, error=None if ok else "EA/relay match check incomplete")
-                if ok:
-                    state['success_at'] = time.time()
-            except Exception as exc:
-                log.exception("Club check failed: %s", club['name'])
-                state.update(ok=False, partial=False, error=type(exc).__name__)
-            states.append(state)
-
-        jobs, self._milestone_jobs = self._milestone_jobs, None
-        for club, guild, new in jobs:
-            try:
-                with club_scope(club):
-                    await self.check_milestones(guild, announce=True, matches=new)
-            except Exception:
-                log.exception("Milestone check failed: %s", club['name'])
-        await self._award_badges(jobs)
-        await self._announce_records(jobs)
+                    log.exception("Milestone check failed: %s", club["name"])
+        await self._award_badges(announcements)
+        await self._announce_records(announcements)
 
         await self._track_failing_clubs(states)
         # Session summaries wait for every club, except one that has been failing for hours:
@@ -413,10 +427,9 @@ class MatchdayCog(commands.Cog):
         self.last_poll_degraded = self.last_poll_ok and any(not s['ok'] for s in states)
         self.last_poll_partial = any(s.get('partial') for s in states) or (not self.last_poll_ok and bool(responsive))
         if states and all(s['ok'] for s in states):
-            guild=self.home_guild()
             self.last_complete_at=time.time()
-            if guild:
-                set_setting(str(guild.id),'matchday:last_complete',str(int(self.last_complete_at)))
+            if guild_id:
+                set_setting(guild_id, 'matchday:last_complete', str(int(self.last_complete_at)))
         return total
 
     async def _track_failing_clubs(self, states: list[dict]):
@@ -455,6 +468,7 @@ class MatchdayCog(commands.Cog):
                 "(SELECT value FROM settings WHERE guild_id=? AND key=?) AS posting",
                 (cid, quiet_key, guild_id, K_ENABLED),
             ).fetchone()
+            # Keep the initial backfill quiet until all match types have responded.
             quiet = not state["has_matches"] or bool(state["quiet"])
             new, voided = md.save_polled_matches(conn, cid, raw_matches)
             if quiet and complete and state["quiet"] is not None:
@@ -473,27 +487,25 @@ class MatchdayCog(commands.Cog):
                 )
         return quiet, new, voided
 
-    async def _poll_club(self, raw_matches=_FETCH_FAILED) -> int:
-        if raw_matches is _FETCH_FAILED:   # called on its own (not from _poll_once)
-            self.last_poll_at = time.time()
-            raw_matches = await self.ea.get_recent_matches_multi(club_id(), count=10, bypass_cache=True,
-                                                                 allow_stale=False)
-        self.last_poll_partial = raw_matches is not None and not getattr(raw_matches, "complete", True)
-        self.last_poll_ok = raw_matches is not None and not self.last_poll_partial
-        # Quiet sync: a brand-new club, or one re-enabled in /admin, saves its existing games without
-        # announcing them, until one COMPLETE check has happened (a half-failed first check used to
-        # leave older playoff games to be "announced" as new on the next poll).
-        guild = self.home_guild()
-        guild_id = str(guild.id) if guild else None
+    async def _poll_club(self, raw_matches, guild, guild_id, complete, observed):
         if raw_matches and guild_id:
             self._migrate_old_poll_channel(guild_id)
-
         quiet, new, voided = await asyncio.to_thread(
-            self._save_polled_matches, raw_matches or [], guild_id, self.last_poll_ok
+            self._save_polled_matches, raw_matches or [], guild_id, complete
         )
-        if raw_matches:
+        pending = set()
+        if new:
+            self.last_new_at = time.time()
+            log.info("[%s] %d new match(es)%s", club_name(), len(new),
+                     " (initial backfill, not posting)" if quiet else "")
             self._linked_in.clear()
             self._unlinked.clear()
+            if guild_id:
+                for match in new:
+                    pending.update(self._log_rotation(guild_id, match))
+
+        if guild_id and (not quiet or not new):
+            await self._deliver_result_queue(guild_id, fresh=new, observed=observed)
 
         if voided and not quiet and guild_id and self.posting_enabled(guild_id):
             cid = self.channel_id_for(guild_id)
@@ -505,42 +517,11 @@ class MatchdayCog(commands.Cog):
                     await channel.send("\n".join(lines)[:2000], allowed_mentions=discord.AllowedMentions.none())
                 except discord.HTTPException:
                     log.warning("Couldn't post the void-game note")
-        if not new:
-            if guild_id:
-                await self._deliver_result_queue(guild_id)
-            return 0
-        self.last_new_at = time.time()
-        log.info(f"[{club_name()}] {len(new)} new match(es){' (initial backfill, not posting)' if quiet else ''}")
-
-        pending_by_match: dict[str, dict[str, str]] = {}
-        if guild_id:
-            for pm in new:
-                pending_by_match[pm.match_id] = self._log_rotation(guild_id, pm)
-
-        if quiet:
-            await self.check_milestones(guild, announce=False)  # seed the baseline
-            return len(new)
-
-        if guild_id:
-            await self._deliver_result_queue(guild_id, pending_by_match)
-
-        # private rotation notes for players whose position was confirmed straight from the lineup
         pos_cog = self.bot.get_cog("PositionsCog")
-        if pos_cog and guild:
-            ids = {did for pm in new for did in self._linked_in.get(pm.match_id, [])}
-            ids -= {did for p in pending_by_match.values() for did in p}
-            await pos_cog.check_notes(guild, sorted(ids))
-
-        jobs = getattr(self, "_milestone_jobs", None)
-        if jobs is not None:   # inside _poll_once: run after every club has posted its results
-            from clubs import club_for
-            jobs.append((club_for(club_id()), guild, new))
-        else:
-            await self.check_milestones(guild, announce=True, matches=new)
-            from clubs import club_for
-            await self._award_badges([(club_for(club_id()), guild, new)])
-            await self._announce_records([(club_for(club_id()), guild, new)])
-        return len(new)
+        if new and not quiet and pos_cog and guild:
+            ids = {did for match in new for did in self._linked_in.get(match.match_id, [])}
+            await pos_cog.check_notes(guild, sorted(ids - pending))
+        return quiet, new
 
     async def _announce_records(self, jobs: list):
         """'New club record!' post when this check's games broke one (biggest win, most goals in a game...)."""
@@ -604,9 +585,8 @@ class MatchdayCog(commands.Cog):
         self._unlinked[pm.match_id] = unmatched
         return {}
 
-    async def _deliver_result_queue(self, guild_id, pending_by_match=None):
+    async def _deliver_result_queue(self, guild_id, *, fresh=(), observed=None):
         """Retry only explicitly queued result posts, never old saved history."""
-        await self._deliver_milestones(guild_id)
         key=f'{guild_id}:{club_id()}'
         with connect() as conn:
             if not self.posting_enabled(guild_id):
@@ -615,7 +595,7 @@ class MatchdayCog(commands.Cog):
                 return
             conn.execute('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=? AND queued_at<?',
                          (guild_id,club_id(),int(time.time())-86400))
-            rows=conn.execute('SELECT m.raw_json FROM matchday_outbox q JOIN matches m ON m.club_id=q.club_id AND m.match_id=q.match_id '
+            rows=conn.execute('SELECT m.match_id,m.raw_json FROM matchday_outbox q JOIN matches m ON m.club_id=q.club_id AND m.match_id=q.match_id '
                 'WHERE q.guild_id=? AND q.club_id=? ORDER BY m.ts,m.match_id LIMIT 100',(guild_id,club_id())).fetchall()
         if not rows:
             delivery.ack('result',key)
@@ -633,11 +613,17 @@ class MatchdayCog(commands.Cog):
         if channel is None:
             delivery.fail(job,RuntimeError('Result channel unavailable'))
             return
-        games=[md.parse_match(json.loads(r['raw_json']),club_id()) for r in rows if r['raw_json']]
-        games=[p for p in games if p is not None]
+        fresh_by_id = {match.match_id: match for match in fresh}
+        games = [
+            fresh_by_id.get(row["match_id"]) or md.parse_match(json.loads(row["raw_json"]), club_id())
+            for row in rows if row["raw_json"]
+        ]
+        games = [match for match in games if match is not None]
         if games:
             try:
-                success=await self._post_results(channel,games,guild_id,pending_by_match)
+                success=await self._post_results(
+                    channel, games, guild_id, observed=observed, fresh_ids=fresh_by_id
+                )
             except Exception as exc:
                 delivery.fail(job,exc)
                 raise
@@ -653,7 +639,8 @@ class MatchdayCog(commands.Cog):
                                  [(guild_id,p.club_id,p.match_id) for p in games])
 
     async def _post_results(self, channel: discord.abc.Messageable, new: list[md.ParsedMatch],
-                            guild_id: Optional[str] = None, pending_by_match: Optional[dict] = None):
+                            guild_id: Optional[str] = None, pending_by_match: Optional[dict] = None,
+                            *, observed=None, fresh_ids=()):
         recent = md.recent_results(club_id(), 5)
         footer = f"Form {md.form_string(recent)} • Streak {md.streak([r['result'] for r in recent])}"
         to_post = new[-MAX_POSTS_PER_POLL:]
@@ -675,7 +662,17 @@ class MatchdayCog(commands.Cog):
                 view = view or discord.ui.View(timeout=None)
                 view.add_item(ResultDetails(pm.club_id, pm.match_id))
                 extra['view'] = view
+                sending_at = time.perf_counter()
                 await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none(), **extra)
+                if observed and pm.match_id in fresh_ids:
+                    observed_wall, observed_clock = observed
+                    wait = observed_wall - pm.ts if 0 < pm.ts <= observed_wall else None
+                    state = self.club_status[pm.club_id]
+                    state["last_result_timing"] = {
+                        "ea_wait": wait,
+                        "processing": sending_at - observed_clock,
+                        "discord": time.perf_counter() - sending_at,
+                    }
                 self._ack_results(guild_id,[pm])
         except discord.Forbidden:
             log.warning("No permission to post in the matchday channel")

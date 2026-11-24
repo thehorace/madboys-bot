@@ -11,6 +11,7 @@ Gemini can look up real stats from the bot's own match database (the same data
 Env vars (set in Railway):
   GEMINI_API_KEY  - required. Your key from aistudio.google.com
   GEMINI_MODEL    - optional, defaults to gemini-3.8-flash
+  GEMINI_FALLBACK_MODEL - optional, defaults to gemini-3.5-flash-lite (empty disables)
 """
 
 import asyncio
@@ -33,6 +34,7 @@ log = logging.getLogger("madboys-bot.chat")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.8-flash").strip()
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 HISTORY_PAIRS = 6          # remember the last 6 question/answer pairs per channel
@@ -211,26 +213,26 @@ TOOLS = {
     "get_head_to_head": tool_head_to_head,
 }
 
-_days = {"type": "number", "description": "Only count games in the last N days (1 = today, 7 = week, 30 = month). 0 or omitted = all time."}
-TOOL_DECLARATIONS = [{"function_declarations": [
+_days = {"type": "NUMBER", "description": "Only count games in the last N days (1 = today, 7 = week, 30 = month). 0 or omitted = all time."}
+TOOL_DECLARATIONS = [{"functionDeclarations": [
     {"name": "list_players", "description": "List the club's players (EA names) and games played. Use to find the right spelling of a name.",
-     "parameters": {"type": "object", "properties": {"days": _days}}},
+     "parameters": {"type": "OBJECT", "properties": {"days": _days}}},
     {"name": "get_player_stats",
      "description": "One player's totals: games, W/D/L, goals, assists, avg rating, MOTM, shots, passes and pass accuracy, tackles and tackle success, saves, clean sheets, red cards, positions played.",
-     "parameters": {"type": "object", "properties": {
-         "player": {"type": "string", "description": "EA name or part of it"}, "days": _days},
+     "parameters": {"type": "OBJECT", "properties": {
+         "player": {"type": "STRING", "description": "EA name or part of it"}, "days": _days},
          "required": ["player"]}},
     {"name": "get_leaderboard", "description": "Rank the squad by a stat.",
-     "parameters": {"type": "object", "properties": {
-         "stat": {"type": "string", "enum": ["goals", "assists", "goal_contributions", "rating", "motm", "games",
+     "parameters": {"type": "OBJECT", "properties": {
+         "stat": {"type": "STRING", "enum": ["goals", "assists", "goal_contributions", "rating", "motm", "games",
                                              "shots", "passes", "pass_accuracy", "tackles", "saves"]},
-         "days": _days, "limit": {"type": "integer"}}}},
+         "days": _days, "limit": {"type": "INTEGER"}}}},
     {"name": "get_recent_results", "description": "The club's latest results, scores, opponents and form.",
-     "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}, "days": _days}}},
+     "parameters": {"type": "OBJECT", "properties": {"limit": {"type": "INTEGER"}, "days": _days}}},
     {"name": "get_match_details", "description": "Full player ratings and stats for one match. Omit match_id for the most recent game.",
-     "parameters": {"type": "object", "properties": {"match_id": {"type": "string"}}}},
+     "parameters": {"type": "OBJECT", "properties": {"match_id": {"type": "STRING"}}}},
     {"name": "get_head_to_head", "description": "The club's record against a specific opponent club.",
-     "parameters": {"type": "object", "properties": {"opponent": {"type": "string"}}, "required": ["opponent"]}},
+     "parameters": {"type": "OBJECT", "properties": {"opponent": {"type": "STRING"}}, "required": ["opponent"]}},
 ]}]
 
 
@@ -268,6 +270,7 @@ class ChatCog(commands.Cog):
         self.bot = bot
         self.history = defaultdict(lambda: deque(maxlen=HISTORY_PAIRS * 2))
         self.session: aiohttp.ClientSession | None = None
+        self.api_status = "Waiting for first request" if GEMINI_API_KEY else "GEMINI_API_KEY is missing"
         if not GEMINI_API_KEY:
             log.warning("GEMINI_API_KEY not set - AI chat is disabled")
 
@@ -275,15 +278,36 @@ class ChatCog(commands.Cog):
         if self.session and not self.session.closed:
             await self.session.close()
 
-    async def _call_gemini(self, body: dict):
+    async def _call_gemini(self, body: dict, model: str):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
-        headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-        async with self.session.post(GEMINI_URL.format(model=GEMINI_MODEL), json=body, headers=headers) as resp:
-            if resp.status != 200:
-                log.error("Gemini error %s: %s", resp.status, (await resp.text())[:500])
-                return resp.status, None
-            return 200, await resp.json()
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
+        headers = {"x-goog-api-key": GEMINI_API_KEY}
+        status = 503
+        try:
+            async with self.session.post(GEMINI_URL.format(model=model), json=body, headers=headers) as resp:
+                status = resp.status
+                data = await resp.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            if status == 200:
+                status = 503
+            data = None
+            log.warning("Gemini response failed for %s (%s)", model, type(exc).__name__)
+        if status != 200:
+            error = data.get("error") if isinstance(data, dict) else None
+            codes = []
+            if isinstance(error, dict):
+                reasons = [
+                    item.get("reason") for item in (error.get("details") or [])
+                    if isinstance(item, dict)
+                ]
+                codes = [code for code in [error.get("status"), *reasons]
+                         if isinstance(code, str) and re.fullmatch(r"[A-Z_]{1,60}", code)]
+            detail = f" ({', '.join(codes)})" if codes else ""
+            self.api_status = f"{model} returned HTTP {status}{detail}"
+            log.warning("Gemini %s", self.api_status)
+            return status, None
+        self.api_status = f"Responding via {model}"
+        return status, data
 
     async def _answer(self, message: discord.Message, prompt: str) -> str:
         guild_id = str(message.guild.id) if message.guild else ""
@@ -292,36 +316,56 @@ class ChatCog(commands.Cog):
         asker_ea = get_link(guild_id, str(message.author.id)) if guild_id else None
 
         history = self.history[message.channel.id]
-        contents = list(history) + [{"role": "user", "parts": [{"text": prompt}]}]
+        user_turn = {"role": "user", "parts": [{"text": prompt}]}
         body = {
-            "system_instruction": {"parts": [{"text": _system_prompt(club["name"], message.author.display_name, asker_ea)}]},
-            "contents": contents,
+            "systemInstruction": {"parts": [{"text": _system_prompt(club["name"], message.author.display_name, asker_ea)}]},
+            "contents": [*history, user_turn],
             "tools": TOOL_DECLARATIONS,
         }
 
+        try:
+            async with asyncio.timeout(25):
+                status, reply = await self._generate_reply(body, club_id, GEMINI_MODEL)
+                if (status == 404 or status == 429 or 500 <= status < 600) and (
+                    GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL
+                ):
+                    status, reply = await self._generate_reply(body, club_id, GEMINI_FALLBACK_MODEL)
+        except TimeoutError:
+            self.api_status = "Chat request timed out"
+            status, reply = 503, None
+        if reply is not None:
+            if status == 200:
+                history.extend((user_turn, {"role": "model", "parts": [{"text": reply}]}))
+            return reply
+        if status == 429:
+            return "Gemini is rate-limited. You can still see your saved stats with `/stats`."
+        if status in (400, 401, 403, 404):
+            return "Gemini rejected the request. An admin can check Bot Status. Saved stats are available in `/stats`."
+        return "Gemini is temporarily unavailable. Saved stats are still available in `/stats`."
+
+    async def _generate_reply(self, body: dict, club_id: int | None, model: str):
+        # Start the fallback from plain chat history so it never receives another model's signatures.
+        contents = list(body["contents"])
         for _ in range(MAX_TOOL_ROUNDS + 1):
-            status, data = await self._call_gemini(body)
-            if status == 429:
-                return "😮‍💨 I've hit my free AI limit for now - try again a bit later."
+            status, data = await self._call_gemini({**body, "contents": contents}, model)
             if data is None:
-                return "⚠️ My AI brain isn't responding right now. Try again in a minute."
+                return status if status != 200 else 503, None
             try:
                 content = data["candidates"][0]["content"]
                 parts = content.get("parts", [])
-            except (KeyError, IndexError):
-                log.warning("Gemini returned no content: %s", str(data)[:500])
-                return "🤐 I can't answer that one."
+            except (KeyError, IndexError, TypeError, AttributeError):
+                self.api_status = f"{model} returned no answer"
+                log.warning("Gemini %s", self.api_status)
+                return 422, "🤐 I can't answer that one."
 
             calls = [p["functionCall"] for p in parts if "functionCall" in p]
             if not calls:
                 reply = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
                 reply = reply or "🤔 Not sure what to say to that."
-                history.append({"role": "user", "parts": [{"text": prompt}]})
-                history.append({"role": "model", "parts": [{"text": reply}]})
-                return reply
+                return 200, reply
 
             # Run each lookup Gemini asked for, then hand the results back.
-            contents.append(content)   # send the model turn back unchanged (keeps thought signatures)
+            contents = [*contents, content]  # Preserve the model turn and its thought signatures.
             responses = []
             for call in calls:
                 name, args = call.get("name"), call.get("args") or {}
@@ -331,14 +375,16 @@ class ChatCog(commands.Cog):
                         result = await asyncio.to_thread(fn, club_id, **args)
                     else:
                         result = {"error": "Lookup not available here."}
-                except Exception as e:
+                except Exception:
                     log.exception("Chat tool %s failed", name)
-                    result = {"error": f"Lookup failed: {e}"}
-                log.info("Chat tool %s completed", name)
-                responses.append({"functionResponse": {"name": name, "response": result}})
+                    result = {"error": "The stats lookup failed."}
+                response = {"name": name, "response": result}
+                if call.get("id"):
+                    response["id"] = call["id"]
+                responses.append({"functionResponse": response})
             contents.append({"role": "user", "parts": responses})
 
-        return "🌀 That needed too many lookups - try asking something more specific."
+        return 422, "🌀 That needed too many lookups - try asking something more specific."
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
@@ -362,7 +408,7 @@ class ChatCog(commands.Cog):
         )
         for user in other_mentions:
             label = user.display_name + (f" (EA name: {links[str(user.id)]})" if str(user.id) in links else "")
-            prompt = re.sub(rf"<@!?{user.id}>", label, prompt)
+            prompt = re.sub(rf"<@!?{user.id}>", lambda _: label, prompt)
 
         if not prompt:
             await message.reply("👋 Ask me something - e.g. `@me what are my passing stats this month?`")
