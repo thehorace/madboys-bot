@@ -10,7 +10,7 @@ Gemini can look up real stats from the bot's own match database (the same data
 
 Env vars (set in Railway):
   GEMINI_API_KEY  - required. Your key from aistudio.google.com
-  GEMINI_MODEL    - optional, defaults to gemini-2.5-flash
+  GEMINI_MODEL    - optional, defaults to gemini-3.8-flash
 """
 
 import json
@@ -32,7 +32,7 @@ from db import connect
 log = logging.getLogger("madboys-bot.chat")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.8-flash").strip()
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 HISTORY_PAIRS = 6          # remember the last 6 question/answer pairs per channel
@@ -336,6 +336,14 @@ class ChatCog(commands.Cog):
             contents.append({"role": "user", "parts": responses})
 
         return "🌀 That needed too many lookups - try asking something more specific."
+
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        # "@bot What..." looks like a text command to discord.py (prefix = mention). The bot only
+        # uses slash commands, so ignore those; still log anything else.
+        if isinstance(error, commands.CommandNotFound):
+            return
+        log.error("Command error in %s: %s", ctx.command, error, exc_info=error)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
