@@ -16,6 +16,7 @@ Env vars (set in Railway):
 
 import asyncio
 import logging
+import math
 import os
 import re
 import time
@@ -29,6 +30,7 @@ from discord.ext import commands
 from clubs import selected_club
 from cogs.link import get_all_links, get_link
 from db import connect
+from player_comparison import PlayerComparison, render_comparison
 
 log = logging.getLogger("madboys-bot.chat")
 
@@ -88,10 +90,11 @@ def tool_list_players(club_id, days=0):
     return {"players": [dict(r) for r in rows]}
 
 
-def tool_player_stats(club_id, player, days=0):
+def tool_player_stats(club_id, player, days=0, *, since=None):
     name, candidates = _resolve_player(club_id, player)
     if not name:
         return {"error": f"No single player matches '{player}'.", "did_you_mean": candidates}
+    since = _since(days) if since is None else since
     with connect() as conn:
         t = conn.execute(
             """SELECT COUNT(*) AS games, SUM(mp.goals) AS goals, SUM(mp.assists) AS assists,
@@ -105,14 +108,14 @@ def tool_player_stats(club_id, player, days=0):
                       SUM(CASE WHEN m.result='L' THEN 1 ELSE 0 END) AS losses
                FROM match_players mp JOIN matches m ON m.club_id=mp.club_id AND m.match_id=mp.match_id
                WHERE mp.club_id=? AND mp.name=? COLLATE NOCASE AND m.ts>=?""",
-            (club_id, name, _since(days)),
+            (club_id, name, since),
         ).fetchone()
         positions = conn.execute(
             """SELECT mp.pos, COUNT(*) AS games FROM match_players mp
                JOIN matches m ON m.club_id=mp.club_id AND m.match_id=mp.match_id
                WHERE mp.club_id=? AND mp.name=? COLLATE NOCASE AND m.ts>=?
                GROUP BY mp.pos ORDER BY games DESC""",
-            (club_id, name, _since(days)),
+            (club_id, name, since),
         ).fetchall()
     stats = dict(t)
     if not stats["games"]:
@@ -129,6 +132,19 @@ def tool_player_stats(club_id, player, days=0):
         positions_played={(r["pos"] or "unknown"): r["games"] for r in positions},
     )
     return stats
+
+
+def tool_compare_players(club_id, left, right, days=0):
+    days = float(days or 0)
+    if not math.isfinite(days) or days < 0 or days > 36500:
+        return {"error": "Use a period from 0 to 36500 days (0 for all recorded matches)."}
+    since = _since(days)
+    players = [tool_player_stats(club_id, name, days, since=since) for name in (left, right)]
+    if any(not player.get("games") for player in players):
+        return {"error": "Both players need recorded matches in the selected period.", "lookups": players}
+    if players[0]["player"].casefold() == players[1]["player"].casefold():
+        return {"error": "Choose two different players."}
+    return {"left": players[0], "right": players[1], "days": days}
 
 
 def tool_leaderboard(club_id, stat="goals", days=0, limit=10):
@@ -207,6 +223,7 @@ def tool_head_to_head(club_id, opponent):
 TOOLS = {
     "list_players": tool_list_players,
     "get_player_stats": tool_player_stats,
+    "compare_players": tool_compare_players,
     "get_leaderboard": tool_leaderboard,
     "get_recent_results": tool_recent_results,
     "get_match_details": tool_match_details,
@@ -222,6 +239,11 @@ TOOL_DECLARATIONS = [{"functionDeclarations": [
      "parameters": {"type": "OBJECT", "properties": {
          "player": {"type": "STRING", "description": "EA name or part of it"}, "days": _days},
          "required": ["player"]}},
+    {"name": "compare_players",
+     "description": "Display a side-by-side player comparison graphic from saved games. Use this for general comparisons of two players or when requested. A successful call sends the graphic as the entire response.",
+     "parameters": {"type": "OBJECT", "properties": {
+         "left": {"type": "STRING"}, "right": {"type": "STRING"}, "days": _days},
+         "required": ["left", "right"]}},
     {"name": "get_leaderboard", "description": "Rank the squad by a stat.",
      "parameters": {"type": "OBJECT", "properties": {
          "stat": {"type": "STRING", "enum": ["goals", "assists", "goal_contributions", "rating", "motm", "games",
@@ -259,6 +281,8 @@ def _system_prompt(club_name, asker, asker_ea):
         "You can chat about football, EA FC tactics, formations and player builds. "
         "For ANY question about our players, results or stats, call the lookup tools and answer only from what "
         "they return - never invent or guess numbers. If a name doesn't match, use the suggestions or list_players. "
+        "For a general comparison of two players, call compare_players to show one graphic instead of text. "
+        "For a question about a specific stat, use the lookup that provides the requested detail. "
         "Stats only cover matches the bot has recorded. "
         f"{me} If they say 'me' or 'I', use their EA name. "
         f"Today is {datetime.now(timezone.utc):%Y-%m-%d}."
@@ -309,7 +333,7 @@ class ChatCog(commands.Cog):
         self.api_status = f"Responding via {model}"
         return status, data
 
-    async def _answer(self, message: discord.Message, prompt: str) -> str:
+    async def _answer(self, message: discord.Message, prompt: str) -> str | PlayerComparison:
         guild_id = str(message.guild.id) if message.guild else ""
         club = selected_club(guild_id, message.author.id) if guild_id else {"club_id": None, "name": "the club"}
         club_id = club["club_id"]
@@ -325,17 +349,18 @@ class ChatCog(commands.Cog):
 
         try:
             async with asyncio.timeout(25):
-                status, reply = await self._generate_reply(body, club_id, GEMINI_MODEL)
+                status, reply = await self._generate_reply(body, club_id, club["name"], GEMINI_MODEL)
                 if (status == 404 or status == 429 or 500 <= status < 600) and (
                     GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL
                 ):
-                    status, reply = await self._generate_reply(body, club_id, GEMINI_FALLBACK_MODEL)
+                    status, reply = await self._generate_reply(body, club_id, club["name"], GEMINI_FALLBACK_MODEL)
         except TimeoutError:
             self.api_status = "Chat request timed out"
             status, reply = 503, None
         if reply is not None:
             if status == 200:
-                history.extend((user_turn, {"role": "model", "parts": [{"text": reply}]}))
+                history_text = reply.summary() if isinstance(reply, PlayerComparison) else reply
+                history.extend((user_turn, {"role": "model", "parts": [{"text": history_text}]}))
             return reply
         if status == 429:
             return "Gemini is rate-limited. You can still see your saved stats with `/stats`."
@@ -343,7 +368,7 @@ class ChatCog(commands.Cog):
             return "Gemini rejected the request. An admin can check Bot Status. Saved stats are available in `/stats`."
         return "Gemini is temporarily unavailable. Saved stats are still available in `/stats`."
 
-    async def _generate_reply(self, body: dict, club_id: int | None, model: str):
+    async def _generate_reply(self, body: dict, club_id: int | None, club_name: str, model: str):
         # Start the fallback from plain chat history so it never receives another model's signatures.
         contents = list(body["contents"])
         for _ in range(MAX_TOOL_ROUNDS + 1):
@@ -378,6 +403,8 @@ class ChatCog(commands.Cog):
                 except Exception:
                     log.exception("Chat tool %s failed", name)
                     result = {"error": "The stats lookup failed."}
+                if name == "compare_players" and "left" in result:
+                    return 200, PlayerComparison(club_name, result["days"], result["left"], result["right"])
                 response = {"name": name, "response": result}
                 if call.get("id"):
                     response["id"] = call["id"]
@@ -385,6 +412,40 @@ class ChatCog(commands.Cog):
             contents.append({"role": "user", "parts": responses})
 
         return 422, "🌀 That needed too many lookups - try asking something more specific."
+
+    async def _send_comparison(self, message: discord.Message, card: PlayerComparison):
+        guild = message.guild
+        permissions = message.channel.permissions_for(guild.me) if guild and guild.me else None
+        options = {"mention_author": False, "allowed_mentions": discord.AllowedMentions.none()}
+        from discord.utils import escape_markdown
+
+        if permissions is None or permissions.attach_files:
+            try:
+                png = await asyncio.to_thread(render_comparison, card)
+                with png:
+                    file = discord.File(png, filename="player-comparison.png", description=card.summary()[:1024])
+                    try:
+                        await message.reply(f"**{escape_markdown(card.title)}**", file=file, **options)
+                    finally:
+                        file.close()
+                return
+            except discord.Forbidden:
+                log.info("Comparison attachment unavailable in channel %s", message.channel.id)
+            except (OSError, ValueError):
+                log.exception("Could not render a player comparison")
+
+        if permissions is None or permissions.embed_links:
+            embed = discord.Embed(title=card.title, description=f"{card.club} · {card.period}", colour=0x27AD94)
+            for player, column in ((card.left, 1), (card.right, 2)):
+                embed.add_field(name=player["player"], value="\n".join(
+                    f"**{row[0]}** {row[column]}" for row in card.rows()
+                ))
+            try:
+                await message.reply(embed=embed, **options)
+                return
+            except discord.Forbidden:
+                log.info("Comparison embed unavailable in channel %s", message.channel.id)
+        await message.reply(escape_markdown(card.summary()), **options)
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
@@ -420,6 +481,10 @@ class ChatCog(commands.Cog):
             except Exception:
                 log.exception("Chat request failed")
                 reply = "⚠️ Something went wrong talking to the AI."
+
+        if isinstance(reply, PlayerComparison):
+            await self._send_comparison(message, reply)
+            return
 
         first = True
         for part in _chunks(reply):
