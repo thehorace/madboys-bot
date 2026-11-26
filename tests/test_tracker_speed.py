@@ -209,6 +209,9 @@ class TrackerSpeedTests(TMC.MultiClubTests):
 
     def test_match_batch_and_result_queue_roll_back_together(self):
         self.seed()
+        from cogs.link import set_link
+
+        set_link("10", "50", "Fauz", "self")
         games = [self.raw(self.primary, "second", 300), self.raw(self.primary, "first", 200)]
         with db.connect() as conn:
             conn.execute("""
@@ -225,16 +228,56 @@ class TrackerSpeedTests(TMC.MultiClubTests):
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM match_players WHERE match_id IN ('first','second')"
                 ).fetchone()[0], 0)
+                for table in ("rotation_log", "processed_matches"):
+                    self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
                 conn.execute("DROP TRIGGER fail_second_result")
 
-            quiet, new, voided = self.tracker._save_polled_matches(games, "10", complete=True)
+            quiet, new, voided, linked_players = self.tracker._save_polled_matches(games, "10", complete=True)
             self.assertFalse(quiet)
             self.assertEqual([match.match_id for match in new], ["first", "second"])
             self.assertEqual(voided, [])
-            self.assertEqual(self.tracker._save_polled_matches(games, "10", complete=True), (False, [], []))
+            self.assertEqual(linked_players, {"50"})
+            self.assertEqual(self.tracker._save_polled_matches(games, "10", complete=True), (False, [], [], set()))
             with db.connect() as conn:
                 queued = conn.execute("SELECT match_id FROM matchday_outbox ORDER BY match_id").fetchall()
                 self.assertEqual([row["match_id"] for row in queued], ["first", "second"])
+                for table in ("rotation_log", "processed_matches"):
+                    self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 2)
+
+    async def test_retry_delivers_due_result_without_an_ea_poll_or_duplicate(self):
+        self.seed()
+        now = int(time.time())
+        with db.connect() as conn:
+            conn.execute("INSERT INTO matchday_outbox VALUES (?,?,?,?)", ("10", CLUB_ID, "baseline", now))
+            conn.execute("""
+                INSERT INTO delivery_jobs (kind,job_key,guild_id,club_id,payload,queued_at,expires_at,next_attempt)
+                VALUES ('result',?,'10',?,'{}',?,?,?)
+            """, (f"10:{CLUB_ID}", CLUB_ID, now, now + 3600, now + 30))
+        await self.tracker.result_retry_loop.coro(self.tracker)
+        self.channel.send.assert_not_awaited()
+
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def send(**kwargs):
+            started.set()
+            await release.wait()
+
+        self.channel.send.side_effect = send
+        with patch.object(matchday.time, "time", return_value=now + 31):
+            background = asyncio.create_task(self.tracker.result_retry_loop.coro(self.tracker))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                with clubs.club_scope(self.primary):
+                    competing = asyncio.create_task(self.tracker._deliver_result_queue("10"))
+                await asyncio.sleep(0)
+                self.assertFalse(competing.done())
+            finally:
+                release.set()
+                await background
+            await competing
+        self.channel.send.assert_awaited_once()
+        self.tracker.ea.get_recent_matches_multi.assert_not_awaited()
+        self.assertEqual(self.tracker._clubs_with_due_results("10"), [])
 
     def test_result_backoff_skips_match_payload_query(self):
         from contextlib import contextmanager

@@ -23,7 +23,6 @@ class AutomaticPositionTests(Base):
         set_link('10','42','Ali','self')
         self.secondary=next(c for c in monitored_clubs() if c['club_id']!=CLUB_ID)
         self.tracker=object.__new__(matchday.MatchdayCog)
-        self.tracker._linked_in,self.tracker._unlinked={},{}
 
     def game_position(self,mid,pos,when=T,cid=CLUB_ID,track=True,name='Ali',**extra):
         raw={'matchId':mid,'timestamp':when,'clubs':{str(cid):{'goals':2},'999':{'goals':1,'details':{'name':'Rivals'}}},
@@ -31,8 +30,8 @@ class AutomaticPositionTests(Base):
         match=md.parse_match(raw,cid)
         md.store_match(cid,match,raw)
         if track:
-            with club_scope(cid):
-                self.assertEqual(self.tracker._log_rotation('10',match),{})
+            with club_scope(cid), db.connect() as conn:
+                P.track_matches(conn, '10', [match])
         return match
 
     def records(self):
@@ -86,7 +85,8 @@ class AutomaticPositionTests(Base):
         P.save_default('10','42','ST',when=T+2000)
         self.game_position('4','forward',T+2400)
         self.assertEqual([r['position'] for r in self.records()],['ST','ST','CAM','ST'])
-        self.tracker._log_rotation('10',first)
+        with db.connect() as conn:
+            self.assertEqual(P.track_matches(conn, '10', [first]), set())
         self.assertEqual(len(self.records()),4)
         self.assertEqual(rotation.get_position_counts('10',self.records()[0]['club'])['42'],{'CAM':1,'ST':3})
 

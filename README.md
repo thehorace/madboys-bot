@@ -382,6 +382,10 @@ python bot.py
 
 All settings are documented in `.env.example` and `config.py`.
 
+## Tests
+
+Run `python -m unittest discover -s tests -v` after installing `requirements.txt`. GitHub Actions runs the suite on pull requests and pushes to `main`.
+
 ## Deployment (Railway)
 
 Push to `main` to deploy. Set the same keys as `.env.example` in Railway's
@@ -431,7 +435,7 @@ Automatic **Squad MOTM voting is retired**: no new vote messages or winner annou
 The private Bot Status screen shows pending delivery counts, oldest waiting item, next eligible retry, the last fully complete EA check and the current recap waiting reason. Recent timings include database work, EA requests, card rendering, session archiving and Player Twin assignment calculation. Each operation retains at most 120 timing samples in memory; slow operations log their label and duration, without SQL text or player names. Session grouping and archival run in worker threads to avoid blocking button responses while history grows.
 
 
-Each tracked club can publish its results as soon as its EA history is available. Pending milestone posts are handled after the match-result pass. Bot Status shows the latest new result sent for each club since startup. The elapsed time before EA data arrived uses the match timestamp supplied by EA and includes polling delay. Processing and the Discord send are timed separately. Recovered outbox entries are excluded from these timings.
+Each tracked club can publish its results as soon as its EA history is available. Pending milestone posts are handled after the match-result pass. Bot Status shows the latest new result sent for each club since startup. The elapsed time before EA data arrived uses the match timestamp supplied by EA and includes polling delay. Processing and the Discord send are timed separately. Recovered outbox entries are excluded from these timings. Position rows for linked players commit with the saved games and result queue. Discord result retries check for due posts every five seconds independently of the EA polling interval.
 
 Gemini mention chat uses `GEMINI_API_KEY` and `GEMINI_MODEL`. If the model is unavailable, rate-limited, or fails with a server error, the bot tries `GEMINI_FALLBACK_MODEL` once for the question. Leave it empty to disable fallback. Private Bot Status shows the latest model response or API error code. Discord's regular `/stats` commands remain available during a Gemini outage.
 

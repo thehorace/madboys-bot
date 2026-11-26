@@ -6,13 +6,15 @@ retain distinct sources, with no post-match selection workflow.
 """
 
 from clubs import club_id, club_name
+from contextlib import nullcontext
+from datetime import datetime, timezone
 import json
 import time
 from typing import Optional
 
 from cogs.rotation import AREA_NAMES, area_of, broad_role, current_streak, get_recent_positions, is_exact, strip_number
 from config import ROTATION_THRESHOLD
-from db import connect
+from db import connect, now_iso
 
 # EA bucket -> broad role
 EA_BUCKET = {"goalkeeper": "GK", "defender": "DEF", "midfielder": "MID", "forward": "FWD"}
@@ -83,9 +85,9 @@ class MatchPosition:
     source: str
     ea_role: Optional[str]
 
-def default_event(gid,uid,when=None,cid=None):
+def default_event(gid,uid,when=None,cid=None,*,conn=None):
     when=int(time.time()) if when is None else when
-    with connect() as conn:
+    with (connect() if conn is None else nullcontext(conn)) as conn:
         row=conn.execute('SELECT * FROM position_defaults WHERE guild_id=? AND club_id=? AND discord_id=? AND effective_at<=? ORDER BY effective_at DESC,id DESC LIMIT 1',
                          (str(gid),cid if cid is not None else club_id(),str(uid),when)).fetchone()
     return dict(row) if row else None
@@ -99,8 +101,8 @@ def save_default(gid,uid,position,cid=None,when=None):
         conn.execute('INSERT INTO position_defaults (guild_id,club_id,discord_id,position,effective_at) VALUES (?,?,?,?,?)',
                      (str(gid),cid if cid is not None else club_id(),str(uid),position,int(time.time()) if when is None else when))
 
-def confirmed_before(gid,uid,when,role=None):
-    with connect() as conn:
+def confirmed_before(gid,uid,when,role=None,*,conn=None):
+    with (connect() if conn is None else nullcontext(conn)) as conn:
         marks=','.join('?' for _ in EXACT_ROLES)
         rows=conn.execute("SELECT r.position,COALESCE(m.ts,CAST(strftime('%s',r.logged_at) AS INTEGER)) stamp FROM rotation_log r "
             "LEFT JOIN matches m ON m.club_id=? AND m.match_id=r.match_id "
@@ -116,7 +118,7 @@ def confirmed_before(gid,uid,when,role=None):
             return pos if role is None or broad_role(pos)==role else None
     return None
 
-def detect_position(gid,uid,ea_pos,match_ts=None,exact_position=None):
+def detect_position(gid,uid,ea_pos,match_ts=None,exact_position=None,*,conn=None):
     role,exact=ea_position(ea_pos)
     if exact_position in EXACT_ROLES:
         exact=exact_position
@@ -126,23 +128,50 @@ def detect_position(gid,uid,ea_pos,match_ts=None,exact_position=None):
     when=int(time.time()) if match_ts is None else match_ts
     if when<=0:
         return MatchPosition('Unknown','unknown',role)
-    saved=default_event(gid,uid,when)
+    saved=default_event(gid,uid,when,conn=conn)
     if saved is not None:
         pos=saved['position']
         if pos and (role is None or broad_role(pos)==role):
             return MatchPosition(pos,'saved',role)
         return MatchPosition('Unknown','unknown',role)
-    confirmed=confirmed_before(gid,uid,when,role)
+    confirmed=confirmed_before(gid,uid,when,role,conn=conn)
     if confirmed:
         return MatchPosition(confirmed,'confirmed_default',role)
     return MatchPosition('Unknown','unknown',role)
 
-def record_position(gid,uid,match_id,result,when):
-    with connect() as conn:
+def record_position(gid,uid,match_id,result,when,*,conn=None):
+    with (connect() if conn is None else nullcontext(conn)) as conn:
         conn.execute('INSERT INTO rotation_log (guild_id,club,discord_id,position,logged_at,source,match_id,ea_role) '
             'SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM rotation_log WHERE guild_id=? AND club=? AND discord_id=? AND match_id=?)',
             (str(gid),club_name(),str(uid),result.position,when,result.source,match_id,result.ea_role,
              str(gid),club_name(),str(uid),match_id))
+
+def track_matches(conn, guild_id, matches) -> set[str]:
+    """Record positions with the caller's match transaction and reuse links across the batch."""
+    links = {row["ea_name"].casefold(): row["discord_id"] for row in conn.execute(
+        "SELECT discord_id, ea_name FROM ea_links WHERE guild_id=?", (guild_id,)
+    )}
+    linked_players = set()
+    for match in matches:
+        marker = conn.execute(
+            """INSERT OR IGNORE INTO processed_matches (guild_id, club, match_id, processed_at)
+               VALUES (?,?,?,?)""",
+            (guild_id, club_name(), match.match_id, now_iso()),
+        )
+        if not marker.rowcount:
+            continue
+        when = datetime.fromtimestamp(match.ts, timezone.utc).isoformat() if match.ts else now_iso()
+        for player in match.players:
+            discord_id = links.get(player.name.casefold())
+            if discord_id is None:
+                continue
+            result = detect_position(
+                guild_id, discord_id, player.pos, match.ts, player.exact_position, conn=conn
+            )
+            record_position(guild_id, discord_id, match.match_id, result, when, conn=conn)
+            linked_players.add(discord_id)
+    return linked_players
+
 
 def resolve_position(plan,discord_id,ea_pos,guild_id=None,match_ts=None):
     # Compatibility wrapper: a posted lineup is an intention, not match proof.

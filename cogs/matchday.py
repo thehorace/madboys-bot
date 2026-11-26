@@ -51,7 +51,6 @@ from announce import announce_channel_id
 from cogs.operations import report_health
 from cogs.scout import scout_view
 from cogs.link import find_discord_id_by_ea_name, get_all_links
-from cogs.rotation import is_match_processed, log_positions, mark_match_processed
 from config import (ACTIVE_WINDOW_MINUTES, BOT_TZ, CLUB_COLOUR, CLUB_ID, GUILD_ID,
                     MATCHDAY_CHANNEL_ID, POLL_ACTIVE_MINUTES, POLL_IDLE_MINUTES, RECAP_HOUR, RECAP_WEEKDAY,
                     VOICE_ACTIVE_PLAYERS)
@@ -65,6 +64,8 @@ log = logging.getLogger("madboys-bot.matchday")
 POSITION_MAP = {"goalkeeper": "GK", "defender": "DEF", "midfielder": "MID", "forward": "FWD"}
 
 MAX_POSTS_PER_POLL = 3
+RESULT_RETRY_INTERVAL = 5
+RESULT_QUEUE_GRACE = 15  # Give a fresh poll first chance to post and record its timings.
 # A club whose checks have failed this long stops holding up session summaries for the
 # other clubs (its alert stays up until it recovers).
 STALE_CLUB_SECONDS = 2 * 3600
@@ -177,18 +178,19 @@ class MatchdayCog(commands.Cog):
         self.last_success_at: Optional[float] = None
         self.last_new_at: Optional[float] = None
         self._polling = False
-        self._linked_in: dict[str, list[str]] = {}   # match_id -> linked players' discord ids
-        self._unlinked: dict[str, list[str]] = {}    # match_id -> EA names of players nobody has linked
+        self._result_locks: dict[int, asyncio.Lock] = {}
         self._migrated = False
         from cogs.result_details import ResultDetails
         bot.add_dynamic_items(ResultDetails)
         self.ticker.start()
+        self.result_retry_loop.start()
         self.recap_loop.start()
 
     def cog_unload(self):
         from cogs.result_details import ResultDetails
         self.bot.remove_dynamic_items(ResultDetails)
         self.ticker.cancel()
+        self.result_retry_loop.cancel()
         self.recap_loop.cancel()
 
     # ------------------------------------------------------------------ #
@@ -470,7 +472,7 @@ class MatchdayCog(commands.Cog):
                                     "no longer wait for it. Check its club ID in /admin → Settings → Clubs.")
 
     def _save_polled_matches(self, raw_matches: list[dict], guild_id: Optional[str], complete: bool):
-        """Commit new match history and its queued Discord posts together."""
+        """Commit match history, position records and queued result posts together."""
         cid = club_id()
         quiet_key = f"club:quiet:{cid}"
         with connect() as conn:
@@ -491,30 +493,28 @@ class MatchdayCog(commands.Cog):
                     "ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value",
                     (quiet_key,),
                 )
+            linked_players = set()
+            if new and guild_id:
+                from positions import track_matches
+                linked_players = track_matches(conn, guild_id, new)
             if new and not quiet and guild_id and state["posting"] != "0":
                 queued_at = int(time.time())
                 conn.executemany(
                     "INSERT OR IGNORE INTO matchday_outbox VALUES (?,?,?,?)",
                     [(guild_id, cid, match.match_id, queued_at) for match in new],
                 )
-        return quiet, new, voided
+        return quiet, new, voided, linked_players
 
     async def _poll_club(self, raw_matches, guild, guild_id, complete, observed):
         if raw_matches and guild_id:
             self._migrate_old_poll_channel(guild_id)
-        quiet, new, voided = await asyncio.to_thread(
+        quiet, new, voided, linked_players = await asyncio.to_thread(
             self._save_polled_matches, raw_matches or [], guild_id, complete
         )
-        pending = set()
         if new:
             self.last_new_at = time.time()
             log.info("[%s] %d new match(es)%s", club_name(), len(new),
                      " (initial backfill, not posting)" if quiet else "")
-            self._linked_in.clear()
-            self._unlinked.clear()
-            if guild_id:
-                for match in new:
-                    pending.update(self._log_rotation(guild_id, match))
 
         if guild_id and (not quiet or not new):
             await self._deliver_result_queue(guild_id, fresh=new, observed=observed)
@@ -531,8 +531,7 @@ class MatchdayCog(commands.Cog):
                     log.warning("Couldn't post the void-game note")
         pos_cog = self.bot.get_cog("PositionsCog")
         if new and not quiet and pos_cog and guild:
-            ids = {did for match in new for did in self._linked_in.get(match.match_id, [])}
-            await pos_cog.check_notes(guild, sorted(ids - pending))
+            await pos_cog.check_notes(guild, sorted(linked_players))
         return quiet, new
 
     async def _announce_records(self, jobs: list):
@@ -571,31 +570,40 @@ class MatchdayCog(commands.Cog):
         except Exception:
             log.exception("Badge check failed")
 
-    def _log_rotation(self, guild_id: str, pm: md.ParsedMatch) -> dict[str, str]:
-        """
-        Log a separately sourced exact position or Unknown; never ask after a match.
-        EA match roles stay in match_players and are not replaced by preferences.
-        """
-        if is_match_processed(guild_id, club_name(), pm.match_id):
-            return {}  # already logged (e.g. by the old rotation poller)
-        import positions as POS
-        linked,unmatched=[],[]
-        links = {name.casefold(): did for did, name in get_all_links(guild_id).items()}
-        when=datetime.fromtimestamp(pm.ts,timezone.utc).isoformat() if pm.ts else datetime.now(timezone.utc).isoformat()
-        for player in pm.players:
-            did=links.get(player.name.casefold())
-            if not did:
-                unmatched.append(player.name)
-                continue
-            result=POS.detect_position(guild_id,did,player.pos,pm.ts,player.exact_position)
-            POS.record_position(guild_id,did,pm.match_id,result,when)
-            linked.append(did)
-        mark_match_processed(guild_id, club_name(), pm.match_id)
-        if unmatched:
-            log.info(f"Match {pm.match_id}: not linked — {', '.join(unmatched)}")
-        self._linked_in[pm.match_id] = linked
-        self._unlinked[pm.match_id] = unmatched
-        return {}
+    @staticmethod
+    def _clubs_with_due_results(guild_id):
+        now = int(time.time())
+        with connect() as conn:
+            return [dict(row) for row in conn.execute(
+                """SELECT c.club_id, c.name FROM monitored_clubs c
+                   WHERE c.enabled=1 AND EXISTS (
+                       SELECT 1 FROM matchday_outbox q
+                       LEFT JOIN delivery_jobs j
+                         ON j.kind='result' AND j.job_key=q.guild_id || ':' || q.club_id
+                       WHERE q.guild_id=? AND q.club_id=c.club_id
+                         AND COALESCE(j.next_attempt, q.queued_at + ?) <= ?
+                   )""",
+                (guild_id, RESULT_QUEUE_GRACE, now),
+            )]
+
+    @tasks.loop(seconds=RESULT_RETRY_INTERVAL)
+    @survive
+    async def result_retry_loop(self):
+        guild = self.home_guild()
+        if guild is None:
+            return
+        guild_id = str(guild.id)
+        clubs = await asyncio.to_thread(self._clubs_with_due_results, guild_id)
+        for club in clubs:
+            with club_scope(club):
+                try:
+                    await self._deliver_result_queue(guild_id)
+                except Exception:
+                    log.exception("Queued result delivery failed: %s", club["name"])
+
+    @result_retry_loop.before_loop
+    async def _before_result_retry_loop(self):
+        await self.bot.wait_until_ready()
 
     def _prepare_result_delivery(self, guild_id):
         """Check retry eligibility before loading queued match payloads."""
@@ -645,6 +653,11 @@ class MatchdayCog(commands.Cog):
 
     async def _deliver_result_queue(self, guild_id, *, fresh=(), observed=None):
         """Retry only explicitly queued result posts, never old saved history."""
+        locks = self.__dict__.setdefault("_result_locks", {})
+        async with locks.setdefault(club_id(), asyncio.Lock()):
+            await self._send_queued_results(guild_id, fresh=fresh, observed=observed)
+
+    async def _send_queued_results(self, guild_id, *, fresh, observed):
         job, rows = await asyncio.to_thread(self._prepare_result_delivery, guild_id)
         if not rows:
             if job:
@@ -657,23 +670,24 @@ class MatchdayCog(commands.Cog):
             delivery.fail(job,RuntimeError('Result channel unavailable'))
             return
         fresh_by_id = {match.match_id: match for match in fresh}
-        games = [
-            fresh_by_id.get(row["match_id"]) or md.parse_match(json.loads(row["raw_json"]), club_id())
-            for row in rows if row["raw_json"]
-        ]
-        games = [match for match in games if match is not None]
-        if games:
-            try:
-                success=await self._post_results(
-                    channel, games, guild_id, observed=observed, fresh_ids=fresh_by_id
-                )
-            except Exception as exc:
-                delivery.fail(job,exc)
-                raise
-            if success is False:
-                delivery.fail(job,RuntimeError('Discord result delivery failed'))
-            else:
-                delivery.ack('result',key)
+        try:
+            games = [
+                fresh_by_id.get(row["match_id"]) or md.parse_match(json.loads(row["raw_json"]), club_id())
+                for row in rows if row["raw_json"]
+            ]
+            games = [match for match in games if match is not None]
+            if not games:
+                raise ValueError("No usable match payloads in the result queue")
+            success = await self._post_results(
+                channel, games, guild_id, observed=observed, fresh_ids=fresh_by_id
+            )
+        except Exception as exc:
+            delivery.fail(job, exc)
+            raise
+        if success is False:
+            delivery.fail(job, RuntimeError("Discord result delivery failed"))
+        else:
+            delivery.ack("result", key)
 
     def _ack_results(self, guild_id, games):
         if guild_id and games:
