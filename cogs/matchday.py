@@ -247,12 +247,14 @@ class MatchdayCog(commands.Cog):
 
         # 1. squad members sitting in a voice channel together
         if guild:
-            linked = set(get_all_links(str(guild.id)))
-            for vc in guild.voice_channels:
-                humans = [m for m in vc.members if not m.bot]
-                squad = [m for m in humans if str(m.id) in linked] if linked else humans
-                if len(squad) >= VOICE_ACTIVE_PLAYERS:
-                    return f"{len(squad)} squad members in 🔊 {vc.name}"
+            candidates = [(vc.name, [m for m in vc.members if not m.bot]) for vc in guild.voice_channels]
+            candidates = [(name, humans) for name, humans in candidates if len(humans) >= VOICE_ACTIVE_PLAYERS]
+            if candidates:
+                linked = get_all_links(str(guild.id))
+                for name, humans in candidates:
+                    count = sum(str(member.id) in linked for member in humans) if linked else len(humans)
+                    if count >= VOICE_ACTIVE_PLAYERS:
+                        return f"{count} squad members in voice ({name})"
 
         # 2. someone's Discord status says they're playing EA FC (needs ENABLE_PRESENCE=1)
         if guild and self.bot.intents.presences:
@@ -261,14 +263,19 @@ class MatchdayCog(commands.Cog):
                     return f"{m.display_name} is playing EA FC"
 
         # 3. a match finished recently (you're probably mid-session)
-        last = max((md.latest_match_ts(c['club_id']) or 0 for c in monitored_clubs()), default=0)
-        if last and now - last < window:
-            return "played a match recently"
-
-        # 4. a /session is on (15 min before kick-off to ~3h after)
-        if not guild:
-            return None
         with connect() as conn:
+            recent = conn.execute(
+                """SELECT 1 FROM monitored_clubs c WHERE c.enabled=1 AND EXISTS (
+                       SELECT 1 FROM matches m WHERE m.club_id=c.club_id AND m.ts>?
+                   ) LIMIT 1""",
+                (now - window,),
+            ).fetchone()
+            if recent:
+                return "played a match recently"
+
+            if not guild:
+                return None
+            # A session is on from 15 minutes before kick-off to the end of its activity window.
             row = conn.execute(
                 "SELECT 1 FROM sessions s WHERE guild_id=? AND cancelled=0 AND starts_at BETWEEN ? AND ? "
                 "AND NOT EXISTS (SELECT 1 FROM session_history h WHERE h.session_id=s.id) LIMIT 1",
@@ -290,10 +297,15 @@ class MatchdayCog(commands.Cog):
 
     @tasks.loop(seconds=15)
     async def ticker(self):
-        if self._polling or time.time() < self.next_poll_at:
+        if self._polling:
+            return
+        now = time.time()
+        earliest = (self.last_poll_at or 0) + min(POLL_ACTIVE_MINUTES, POLL_IDLE_MINUTES) * 60
+        if now < earliest:
             return
         try:
-            await self.poll_once()
+            if now >= self.next_poll_at:
+                await self.poll_once()
         except Exception:
             log.exception("Match tracker poll failed")
 
@@ -585,29 +597,60 @@ class MatchdayCog(commands.Cog):
         self._unlinked[pm.match_id] = unmatched
         return {}
 
+    def _prepare_result_delivery(self, guild_id):
+        """Check retry eligibility before loading queued match payloads."""
+        cid = club_id()
+        key = f"{guild_id}:{cid}"
+        now = int(time.time())
+        with connect() as conn:
+            posting = conn.execute(
+                "SELECT value FROM settings WHERE guild_id=? AND key=?", (guild_id, K_ENABLED)
+            ).fetchone()
+            if posting and posting["value"] == "0":
+                conn.execute("DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=?", (guild_id, cid))
+                conn.execute("DELETE FROM delivery_jobs WHERE kind='result' AND job_key=?", (key,))
+                return None, []
+
+            queued = conn.execute(
+                "SELECT MIN(queued_at) FROM matchday_outbox WHERE guild_id=? AND club_id=?", (guild_id, cid)
+            ).fetchone()[0]
+            job = conn.execute(
+                "SELECT * FROM delivery_jobs WHERE kind='result' AND job_key=?", (key,)
+            ).fetchone()
+            if queued is not None and queued < now - 86400:
+                conn.execute("DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=? AND queued_at<?",
+                             (guild_id, cid, now - 86400))
+                queued = conn.execute(
+                    "SELECT MIN(queued_at) FROM matchday_outbox WHERE guild_id=? AND club_id=?", (guild_id, cid)
+                ).fetchone()[0]
+            if job and (queued is None or job["expires_at"] <= now):
+                conn.execute("DELETE FROM delivery_jobs WHERE kind='result' AND job_key=?", (key,))
+                job = None
+            if queued is None:
+                return None, []
+            if job is None:
+                delivery.enqueue("result", key, guild_id, cid, {}, conn=conn)
+                job = conn.execute(
+                    "SELECT * FROM delivery_jobs WHERE kind='result' AND job_key=?", (key,)
+                ).fetchone()
+            if not delivery.due(job):
+                return None, []
+            rows = conn.execute(
+                """SELECT m.match_id, m.raw_json FROM matchday_outbox q
+                   JOIN matches m ON m.club_id=q.club_id AND m.match_id=q.match_id
+                   WHERE q.guild_id=? AND q.club_id=? ORDER BY m.ts,m.match_id LIMIT 100""",
+                (guild_id, cid),
+            ).fetchall()
+            return job, rows
+
     async def _deliver_result_queue(self, guild_id, *, fresh=(), observed=None):
         """Retry only explicitly queued result posts, never old saved history."""
-        key=f'{guild_id}:{club_id()}'
-        with connect() as conn:
-            if not self.posting_enabled(guild_id):
-                conn.execute('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=?',(guild_id,club_id()))
-                conn.execute("DELETE FROM delivery_jobs WHERE kind='result' AND job_key=?",(key,))
-                return
-            conn.execute('DELETE FROM matchday_outbox WHERE guild_id=? AND club_id=? AND queued_at<?',
-                         (guild_id,club_id(),int(time.time())-86400))
-            rows=conn.execute('SELECT m.match_id,m.raw_json FROM matchday_outbox q JOIN matches m ON m.club_id=q.club_id AND m.match_id=q.match_id '
-                'WHERE q.guild_id=? AND q.club_id=? ORDER BY m.ts,m.match_id LIMIT 100',(guild_id,club_id())).fetchall()
+        job, rows = await asyncio.to_thread(self._prepare_result_delivery, guild_id)
         if not rows:
-            delivery.ack('result',key)
+            if job:
+                delivery.ack("result", job["job_key"])
             return
-        delivery.enqueue('result',key,guild_id,club_id(),{})
-        job=delivery.get('result',key)
-        if job and job['expires_at']<=time.time():
-            delivery.ack('result',key)
-            delivery.enqueue('result',key,guild_id,club_id(),{})
-            job=delivery.get('result',key)
-        if not delivery.due(job):
-            return
+        key = job["job_key"]
         cid=self.channel_id_for(guild_id)
         channel=await self._channel(cid) if cid else None
         if channel is None:

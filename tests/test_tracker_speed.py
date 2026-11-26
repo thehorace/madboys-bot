@@ -236,6 +236,33 @@ class TrackerSpeedTests(TMC.MultiClubTests):
                 queued = conn.execute("SELECT match_id FROM matchday_outbox ORDER BY match_id").fetchall()
                 self.assertEqual([row["match_id"] for row in queued], ["first", "second"])
 
+    def test_result_backoff_skips_match_payload_query(self):
+        from contextlib import contextmanager
+        self.seed()
+        now = int(time.time())
+        with db.connect() as conn:
+            conn.execute("INSERT INTO matchday_outbox VALUES (?,?,?,?)", ("10", CLUB_ID, "baseline", now))
+            conn.execute("""
+                INSERT INTO delivery_jobs (kind,job_key,guild_id,club_id,payload,queued_at,expires_at,next_attempt)
+                VALUES ('result',?,'10',?,'{}',?,?,?)
+            """, (f"10:{CLUB_ID}", CLUB_ID, now, now + 3600, now + 30))
+
+        queries = []
+
+        @contextmanager
+        def traced_connect():
+            with db.connect() as conn:
+                conn.set_trace_callback(queries.append)
+                yield conn
+
+        with clubs.club_scope(self.primary), patch.object(matchday, "connect", traced_connect):
+            self.assertEqual(self.tracker._prepare_result_delivery("10"), (None, []))
+            self.assertFalse(any("raw_json" in query for query in queries))
+            with patch.object(matchday.time, "time", return_value=now + 31):
+                job, rows = self.tracker._prepare_result_delivery("10")
+            self.assertEqual(job["job_key"], f"10:{CLUB_ID}")
+            self.assertEqual([row["match_id"] for row in rows], ["baseline"])
+
     async def test_expired_and_disabled_result_queues_do_not_replay_history(self):
         self.seed()
         with db.connect() as conn:

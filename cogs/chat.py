@@ -15,12 +15,13 @@ Env vars (set in Railway):
 """
 
 import asyncio
+import json
 import logging
 import math
 import os
 import re
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 
 import aiohttp
@@ -44,6 +45,7 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:ge
 BOT_PERSONALITY = (os.getenv("BOT_PERSONALITY") or
                    "Be friendly, a bit cheeky, and keep replies short.").strip()
 
+HISTORY_CONTEXTS = 128
 HISTORY_PAIRS = 6          # remember the last 6 question/answer pairs per channel
 MAX_TOOL_ROUNDS = 5        # how many lookups Gemini may chain for one question
 DISCORD_LIMIT = 2000
@@ -69,19 +71,26 @@ def _date(ts):
 
 def _resolve_player(club_id, name):
     """Find the stored EA name that best matches what was typed. Returns (name, candidates)."""
-    name = (name or "").strip().lstrip("@")
+    name = (name or "").strip().lstrip("@").strip()
+    if not name:
+        return None, []
     with connect() as conn:
+        exact = conn.execute(
+            "SELECT name FROM match_players WHERE club_id=? AND name=? COLLATE NOCASE LIMIT 1",
+            (club_id, name),
+        ).fetchone()
+        if exact:
+            return exact["name"], []
         rows = conn.execute(
-            "SELECT DISTINCT name FROM match_players WHERE club_id=? AND name LIKE ? COLLATE NOCASE",
-            (club_id, f"%{name}%"),
+            """SELECT MIN(name) AS name FROM match_players
+               WHERE club_id=? AND INSTR(LOWER(name), LOWER(?)) > 0
+               GROUP BY name COLLATE NOCASE ORDER BY name COLLATE NOCASE LIMIT 15""",
+            (club_id, name),
         ).fetchall()
     names = [r["name"] for r in rows]
-    exact = [n for n in names if n.lower() == name.lower()]
-    if exact:
-        return exact[0], []
     if len(names) == 1:
         return names[0], []
-    return None, names[:15]
+    return None, names
 
 
 def tool_list_players(club_id, days=0):
@@ -354,7 +363,7 @@ def _system_prompt(club_name, asker, asker_ea, catalogue):
 class ChatCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.history = defaultdict(lambda: deque(maxlen=HISTORY_PAIRS * 2))
+        self.history = OrderedDict()
         self.session: aiohttp.ClientSession | None = None
         self.api_status = "Waiting for first request" if GEMINI_API_KEY else "GEMINI_API_KEY is missing"
         if not GEMINI_API_KEY:
@@ -395,11 +404,20 @@ class ChatCog(commands.Cog):
         self.api_status = f"Responding via {model}"
         return status, data
 
+    def _remember(self, key, user_turn, reply):
+        history = self.history.setdefault(key, deque(maxlen=HISTORY_PAIRS * 2))
+        history.extend((user_turn, {"role": "model", "parts": [{"text": reply}]}))
+        self.history.move_to_end(key)
+        if len(self.history) > HISTORY_CONTEXTS:
+            self.history.popitem(last=False)
+
     async def _answer(self, message: discord.Message, prompt: str) -> str | PlayerComparison | FeatureReply:
         guild_id = str(message.guild.id) if message.guild else ""
         club = selected_club(guild_id, message.author.id) if guild_id else {"club_id": None, "name": "the club"}
         asker_ea = get_link(guild_id, str(message.author.id)) if guild_id else None
 
+        history_key = (message.channel.id, getattr(message.author, "id", None), club["club_id"])
+        user_turn = {"role": "user", "parts": [{"text": prompt}]}
         catalogue = command_catalog(self.bot, message.guild)
         twin_command = FEATURE_COMMANDS["player_twin"]
         availability = (
@@ -421,14 +439,11 @@ class ChatCog(commands.Cog):
                 player=linked.group(1) if linked else player, asker_ea=asker_ea,
             )
             reply = FeatureReply(twin_command, screen)
-            self.history[message.channel.id].extend((
-                {"role": "user", "parts": [{"text": prompt}]},
-                {"role": "model", "parts": [{"text": reply.summary()}]},
-            ))
+            self._remember(history_key, user_turn, reply.summary())
             return reply
 
-        history = self.history[message.channel.id]
-        user_turn = {"role": "user", "parts": [{"text": prompt}]}
+        history = self.history.get(history_key, ())
+        lookups = {}
         body = {
             "systemInstruction": {"parts": [{"text": _system_prompt(club["name"], message.author.display_name, asker_ea, catalogue)}]},
             "contents": [*history, user_turn],
@@ -437,18 +452,18 @@ class ChatCog(commands.Cog):
 
         try:
             async with asyncio.timeout(25):
-                status, reply = await self._generate_reply(body, club, GEMINI_MODEL, guild_id, asker_ea, catalogue)
+                status, reply = await self._generate_reply(body, club, GEMINI_MODEL, guild_id, asker_ea, catalogue, lookups)
                 if (status == 404 or status == 429 or 500 <= status < 600) and (
                     GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL
                 ):
-                    status, reply = await self._generate_reply(body, club, GEMINI_FALLBACK_MODEL, guild_id, asker_ea, catalogue)
+                    status, reply = await self._generate_reply(body, club, GEMINI_FALLBACK_MODEL, guild_id, asker_ea, catalogue, lookups)
         except TimeoutError:
             self.api_status = "Chat request timed out"
             status, reply = 503, None
         if reply is not None:
             if status == 200:
                 history_text = reply.summary() if isinstance(reply, (PlayerComparison, FeatureReply)) else reply
-                history.extend((user_turn, {"role": "model", "parts": [{"text": history_text}]}))
+                self._remember(history_key, user_turn, history_text)
             return reply
         if status == 429:
             return "Gemini is rate-limited. You can still see your saved stats with `/stats`."
@@ -456,7 +471,7 @@ class ChatCog(commands.Cog):
             return "Gemini rejected the request. An admin can check Bot Status. Saved stats are available in `/stats`."
         return "Gemini is temporarily unavailable. Saved stats are still available in `/stats`."
 
-    async def _generate_reply(self, body, club, model, guild_id, asker_ea, catalogue):
+    async def _generate_reply(self, body, club, model, guild_id, asker_ea, catalogue, lookups):
         club_id = club["club_id"]
         # Start the fallback from plain chat history so it never receives another model's signatures.
         contents = list(body["contents"])
@@ -494,7 +509,10 @@ class ChatCog(commands.Cog):
                             return 200, FeatureReply(command, screen)
                         result = {"error": "That report is unavailable in this context. Use the registered slash commands."}
                     elif fn and club_id:
-                        result = await asyncio.to_thread(fn, club_id, **args)
+                        key = (name, json.dumps(args, sort_keys=True))
+                        if key not in lookups:
+                            lookups[key] = await asyncio.to_thread(fn, club_id, **args)
+                        result = lookups[key]
                     else:
                         result = {"error": "Lookup not available here."}
                 except Exception:

@@ -16,7 +16,7 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cog = chat.ChatCog(SimpleNamespace())
         self.message = SimpleNamespace(
-            guild=None, author=SimpleNamespace(display_name="Fauz"), channel=SimpleNamespace(id=42)
+            guild=None, author=SimpleNamespace(id=50, display_name="Fauz"), channel=SimpleNamespace(id=42)
         )
         models = patch.multiple(chat, GEMINI_MODEL="primary", GEMINI_FALLBACK_MODEL="fallback")
         models.start()
@@ -38,13 +38,13 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
         result = followup.args[0]["contents"][2]["parts"][0]["functionResponse"]
         self.assertEqual(result["id"], "call_1")
         self.assertEqual(fallback.args[0]["contents"], first.args[0]["contents"])
-        self.assertEqual(len(self.cog.history[42]), 2)
+        self.assertEqual(len(self.cog.history[(42, 50, None)]), 2)
 
     async def test_permission_failure_does_not_try_another_model(self):
         self.cog._call_gemini = AsyncMock(return_value=(403, None))
         self.assertIn("Bot Status", await self.cog._answer(self.message, "Hi"))
         self.cog._call_gemini.assert_awaited_once()
-        self.assertEqual(len(self.cog.history[42]), 0)
+        self.assertFalse(self.cog.history)
 
 
     async def test_comparison_uses_saved_stats_and_replies_with_one_attachment(self):
@@ -67,7 +67,7 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(card.title, "thehorace vs PlayForKeeps")
         self.assertEqual(card.period, "Past 7 days")
         self.assertIn(("Pass accuracy", "—", "—"), card.rows())
-        self.assertIn("6.51", self.cog.history[42][-1]["parts"][0]["text"])
+        self.assertIn("6.51", self.cog.history[(42, 50, 1)][-1]["parts"][0]["text"])
         self.cog._call_gemini.assert_awaited_once()
 
         async def inspect_attachment(*args, file, **kwargs):
@@ -143,3 +143,36 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply, card)
         resolve.assert_called_once_with("graman")
         build.assert_awaited_once_with("Graman1302")
+
+
+    async def test_history_stays_with_the_asker_and_club(self):
+        self.message.guild = SimpleNamespace(id=10)
+        self.cog._call_gemini = AsyncMock(return_value=(200, response({"text": "Answer"})))
+        madboys = {"club_id": 1, "name": "MADBOYS"}
+        graysboys = {"club_id": 2, "name": "GRAYSBOYS"}
+        with patch.object(chat, "selected_club", side_effect=[madboys, madboys, graysboys, madboys]), \
+             patch.object(chat, "get_link", return_value=None):
+            await self.cog._answer(self.message, "My stats")
+            self.message.author.id = 51
+            await self.cog._answer(self.message, "My goals")
+            self.message.author.id = 50
+            await self.cog._answer(self.message, "My goals in GRAYSBOYS")
+            await self.cog._answer(self.message, "And my goals?")
+        requests = [call.args[0]["contents"] for call in self.cog._call_gemini.await_args_list]
+        self.assertEqual([len(history) for history in requests], [1, 1, 1, 3])
+        self.assertEqual(requests[-1][0]["parts"][0]["text"], "My stats")
+
+    async def test_repeated_lookup_is_reused_on_fallback(self):
+        self.message.guild = SimpleNamespace(id=10)
+        club = {"club_id": 1, "name": "MADBOYS"}
+        call = response({"functionCall": {"name": "get_recent_results", "args": {"limit": 3}}})
+        self.cog._call_gemini = AsyncMock(side_effect=[
+            (200, call), (503, None), (200, call), (200, response({"text": "Results"})),
+        ])
+        from unittest.mock import Mock
+        lookup = Mock(return_value={"matches": []})
+        with patch.object(chat, "selected_club", return_value=club), \
+             patch.object(chat, "get_link", return_value=None), \
+             patch.dict(chat.TOOLS, {"get_recent_results": lookup}):
+            self.assertEqual(await self.cog._answer(self.message, "Last three results"), "Results")
+        lookup.assert_called_once_with(1, limit=3)
